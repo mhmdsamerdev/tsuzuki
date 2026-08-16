@@ -27,6 +27,7 @@ pub struct Thresholds {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Roots {
     pub paths: Vec<String>,
+    pub video_extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -47,7 +48,13 @@ impl Default for Config {
                 completion_remaining_seconds: 180,
                 auto_pause_days: 0,
             },
-            roots: Roots { paths: Vec::new() },
+            roots: Roots {
+                paths: Vec::new(),
+                video_extensions: ["mkv", "mp4", "avi", "webm", "mov"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            },
             mpv: Mpv {
                 watch_later_dir: String::new(),
             },
@@ -139,6 +146,10 @@ mod tests {
         assert_eq!(config.thresholds.completion_remaining_seconds, 180);
         assert_eq!(config.thresholds.auto_pause_days, 0);
         assert!(config.roots.paths.is_empty());
+        assert_eq!(
+            config.roots.video_extensions,
+            vec!["mkv", "mp4", "avi", "webm", "mov"]
+        );
         assert_eq!(config.mpv.watch_later_dir, "");
         assert_eq!(config.mal.client_id, "");
     }

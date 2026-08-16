@@ -138,6 +138,26 @@ it would be exactly the kind of self-inflicted complexity "boring over
 clever" (§2) exists to avoid. Don't extend Tsuzuki's own error-message
 layer beyond the one gap this closes.
 
+### Video file filtering within a series tree
+The ordering tree under a series only includes files matching a
+configurable video-extension allowlist (`[roots] video_extensions`,
+default `["mkv", "mp4", "avi", "webm", "mov"]`) — sidecar files common in
+release folders (`.srt`/`.ass` subtitles, `.nfo`, cover art, samples)
+would otherwise shift natural-sort positions and corrupt "next episode"
+logic. This is a narrow exception to "no content classification
+anywhere" (§2/§3) — it's plausibly-a-video-file, not "is this an episode
+of this story," and it's explicit + user-overridable rather than a
+silent heuristic, consistent with §8's "every tunable is genuinely
+configurable." Directories are never filtered by this list — only files.
+
+### `tsuzuki add` validation and idempotency
+`add` validates the path exists and is a directory at add-time, exiting
+non-zero with a clear error if not — doesn't defer this to `doctor`.
+Adding an already-tracked root is not an error: it's idempotent, exits 0,
+and prints which case occurred (already tracked vs. newly added) so the
+user gets confirmation either way without a script treating a harmless
+re-run as a failure.
+
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
 about user intent (on a break vs. abandoned vs. waiting for episodes to

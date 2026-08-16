@@ -252,6 +252,7 @@ auto_pause_days = 0                  # 0 = never auto-pause. Nonzero = pause aft
 
 [roots]
 paths = ["~/Anime", "~/Anime/Rewatches"]
+video_extensions = ["mkv", "mp4", "avi", "webm", "mov"]  # only these extensions count as episodes when building a series' ordering tree
 
 [mpv]
 watch_later_dir = ""                 # empty = use OS-default candidate list
