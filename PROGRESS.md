@@ -32,9 +32,30 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     non-numeric names fall back to alphabetical). Confirmed correct
     including the mixed-level case (design.md §5's "Mixed level"
     paragraph).
-  - 25 unit tests total, all passing, zero clippy/fmt warnings. Manually
-    verified against fabricated trees, including a scratch HOME proving
-    `add ~/Anime` persists the literal string `~/Anime` and that
+  - `series.rs` now follows symlinks (stat semantics via `fs::metadata`,
+    not `DirEntry::file_type()`'s lstat) for both `series_in_root()` and
+    `ordered_episodes()`, with cycle protection in `ordered_episodes()`'s
+    recursive walk (a `HashSet` of canonicalized real paths already
+    visited, seeded with the series root itself) — fixes the symlink-
+    blindness bug flagged during the gap audit. A broken symlink or
+    stat-race is silently skipped rather than aborting the whole walk.
+  - `config.rs` normalizes `video_extensions` on read — a leading `.` is
+    stripped in memory (`.mkv` and `mkv` behave identically); the on-disk
+    file is never silently rewritten, only `write()` changes it.
+  - 42 unit tests total (37 → 42: symlinked-series-folder enumeration,
+    symlinked-episode-file inclusion — both confirmed to genuinely fail
+    against the pre-fix code, not just pass now — a symlink-cycle test
+    bounded by a 5s timeout so a regression fails loudly instead of
+    hanging CI, and two config.rs tests for dot-stripping normalization),
+    all passing, zero clippy/fmt warnings.
+  - 25 unit tests total (post-Phase-1) grew to 37 via a gap-audit pass
+    covering the full `add` idempotency matrix — trailing slash + `~`,
+    `..`-resolution, symlinked root, symlinked home directory, case-
+    sensitivity — plus ordering boundary conditions: empty directory,
+    non-video-only directory, no-subdirectories root, 3-level-deep
+    recursion, empty `video_extensions`, and a leading-dot config entry.
+    Manually verified against fabricated trees, including a scratch HOME
+    proving `add ~/Anime` persists the literal string `~/Anime` and that
     idempotency detection matches correctly across `~`-form and
     absolute-form for the same root.
 
