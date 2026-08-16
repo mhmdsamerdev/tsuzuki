@@ -58,6 +58,11 @@ pub fn read(path: &Path) -> io::Result<State> {
 /// Writes `state` to `path` atomically: serialize to a temp file created in
 /// the same directory as `path`, then rename over it. A kill mid-write
 /// leaves either the old file or the new one, never a half-written one.
+///
+/// Unused until a later phase's commands actually mutate state (pause,
+/// drop, sync, ...) — no Phase 0 stub calls this, and reading a missing
+/// state.toml must not write one, so nothing exercises it yet.
+#[allow(dead_code)]
 pub fn write(path: &Path, state: &State) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(

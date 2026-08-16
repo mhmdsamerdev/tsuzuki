@@ -26,14 +26,6 @@ fn main() -> ExitCode {
         Ok(path) => path,
         Err(e) => return fail(&format!("could not resolve state path: {e}")),
     };
-    if !state_path.exists()
-        && let Err(e) = state::write(&state_path, &state::State::default())
-    {
-        return fail(&format!(
-            "could not write state at {}: {e}",
-            state_path.display()
-        ));
-    }
     if let Err(e) = state::read(&state_path) {
         return fail(&format!(
             "could not read state at {}: {e}",
