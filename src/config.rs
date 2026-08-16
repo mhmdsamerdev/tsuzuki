@@ -140,6 +140,28 @@ mod tests {
     }
 
     #[test]
+    fn write_fails_gracefully_when_parent_path_is_occupied_by_a_file() {
+        // config.toml is deliberately a plain (non-atomic) write — see the
+        // doc comment on `write` — so there's no rename-swap guarantee to
+        // test the way state.rs's write is tested. What's worth locking in
+        // instead: a failure here returns `Err` rather than panicking, and
+        // (since `fs::create_dir_all` fails before `fs::write` is ever
+        // reached) never touches an existing file at a colliding path.
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("not-a-directory");
+        fs::write(&occupied, b"unrelated file, blocks the parent dir").unwrap();
+        let config_path = occupied.join("config.toml");
+
+        let result = write(&config_path, &Config::default());
+        assert!(result.is_err());
+        // The blocking file itself must be untouched.
+        assert_eq!(
+            fs::read(&occupied).unwrap(),
+            b"unrelated file, blocks the parent dir"
+        );
+    }
+
+    #[test]
     fn defaults_match_design_doc() {
         let config = Config::default();
         assert_eq!(config.thresholds.resume_seconds, 120);

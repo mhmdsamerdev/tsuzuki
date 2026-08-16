@@ -204,8 +204,127 @@ mod tests {
         with_slash.push("/");
         let outcome = add_root(&mut config, Path::new(&with_slash)).unwrap();
 
-        assert!(matches!(outcome, AddOutcome::AlreadyTracked(_)));
+        // Exact value, not just the variant — `AlreadyTracked` must hold
+        // the trailing-slash path exactly as passed to this second call,
+        // per the literal-persistence contract (it just isn't written to
+        // disk in this branch).
+        assert_eq!(
+            outcome,
+            AddOutcome::AlreadyTracked(PathBuf::from(&with_slash))
+        );
         assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[test]
+    fn re_adding_a_tilde_path_with_a_trailing_slash_is_recognized_as_already_tracked() {
+        let home = tempdir().unwrap();
+        fs::create_dir_all(home.path().join("Anime")).unwrap();
+
+        let mut config = Config::default();
+        add_root_with_home(&mut config, Path::new("~/Anime"), Some(home.path())).unwrap();
+
+        let outcome =
+            add_root_with_home(&mut config, Path::new("~/Anime/"), Some(home.path())).unwrap();
+
+        assert_eq!(
+            outcome,
+            AddOutcome::AlreadyTracked(PathBuf::from("~/Anime/"))
+        );
+        assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[test]
+    fn a_dotdot_path_resolving_to_an_already_tracked_root_is_recognized() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let sibling = root.join("Rewatches");
+        fs::create_dir_all(&sibling).unwrap();
+
+        let mut config = Config::default();
+        add_root(&mut config, &root).unwrap();
+
+        // `~/Anime/Rewatches/..` resolves (via canonicalize) to the same
+        // directory as `~/Anime` — `fs::canonicalize` resolves `..`
+        // components, so the in-memory comparison must catch this even
+        // though the two strings share no literal prefix relationship.
+        let dotdot_path = sibling.join("..");
+        let outcome = add_root(&mut config, &dotdot_path).unwrap();
+
+        assert_eq!(outcome, AddOutcome::AlreadyTracked(dotdot_path));
+        assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_an_already_tracked_root_is_recognized() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real_root = dir.path().join("real-anime");
+        fs::create_dir_all(&real_root).unwrap();
+        let link_path = dir.path().join("linked-anime");
+        symlink(&real_root, &link_path).unwrap();
+
+        let mut config = Config::default();
+        add_root(&mut config, &real_root).unwrap();
+
+        // A symlink pointing at the same directory resolves to the same
+        // canonical path via `fs::canonicalize` — registering it a second
+        // time under the symlinked name must be recognized as the same
+        // root, not silently create a duplicate that would later double
+        // up series enumeration.
+        let outcome = add_root(&mut config, &link_path).unwrap();
+
+        assert_eq!(outcome, AddOutcome::AlreadyTracked(link_path));
+        assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn already_tracked_matches_through_a_symlinked_home_directory() {
+        use std::os::unix::fs::symlink;
+
+        let real_home = tempdir().unwrap();
+        fs::create_dir_all(real_home.path().join("Anime")).unwrap();
+
+        let link_parent = tempdir().unwrap();
+        let home_link = link_parent.path().join("home-link");
+        symlink(real_home.path(), &home_link).unwrap();
+
+        let mut config = Config::default();
+        // First add via `~/Anime`, where `~` resolves through a symlinked
+        // home directory.
+        add_root_with_home(&mut config, Path::new("~/Anime"), Some(&home_link)).unwrap();
+        assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
+
+        // Second add uses the fully-resolved real path, bypassing the
+        // symlinked home entirely — canonicalization must still land on
+        // the same real directory for both.
+        let real_anime = real_home.path().join("Anime");
+        let outcome = add_root_with_home(&mut config, &real_anime, Some(&home_link)).unwrap();
+
+        assert_eq!(outcome, AddOutcome::AlreadyTracked(real_anime));
+        assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[test]
+    fn distinctly_cased_paths_are_treated_as_different_roots() {
+        // Linux filesystems are case-sensitive by default (v1 targets
+        // Linux only, design.md §10) — `Anime` and `anime` are genuinely
+        // different directories, and nothing in `normalize`/`expand_tilde`
+        // does any case-folding, so they must not be merged.
+        let dir = tempdir().unwrap();
+        let lower = dir.path().join("anime");
+        let upper = dir.path().join("Anime");
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).unwrap();
+
+        let mut config = Config::default();
+        add_root(&mut config, &lower).unwrap();
+        let outcome = add_root(&mut config, &upper).unwrap();
+
+        assert_eq!(outcome, AddOutcome::Added(upper));
+        assert_eq!(config.roots.paths.len(), 2);
     }
 
     #[test]

@@ -260,6 +260,111 @@ mod tests {
     }
 
     #[test]
+    fn ordered_episodes_on_an_empty_directory_returns_an_empty_vec() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Empty Series");
+        std_fs::create_dir_all(&series_path).unwrap();
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+        assert!(episodes.is_empty());
+    }
+
+    #[test]
+    fn ordered_episodes_with_only_non_video_files_returns_an_empty_vec() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Only Sidecars");
+        touch(&series_path.join("series.nfo"));
+        touch(&series_path.join("cover.jpg"));
+        touch(&series_path.join("episode.srt"));
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+        assert!(episodes.is_empty());
+    }
+
+    #[test]
+    fn series_in_root_with_no_subdirectories_returns_an_empty_vec() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Root");
+        // Only loose files directly under root, no series (directories) at
+        // all.
+        touch(&root.join("readme.txt"));
+        touch(&root.join("ep01.mkv"));
+
+        let series = series_in_root(&root).unwrap();
+        assert!(series.is_empty());
+    }
+
+    #[test]
+    fn ordering_recurses_genuinely_arbitrarily_deep_not_just_two_levels() {
+        // Every other ordering test nests exactly 2 levels deep (series
+        // root -> one subdirectory -> file). This fixture nests 3
+        // directories deep, with branching at the third level, to prove
+        // `walk` actually recurses rather than happening to work only for
+        // the shallow fixtures used elsewhere.
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Long Runner");
+        touch(
+            &series_path
+                .join("Arc 1")
+                .join("Part 1")
+                .join("Sub A")
+                .join("ep01.mkv"),
+        );
+        touch(
+            &series_path
+                .join("Arc 1")
+                .join("Part 1")
+                .join("Sub B")
+                .join("ep02.mkv"),
+        );
+        touch(&series_path.join("Arc 1").join("Part 2").join("ep03.mkv"));
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec![
+                "Arc 1/Part 1/Sub A/ep01.mkv",
+                "Arc 1/Part 1/Sub B/ep02.mkv",
+                "Arc 1/Part 2/ep03.mkv",
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_video_extensions_list_excludes_every_file() {
+        // An empty allowlist is an explicit user choice (however
+        // self-defeating) — per CLAUDE.md's "never infer" principle there's
+        // no fallback to the default list; every file is correctly excluded,
+        // not an error.
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("No Extensions Configured");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let episodes = ordered_episodes(&series_path, &[]).unwrap();
+        assert!(episodes.is_empty());
+    }
+
+    #[test]
+    fn leading_dot_in_configured_extension_does_not_match_bare_file_extension() {
+        // `Path::extension()` returns the extension without its leading
+        // dot, and `is_video_file` compares against `video_extensions`
+        // entries as-is with no normalization. A hand-edited config using
+        // ".mkv" instead of design.md §8's documented bare "mkv" form
+        // silently matches nothing — no error surfaced, consistent with
+        // how the rest of config.rs treats video_extensions (no
+        // validation/normalization on read). This test documents that
+        // contract so it isn't accidentally "fixed" into silent inference.
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Dotted Config");
+        touch(&series_path.join("ep01.mkv"));
+
+        let dotted_extensions = vec![".mkv".to_string()];
+        let episodes = ordered_episodes(&series_path, &dotted_extensions).unwrap();
+        assert!(episodes.is_empty());
+    }
+
+    #[test]
     fn directories_are_never_filtered_by_extension() {
         // A subdirectory literally named like a video file must still be
         // recursed into as a directory, not treated as (or excluded like) a
