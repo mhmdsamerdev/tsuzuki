@@ -1,0 +1,194 @@
+# CLAUDE.md — Tsuzuki
+
+Read this in full at the start of every session before touching code. It is
+the authoritative spec. If something here conflicts with what you remember
+from an earlier session, this file wins — it's kept current on purpose.
+
+Companion file: **`PROGRESS.md`** tracks which phase we're on and what's
+actually done. This file (`CLAUDE.md`) never contains status updates —
+only decisions and the reasoning that protects them. Check `PROGRESS.md`
+first to know where to resume; check `CLAUDE.md` to know how to build it.
+
+---
+
+## 1. What this is
+
+**Tsuzuki** ("continuation," 続き) is a local-first Rust CLI that remembers
+what the user was watching in mpv and resumes it with one command:
+`tsuzuki`. It is not a media player, library manager, or MAL replacement —
+it answers exactly one question: *what was I watching, where did I stop,
+and can you take me back there instantly?*
+
+Full product rationale lives in `docs/design.md` (the original design doc).
+This file only holds what changes how you should write code — read
+`docs/design.md` once at project start for the "why we're building this at
+all" narrative; come back here for every implementation decision.
+
+---
+
+## 2. Non-negotiable design principles
+
+These are load-bearing. Don't "improve" around them without flagging it to
+the user first — they are the reason the tool stays simple and predictable.
+
+- **Never infer, always require an explicit action.** No content
+  classification, no fuzzy matching decides anything automatically, no
+  heuristic guesses which files are episodes. If you find yourself writing
+  logic that guesses user intent, stop — that's very likely the wrong
+  design for this project specifically.
+- **Fixed thresholds, not percentages.** Resume/completion cutoffs are
+  flat seconds, not `%` of runtime. Don't refactor toward percentage-based
+  logic even if it looks "smarter" — different episode lengths would make
+  it inconsistent, which is exactly what the flat-threshold rule avoids.
+- **Natural sort is the sole authority for episode order**, always,
+  everywhere. Anitomy-parsed episode numbers annotate identity for sync —
+  they never reorder anything. If a bug looks like "wrong episode order,"
+  the fix belongs in the sort, not in giving Anitomy a say over ordering.
+- **Two-way MAL sync only ever takes the higher episode number.** Never
+  write a smaller number to MAL, in either direction. A push-only or
+  overwrite-down sync silently destroys progress the user made elsewhere —
+  this has to hold even in edge cases (partial fetch failures, retries).
+
+---
+
+## 3. Architecture decisions (with reasoning)
+
+### Series identity = depth-1 directory under a tracked root
+A series is *always* the immediate child of a tracked root — never
+detected by content, never configurable per-series. Season folders,
+release-tag folders, anything below depth 1 is opaque to Tsuzuki as a
+category and only feeds the natural-sort tree. If a folder layout doesn't
+fit (e.g. a `Rewatches/` layer), the answer is registering that layer as
+its own root (`tsuzuki add ~/Anime/Rewatches`) — not adding a
+depth-detection flag. Composable roots is the *general* escape hatch;
+don't add a special case for one folder shape when this already covers it.
+
+### State vs. config are two separate files
+`~/.config/tsuzuki/config.toml` (human-tunable, defaults, comments) and
+`~/.local/share/tsuzuki/state.toml` (machine-written, atomic). Don't merge
+them — config is meant to be hand-edited and versioned in dotfiles repos;
+state is not.
+
+### State file: single flat TOML, atomic write, not SQLite, not sharded
+Tsuzuki's state is small and bounded (dozens of series, not thousands of
+files) — full-parse-on-every-invocation is cheap, so there's no case for
+SQLite's complexity or mpv's per-file sharding. **Every write must be
+temp-file-then-rename**, never an in-place write — a kill mid-write must
+never leave a half-written state file. Any new state-writing code path
+must go through the same atomic-write helper; don't add a second write
+path that writes in place "just this once."
+
+### mpv `watch_later` reading, not IPC or launching mpv
+Tsuzuki never launches mpv or holds an IPC socket. It only reads mpv's own
+`watch_later` files after the fact. This means:
+- **`write-filename-in-watch-later-config=yes` is a hard prerequisite** —
+  without it, entries are only MD5 hashes of the path, which are
+  one-way and unrecoverable. `doctor` must check for this explicitly,
+  never assume it's set.
+- **Redirect entries (`# redirect entry`) must be filtered out** — they
+  come from opening a directory/playlist in mpv and contain no real
+  position. Silently including them would corrupt "most recent" logic.
+- **Candidate `watch_later` paths are a fixed list per OS/install method**
+  (native/Flatpak/Snap), merged freshest-file-wins — never environment
+  detection. See `docs/design.md` §4 for the exact path list; don't let
+  it drift out of sync with `doctor`'s checks.
+- Absence of a `watch_later` entry for a file that was clearly opened is
+  itself a completion signal (mpv doesn't write one if played to the
+  end) — don't treat "no entry" as "never watched" without checking this.
+
+### Thresholds are fixed seconds, both configurable, defaults 120s / 180s
+`resume_seconds = 120` (below this: start from 0, not a real bookmark),
+`completion_remaining_seconds = 180` (this close to the end: mark
+complete). Every tunable in the design doc must have a corresponding
+`[thresholds]`/`[roots]`/`[mpv]`/`[mal]` config field — a hardcoded value
+that isn't configurable is inference in disguise; don't add one without
+also wiring it into `config.toml` and `tsuzuki config`.
+
+### Exclusions run before ordering, always
+`tsuzuki exclude` removes files/dirs from the tree *before* the natural
+sort runs, not as a post-filter on results. If ordering logic and
+exclusion logic ever get combined into one pass for a "cleaner" refactor,
+verify exclusions still fully remove nodes pre-sort — don't let excluded
+files leak into natural-sort comparisons even if their final output
+position ends up correct by luck.
+
+### Anitomy only annotates, never reorders
+`anitomy-rs` parses episode *identity* for MAL sync. When parsing fails,
+fall back to ordinal position — silently, no error surfaced to the user
+for this specific fallback since it's expected/common. Anitomy failing to
+parse a filename is not a bug to fix upstream; it's the designed fallback
+path, and it must always resolve to *some* usable episode number.
+
+### auto_pause_days defaults to 0 (never auto-pause)
+This is deliberate, not a placeholder. A nonzero default would be a guess
+about user intent (on a break vs. abandoned vs. waiting for episodes to
+air) — exactly the category of inference this project avoids everywhere
+else. Don't "helpfully" pick a nonzero default later; 0 is correct.
+
+---
+
+## 4. Tech stack specifics
+
+- **Rust**, stable toolchain. Startup latency is the entire reason for
+  this language choice (sub-tens-of-ms binary start vs. interpreter
+  overhead) — don't introduce anything at startup that reintroduces
+  meaningful latency (e.g. eager network calls before the CLI is
+  responsive; MAL calls must stay lazy/on-demand).
+- **clap** for the CLI, **serde + toml** for config/state, **anitomy-rs**
+  (pure Rust — this is a hard requirement, not a preference; a C++-backed
+  binding reintroduces a toolchain dependency the whole distribution
+  strategy is built to avoid).
+- **Testing:** `cargo test` + `assert_cmd` (end-to-end against the
+  compiled binary) + `tempfile` (fabricated directory trees for ordering/
+  exclusion tests — never touch the real filesystem or a real mpv
+  install). Phases 1–3 (ordering, exclusions, Anitomy) should be testable
+  with zero real I/O; if a test in these phases needs real mpv or network
+  access, that's a sign the logic isn't properly isolated yet.
+- **Distribution target for v1: Linux only.** OS-candidate-path logic
+  should stay parameterized (a lookup table, not an `if cfg!(target_os)`
+  scattered everywhere) so macOS/Windows paths can be filled in later
+  without restructuring — but don't spend effort verifying them now.
+
+---
+
+## 5. Build phases & session workflow
+
+Phases are defined in full in `docs/design.md` §11 (Phase 0 through
+Phase 8). Reasoning for the phase order and what belongs in each is
+already there — don't duplicate it here, just follow it.
+
+**Gate discipline (strict):** don't start the next phase until the
+current phase's own tests are written and passing. If you hit a design
+question mid-phase that isn't resolved by `docs/design.md`, stop and ask
+rather than guessing and moving on — an unresolved ambiguity compounds if
+later phases build on top of a guess.
+
+**Dogfood checkpoint after Phase 5:** this is called out in the design
+doc as the point the tool becomes real end-to-end. Actually pause there
+and confirm with the user before continuing to Phase 6 — don't treat it
+as just another phase boundary.
+
+**Commits:** the user commits manually. At the end of each unit of work,
+propose a single, simple, conventional commit message (imperative mood,
+e.g. `feat: add tracked-root registration and validation`) — don't commit
+yourself, and don't propose a multi-paragraph message.
+
+**Progress tracking:** update `PROGRESS.md` (not this file) as phases
+complete — current phase, what's done, what's next, any open question
+blocking further work. Keep it short; it's a status file, not a log of
+every session's blow-by-blow.
+
+---
+
+## 6. Doc maintenance
+
+This file follows the living-spec discipline: only decisions-with-reasoning
+and non-obvious gotchas belong here. Before adding anything new:
+
+1. Check it doesn't already contradict an existing line — grep first.
+2. If it's a one-off fix, ask whether it's really a class of bug; if so,
+   write the general rule, not the specific patch.
+3. If a decision changes, delete the old text, don't append a correction
+   next to it.
+4. If a section stops protecting against anything (pure narrative now),
+   cut it — git history already has the story.
