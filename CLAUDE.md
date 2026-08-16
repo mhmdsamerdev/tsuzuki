@@ -158,6 +158,17 @@ and prints which case occurred (already tracked vs. newly added) so the
 user gets confirmation either way without a script treating a harmless
 re-run as a failure.
 
+### Roots are persisted in the form the user typed, never rewritten to an absolute path
+`~` expansion happens only in memory, for validation and for the
+already-tracked comparison — the path written back to `config.toml` is
+whatever the user gave `add`, unchanged. Rewriting `~/Anime` to a
+canonicalized absolute path on write would silently break config
+portability across machines (different usernames/home paths), which
+directly contradicts config.toml's stated purpose (§8: hand-edited,
+versionable in a dotfiles repo) and the `~`-form example already shown
+there. If a future phase needs an absolute path (e.g. for filesystem
+scanning), expand at the point of use — never persist the expanded form.
+
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
 about user intent (on a break vs. abandoned vs. waiting for episodes to

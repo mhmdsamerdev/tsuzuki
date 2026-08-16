@@ -14,10 +14,14 @@ use crate::config::Config;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddOutcome {
-    /// The root (after normalization) was already tracked. Not an error —
-    /// idempotent, exit 0.
+    /// The root (after in-memory normalization for comparison) was already
+    /// tracked. Holds the path exactly as passed to `add_root`. Not an
+    /// error — idempotent, exit 0.
     AlreadyTracked(PathBuf),
-    /// Newly appended to `config.roots.paths`. Caller must persist `Config`.
+    /// Newly appended to `config.roots.paths`, in the exact form passed to
+    /// `add_root` — no expansion, no canonicalization (CLAUDE.md's "Roots
+    /// are persisted in the form the user typed"). Caller must persist
+    /// `Config`.
     Added(PathBuf),
 }
 
@@ -41,30 +45,42 @@ impl fmt::Display for AddError {
 /// Validates `path`, then either records it as already-tracked or appends
 /// it to `config.roots.paths` — never both, and never a duplicate entry.
 ///
-/// Idempotency is decided by normalized-path comparison (see `normalize`),
-/// not by raw string equality — `~/Anime`, `/home/user/Anime`, and
-/// `/home/user/Anime/` must all recognize the same tracked root.
+/// `~` expansion and canonicalization happen only in memory, for
+/// existence/dir-ness validation and for the already-tracked comparison
+/// against existing entries (which may themselves be in `~`-form or
+/// absolute form — comparison works correctly regardless of which form
+/// either side is in). The value written to `config.roots.paths` — and
+/// returned in `AddOutcome` — is always `path` exactly as given, never the
+/// expanded/canonicalized form (CLAUDE.md's "Roots are persisted in the
+/// form the user typed").
 pub fn add_root(config: &mut Config, path: &Path) -> Result<AddOutcome, AddError> {
-    if !path.exists() {
+    add_root_with_home(config, path, dirs::home_dir().as_deref())
+}
+
+fn add_root_with_home(
+    config: &mut Config,
+    path: &Path,
+    home: Option<&Path>,
+) -> Result<AddOutcome, AddError> {
+    let resolved = expand_tilde(path, home);
+
+    if !resolved.exists() {
         return Err(AddError::NotFound(path.to_path_buf()));
     }
-    if !path.is_dir() {
+    if !resolved.is_dir() {
         return Err(AddError::NotADirectory(path.to_path_buf()));
     }
 
-    let canonical = fs::canonicalize(path).map_err(AddError::Io)?;
+    let canonical = fs::canonicalize(&resolved).map_err(AddError::Io)?;
 
     for existing in &config.roots.paths {
-        if normalize(Path::new(existing)) == canonical {
-            return Ok(AddOutcome::AlreadyTracked(canonical));
+        if normalize(Path::new(existing), home) == canonical {
+            return Ok(AddOutcome::AlreadyTracked(path.to_path_buf()));
         }
     }
 
-    config
-        .roots
-        .paths
-        .push(canonical.to_string_lossy().into_owned());
-    Ok(AddOutcome::Added(canonical))
+    config.roots.paths.push(path.to_string_lossy().into_owned());
+    Ok(AddOutcome::Added(path.to_path_buf()))
 }
 
 /// Normalizes a stored config path for comparison: expands a leading `~`,
@@ -72,14 +88,16 @@ pub fn add_root(config: &mut Config, path: &Path) -> Result<AddOutcome, AddError
 /// no longer exists (moved/deleted since it was added) falls back to the
 /// tilde-expanded form rather than erroring — idempotency checks must not
 /// fail just because an unrelated stored entry is currently unreachable.
-fn normalize(path: &Path) -> PathBuf {
-    let expanded = expand_tilde(path);
+/// This is a comparison-only helper — its output is never written back to
+/// config.
+fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
+    let expanded = expand_tilde(path, home);
     fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
+fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = home
     {
         return home.join(stripped);
     }
@@ -114,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn adds_new_root_and_persists_to_config() {
+    fn adds_new_root_and_persists_to_config_exactly_as_given() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         fs::create_dir_all(&root).unwrap();
@@ -122,9 +140,10 @@ mod tests {
         let mut config = Config::default();
         let outcome = add_root(&mut config, &root).unwrap();
 
-        let canonical = fs::canonicalize(&root).unwrap();
-        assert_eq!(outcome, AddOutcome::Added(canonical.clone()));
-        assert_eq!(config.roots.paths, vec![canonical.to_string_lossy()]);
+        // No canonicalization applied to the stored/returned value — it's
+        // exactly the path passed in, not `fs::canonicalize(&root)`.
+        assert_eq!(outcome, AddOutcome::Added(root.clone()));
+        assert_eq!(config.roots.paths, vec![root.to_string_lossy()]);
     }
 
     #[test]
@@ -137,9 +156,38 @@ mod tests {
         add_root(&mut config, &root).unwrap();
 
         let outcome = add_root(&mut config, &root).unwrap();
-        let canonical = fs::canonicalize(&root).unwrap();
-        assert_eq!(outcome, AddOutcome::AlreadyTracked(canonical));
+        assert_eq!(outcome, AddOutcome::AlreadyTracked(root));
         // No duplicate entry.
+        assert_eq!(config.roots.paths.len(), 1);
+    }
+
+    #[test]
+    fn add_persists_a_tilde_path_literally_not_expanded() {
+        let home = tempdir().unwrap();
+        fs::create_dir_all(home.path().join("Anime")).unwrap();
+
+        let mut config = Config::default();
+        let outcome =
+            add_root_with_home(&mut config, Path::new("~/Anime"), Some(home.path())).unwrap();
+
+        assert_eq!(outcome, AddOutcome::Added(PathBuf::from("~/Anime")));
+        assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
+    }
+
+    #[test]
+    fn already_tracked_matches_across_tilde_and_absolute_forms() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut config = Config::default();
+        add_root_with_home(&mut config, Path::new("~/Anime"), Some(home.path())).unwrap();
+        assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
+
+        // Second add uses the equivalent absolute path instead of `~/Anime`
+        // — must still recognize it as the same tracked root.
+        let outcome = add_root_with_home(&mut config, &root, Some(home.path())).unwrap();
+        assert_eq!(outcome, AddOutcome::AlreadyTracked(root));
         assert_eq!(config.roots.paths.len(), 1);
     }
 

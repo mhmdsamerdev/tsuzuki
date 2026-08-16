@@ -151,6 +151,8 @@ One Piece/
 
 Order: `Season 1/ep01`, `Season 1/ep02`, `Season 2/ep01` — one general rule, no season-specific logic.
 
+**Mixed level (a directory containing both subdirectories and its own loose files).** Directories are grouped and ordered before this directory's own files at the same level — not interleaved into one flat natural-sort pass. E.g. a series root with a stray OVA file sitting next to a `Season 1/` folder orders the `Season 1/` contents before the loose file, regardless of what natural-sort comparison between the directory name and the filename would suggest on its own. This follows directly from "directories... first, then files" — decided explicitly here since the worked example above doesn't exercise the mixed case.
+
 **Natural sort remains the sole authority for order.** It's deterministic and never fails, which is why it stays load-bearing.
 
 **Episode number vs. episode order.** These are usually the same thing but not always — a series missing a downloaded episode (files 1, 2, 3, 5, 6 — no 4) has five files in correct *order*, but the file at position 4 is really episode 5. Ordinal position alone can't see this gap.

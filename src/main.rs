@@ -83,18 +83,18 @@ fn stub(name: &str) {
 /// tracked root (CLAUDE.md's "`tsuzuki add` validation and idempotency").
 fn add_command(path: &Path, config: &mut Config, config_path: &Path) -> ExitCode {
     match roots::add_root(config, path) {
-        Ok(roots::AddOutcome::AlreadyTracked(canonical)) => {
-            println!("already tracked: {}", canonical.display());
+        Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
+            println!("already tracked: {}", as_typed.display());
             ExitCode::SUCCESS
         }
-        Ok(roots::AddOutcome::Added(canonical)) => {
+        Ok(roots::AddOutcome::Added(as_typed)) => {
             if let Err(e) = config::write(config_path, config) {
                 return fail(&format!(
                     "could not write config at {}: {e}",
                     config_path.display()
                 ));
             }
-            println!("added tracked root: {}", canonical.display());
+            println!("added tracked root: {}", as_typed.display());
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
