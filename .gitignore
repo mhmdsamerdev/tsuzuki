@@ -1,0 +1,38 @@
+# --- Rust / Cargo ---
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock: keep it committed for a binary crate (reproducible builds).
+# Do NOT ignore it.
+
+# --- Nix ---
+# Local result symlinks from `nix-build` (not used by `nix-shell` itself,
+# but harmless to ignore in case `nix build`/flakes get used later).
+result
+result-*
+
+# --- Tsuzuki runtime state (never belongs in the repo) ---
+# Real config/state live under XDG paths outside the repo, but guard against
+# accidentally creating local copies during manual testing.
+/config.toml
+/state.toml
+*.mpv_watch_later_test/
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Env / secrets ---
+# MAL client_id/secret must never be committed (Phase 7). If a local .env
+# or override file is used for testing, keep it out of the repo.
+.env
+.env.local
+*.secret
