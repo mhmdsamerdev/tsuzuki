@@ -1,6 +1,9 @@
 //! `tsuzuki exclude <path> [--root <root>]` — resolving a relative path
 //! against tracked roots and persisting the result (CLAUDE.md's
-//! "Exclusion persistence and disambiguation", design.md §3).
+//! "Exclusion persistence and disambiguation", design.md §3) — plus bare
+//! `tsuzuki exclude`'s Anitomy-suggested candidate listing (design.md §5's
+//! Phase 3 paragraph, CLAUDE.md's "Anitomy-candidate confirmation stays
+//! list-only, not interactive").
 //!
 //! This module only mutates the in-memory `Config`; the caller (main.rs)
 //! is responsible for writing it to disk, same pattern as `roots.rs`.
@@ -8,8 +11,11 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use tsuzuki_anitomy::ElementKind;
+
 use crate::config::{Config, Exclusion};
 use crate::roots::{expand_tilde, normalize};
+use crate::series;
 
 /// One tracked root under which the requested relative path was found to
 /// exist on disk.
@@ -240,7 +246,6 @@ fn find_tracked_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> O
 /// hand to `series::ordered_episodes_excluding`. A path outside a given
 /// series' own subtree simply never matches anything during that series'
 /// walk, so this doesn't need to be pre-filtered per series.
-#[allow(dead_code)]
 pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>) -> Vec<PathBuf> {
     config
         .exclusions
@@ -248,6 +253,109 @@ pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>)
         .filter(|e| e.root == root)
         .map(|e| expand_tilde(Path::new(root), home).join(&e.path))
         .collect()
+}
+
+/// Anitomy `Type` values that count as suggest-worthy for bare `tsuzuki
+/// exclude` — matched case-insensitively, since Anitomy preserves the
+/// filename's original casing in the parsed value (confirmed by direct
+/// testing: `"ova"` in a filename parses to `Type = "ova"`, not a
+/// normalized `"OVA"`).
+///
+/// Every `Type` keyword in Anitomy's own table is marked ambiguous
+/// (requires bracket-enclosure, or specific surrounding context, to be
+/// recognized at all — see `vendor/anitomy/src/keyword.rs`), so "ambiguous
+/// per the keyword table" doesn't by itself distinguish any of these from
+/// each other. `"TV"` and `"SP"` are excluded here on different, more
+/// concrete grounds: `"TV"` denotes the ordinary/mainline broadcast
+/// category — the opposite of what an exclude-candidate should flag — and
+/// Anitomy's own keyword table carries an inline comment documenting a
+/// real `"SP"`-in-an-ordinary-title collision ("Yumeiro Patissiere SP
+/// Professional"). `"Gekijouban"` is added on top of the literal list
+/// given in this phase's task brief: it's a confirmed real `Type` value
+/// (verified by direct testing) carrying the exact same ambiguity
+/// classification as `"Movie"`, and is semantically its direct synonym
+/// (theatrical release) — there's no principled reason to suggest one and
+/// not the other.
+const SUGGEST_WORTHY_TYPES: &[&str] = &[
+    "OVA",
+    "Special",
+    "Specials",
+    "Movie",
+    "Gekijouban",
+    "ONA",
+    "OAD",
+    "OAV",
+];
+
+/// One Anitomy-suggested exclude candidate: a file under a tracked root
+/// whose parsed `Type` element looks like an OVA/Special/Movie/etc, not
+/// already excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The root's own persisted literal form (e.g. `~/Anime`) — what the
+    /// suggested `exclude` command's `--root`-free form resolves against.
+    pub root: String,
+    /// Relative to `root`, ready to hand straight to `exclude`.
+    pub relative_path: String,
+}
+
+/// Scans every tracked root's series trees — respecting existing
+/// exclusions, so an already-excluded file is never suggested again — and
+/// returns every file whose filename Anitomy parses a suggest-worthy
+/// `Type` element from. Unreadable roots/series (e.g. a root that's
+/// currently unmounted) are silently skipped, consistent with `series.rs`'s
+/// own failure-tolerant walk — a bare `exclude` scan isn't the place to
+/// surface an I/O error for one bad root out of many.
+pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+
+    for root in &config.roots.paths {
+        let expanded_root = expand_tilde(Path::new(root), home);
+        let Ok(series_list) = series::series_in_root(&expanded_root) else {
+            continue;
+        };
+        let excluded = excluded_paths_for_root(config, root, home);
+
+        for s in series_list {
+            let Ok(files) = series::ordered_episodes_excluding(
+                &s.path,
+                &config.roots.video_extensions,
+                &excluded,
+            ) else {
+                continue;
+            };
+
+            for file in files {
+                if !is_suggest_worthy(&file) {
+                    continue;
+                }
+                let Ok(relative) = file.strip_prefix(&expanded_root) else {
+                    continue;
+                };
+                candidates.push(Candidate {
+                    root: root.clone(),
+                    relative_path: relative.to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+
+    candidates
+}
+
+/// True if `path`'s filename (never the full path — see CLAUDE.md's
+/// bare-filename calling rule) parses at least one `Type` element whose
+/// value case-insensitively matches `SUGGEST_WORTHY_TYPES`.
+fn is_suggest_worthy(path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+        return false;
+    };
+    tsuzuki_anitomy::parse(filename).into_iter().any(|element| {
+        element.kind() == ElementKind::Type
+            && SUGGEST_WORTHY_TYPES
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(element.value()))
+    })
 }
 
 #[cfg(test)]
@@ -817,5 +925,125 @@ mod tests {
         let err = exclude_with_home(&mut config, Path::new("/etc"), Some(&root), None).unwrap_err();
 
         assert_eq!(err, ExcludeError::NotRelative(PathBuf::from("/etc")));
+    }
+
+    // --- Phase 3: Anitomy-suggested candidates for bare `exclude` ---
+
+    fn default_extensions() -> Vec<String> {
+        vec!["mkv".to_string()]
+    }
+
+    #[test]
+    fn suggests_only_ova_special_movie_style_files_not_regular_episodes() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(
+            &root
+                .join("One Piece")
+                .join("[Group] One Piece - 05 [1080p].mkv"),
+        );
+        touch(
+            &root
+                .join("One Piece")
+                .join("Specials")
+                .join("[Group] One Piece - OVA 1 [1080p].mkv"),
+        );
+        touch(&root.join("One Piece").join("One Piece Movie 01.mkv"));
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        let paths: Vec<&str> = candidates
+            .iter()
+            .map(|c| c.relative_path.as_str())
+            .collect();
+
+        assert!(
+            paths.iter().any(|p| p.contains("OVA 1")),
+            "expected the OVA file to be suggested, got: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("Movie")),
+            "expected the Movie file to be suggested, got: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("- 05")),
+            "regular episode must not be suggested, got: {paths:?}"
+        );
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn an_already_excluded_candidate_is_never_suggested_again() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let ova_path = root
+            .join("One Piece")
+            .join("Specials")
+            .join("[Group] One Piece - OVA 1 [1080p].mkv");
+        touch(&ova_path);
+        touch(
+            &root
+                .join("One Piece")
+                .join("[Group] One Piece - 05 [1080p].mkv"),
+        );
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        // Exclude the OVA's containing directory first, exactly like a
+        // user running the suggested `exclude` command would.
+        exclude_with_home(&mut config, Path::new("One Piece/Specials"), None, None).unwrap();
+
+        let candidates = suggest_candidates(&config, None);
+        assert!(
+            candidates.is_empty(),
+            "already-excluded candidate must not be suggested again, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn zero_candidates_when_nothing_matches_a_suggest_worthy_type() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(
+            &root
+                .join("One Piece")
+                .join("[Group] One Piece - 01 [1080p].mkv"),
+        );
+        touch(
+            &root
+                .join("One Piece")
+                .join("[Group] One Piece - 02 [1080p].mkv"),
+        );
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn suggest_candidates_reports_the_owning_root_for_each_candidate() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("One Piece").join("One Piece Movie 01.mkv"));
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].root, root.to_string_lossy());
+        assert_eq!(
+            candidates[0].relative_path,
+            "One Piece/One Piece Movie 01.mkv"
+        );
     }
 }

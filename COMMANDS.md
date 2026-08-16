@@ -49,7 +49,12 @@ phase, the whole suite.
 cargo fmt                # auto-format
 cargo fmt --check        # check formatting without modifying (CI-style)
 cargo clippy             # lint
-cargo clippy -- -D warnings   # treat warnings as errors (use before wrapping up a phase)
+cargo clippy -p tsuzuki --no-deps -- -D warnings   # strict gate — use before wrapping up a phase
+
+# NOTE: `--workspace` is deliberately NOT used for the strict gate. vendor/anitomy
+# is a workspace member but off-limits (see CLAUDE.md's hands-off policy) — scoping
+# to `-p tsuzuki --no-deps` keeps the strict check to code we actually own.
+
 ```
 
 ## Checking without building (fast feedback loop)
@@ -87,17 +92,4 @@ cargo test --test cli    # assert_cmd-based tests, once added under tests/cli.rs
 cargo dist init     # one-time: generate cargo-dist config
 cargo dist build    # build release artifacts locally
 cargo dist plan     # preview what a release would produce
-```
-
-## Git
-
-Commits are made by the user, not by Claude Code. At the end of a unit of
-work, Claude proposes a single conventional commit message; review the
-diff yourself before committing:
-
-```bash
-git status
-git diff
-git add -A
-git commit -m "<proposed message>"
 ```

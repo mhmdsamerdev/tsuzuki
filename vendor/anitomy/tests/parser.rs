@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use anitomy::ElementKind;
 use serde::{
     de::{value::SeqAccessDeserializer, Visitor},
     Deserialize,
 };
+use tsuzuki_anitomy::ElementKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TestValue {
@@ -122,9 +122,9 @@ impl Default for OptionOverride {
     }
 }
 
-impl From<OptionOverride> for anitomy::Options {
+impl From<OptionOverride> for tsuzuki_anitomy::Options {
     fn from(value: OptionOverride) -> Self {
-        anitomy::Options::default()
+        tsuzuki_anitomy::Options::default()
             .episodes(value.episode)
             .episode_titles(value.episode_title)
             .file_checksums(value.file_checksum)
@@ -148,7 +148,7 @@ struct InputData {
     options: OptionOverride,
 }
 
-fn make_test_map(values: Vec<anitomy::Element<'_>>) -> HashMap<ElementKind, TestValue> {
+fn make_test_map(values: Vec<tsuzuki_anitomy::Element<'_>>) -> HashMap<ElementKind, TestValue> {
     let mut result = HashMap::with_capacity(values.len());
     for value in values {
         result
@@ -168,15 +168,16 @@ fn test_json_data() {
     for (index, mut test) in tests.into_iter().enumerate() {
         let input = test.input;
         let options = test.options.into();
-        let parsed = match std::panic::catch_unwind(|| anitomy::parse_with_options(&input, options))
-        {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("---- UNEXPECTED PANIC WHILE PARSING ---");
-                eprintln!("input: {input:?}");
-                std::panic::resume_unwind(e)
-            }
-        };
+        let parsed =
+            match std::panic::catch_unwind(|| tsuzuki_anitomy::parse_with_options(&input, options))
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("---- UNEXPECTED PANIC WHILE PARSING ---");
+                    eprintln!("input: {input:?}");
+                    std::panic::resume_unwind(e)
+                }
+            };
         test.output.remove(&ElementKind::EpisodeAlt); // this is untested
         let actual = make_test_map(parsed);
         for (key, expected) in test.output {

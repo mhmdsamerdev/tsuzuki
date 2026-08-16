@@ -95,7 +95,7 @@ Re-run with --root to specify which one:
 
 `exclude` validates the resolved path exists on disk before excluding it, exiting non-zero with a clear error otherwise — consistent with `add`'s validate-now behavior. Excluding an entire series folder (the depth-1 directory itself, not something under it) is rejected as invalid usage: "don't track this series" is what not adding it, or a future `drop`, is for — allowing `exclude` to also remove a whole series would create a confusing third way to make one disappear.
 
-Running `tsuzuki exclude` with no path surfaces Anitomy-suggested candidates (see §5) — files whose parsed type looks like OVA/Special/Movie — for the user to confirm. Nothing is ever excluded automatically.
+Running `tsuzuki exclude` with no path surfaces Anitomy-suggested candidates (see §5) — files whose parsed type looks like OVA/Special/Movie — for the user to confirm. Nothing is ever excluded automatically. Confirmation stays non-interactive, consistent with `exclude`'s scriptable-by-design behavior (§8/CLAUDE.md): the bare invocation only *lists* candidates, one per line, alongside the exact `tsuzuki exclude "<path>"` command to actually exclude it — the same list-and-hand-back-the-exact-command pattern the `--root` ambiguity case already uses. There is no separate confirm/index-based follow-up command; re-running `exclude` with an explicit path is the confirmation step, reusing the same validated logic Phase 2 already built rather than introducing new state or a new command surface.
 
 ---
 
@@ -361,11 +361,11 @@ unintentional rather than as a real design decision.
 
 **Language: Rust.** The deciding factor is startup latency, not raw computation — nothing here is compute-bound. A compiled Rust binary starts in low single-digit milliseconds versus Python's fixed interpreter overhead, felt on every invocation of a tool whose entire pitch is a one-command reflex action. Matches the project's own inspiration set (ripgrep, fd, zoxide, atuin), and its type system reinforces the exhaustive, explicit-states modeling this design already leans on throughout.
 
-**Key dependencies:** `anitomy-rs` (pure Rust, no C++ toolchain needed), `serde`/`toml`, an HTTP client for MAL's API, a natural-sort comparator.
+**Key dependencies:** `anitomy` (vendored from Rapptz/anitomy-rs as `vendor/anitomy`, renamed `tsuzuki-anitomy` — pure Rust, no C++ toolchain needed; see CLAUDE.md for the vendoring rationale and hands-off policy), `serde`/`toml`, an HTTP client for MAL's API, a natural-sort comparator.
 
 **Testing:** `cargo test`, built into the toolchain. `assert_cmd` for end-to-end command tests against the compiled binary; `tempfile` for fabricated directory structures. Most of the suite is close to mechanical, since this doc's rules are already stated as explicit boundary values.
 
-**Distribution — prebuilt binaries as the primary path, not `cargo install`.** `cargo install` only reaches people with the Rust toolchain already installed — a small subset of this tool's actual audience. The path that matches: **`cargo-dist`**-generated GitHub Release binaries plus a one-line install script (`curl ... | sh`, the same pattern as rustup and Homebrew). `cargo install`/crates.io stays available as a secondary path; a `maturin`-built PyPI wheel offers a third door (`pip install tsuzuki`) using the same precompiled binary, no client-side compilation in any path. A Homebrew tap once there's adoption.
+**Distribution — prebuilt binaries as the primary path, not `cargo install`.** `cargo install` only reaches people with the Rust toolchain already installed — a small subset of this tool's actual audience. The path that matches: **`cargo-dist`**-generated GitHub Release binaries plus a one-line install script (`curl ... | sh`, the same pattern as rustup and Homebrew). `cargo install`/crates.io stays available as a secondary path; a `maturin`-built PyPI wheel offers a third door (`pip install tsuzuki`) using the same precompiled binary, no client-side compilation in any path. A Homebrew tap once there's adoption. With the vendored Anitomy parser updated to depend on crates.io `phf 0.12` instead of its original unmerged fork (see CLAUDE.md), Tsuzuki's dependency graph has no remaining git-only dependencies, so all three distribution paths are viable without qualification.
 
 **Platform scope for v1: Linux only.** OS-candidate-path logic is parameterized from day one, but macOS/Windows remain unverified until targeted.
 

@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "vendor/anitomy"]
+
 [package]
 name = "tsuzuki"
 version = "0.1.0"
@@ -10,3 +13,4 @@ natord = "1.0.9"
 serde = { version = "1.0.229", features = ["derive"] }
 tempfile = "3.27.0"
 toml = "1.1.4"
+tsuzuki-anitomy = { path = "vendor/anitomy" }

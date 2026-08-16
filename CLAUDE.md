@@ -167,6 +167,54 @@ for this specific fallback since it's expected/common. Anitomy failing to
 parse a filename is not a bug to fix upstream; it's the designed fallback
 path, and it must always resolve to *some* usable episode number.
 
+### Anitomy is vendored, not a live dependency — hands off except real bugs
+`vendor/anitomy/` is Rapptz/anitomy-rs's source (MPL-2.0), copied in at
+commit `c5271be1d9fe71a49e93e98ac3f982b38e6e27b6`, renamed to
+`tsuzuki-anitomy` to avoid confusion with the unrelated, C++-backed
+`anitomy` crate on crates.io. It was vendored — not pulled as a live git
+dependency — for safety against the upstream repo disappearing or going
+stale (its own commit history is genuinely sparse) and full edit control,
+since Tsuzuki only needs a narrow slice of what it parses. Its original
+`Cargo.toml` pinned a fork of `phf` (`edef1c/rust-phf`) for case-
+insensitive lookup support that wasn't yet released upstream — that
+support has since shipped in `phf 0.12`, so the vendored copy's
+`Cargo.toml` uses plain `phf = { version = "0.12", features = ["macros",
+"uncased"] }` from crates.io, not the fork. Verified by rebuilding
+against the swap and confirming all of anitomy-rs's own regression tests
+still pass unchanged. This means Tsuzuki's dependency graph has **no**
+remaining git-only dependencies — `cargo install tsuzuki` and a full
+crates.io publish are both viable once desired, no longer blocked.
+`vendor/anitomy/` is treated as read-only, off-limits code: don't
+refactor, "clean up," or restyle it in a session working on anything
+else. The only acceptable reason to touch it is a confirmed, reproduced
+bug in its parsing behavior that's actually blocking Tsuzuki — and even
+then, treat it as a deliberate, isolated change with its own report, not
+a drive-by edit alongside unrelated work.
+
+### Anitomy must be called with a bare filename, never a full/relative path
+Verified by direct testing: `anitomy::parse()` silently mis-parses when
+given a path with directory components (e.g. `"Season 1/ep02.mkv"` — the
+episode number is lost entirely, swallowed into the title). Always call
+`.file_name()` (or equivalent) before passing anything to Anitomy. This
+matters a lot in practice — season subfolders are a normal, expected
+structure (§3), not an edge case, so getting this wrong would silently
+break episode parsing for a large fraction of real libraries.
+
+### Anitomy-candidate suggest-worthy Type values
+The full `ElementKind::Type` keyword table treats every value —
+including `TV` and `SP` — as equally "ambiguous" internally, so
+ambiguity alone doesn't distinguish which values should trigger a
+suggestion. The actual list Tsuzuki suggests on: `OVA`, `Special`,
+`Specials`, `Movie`, `Gekijouban`, `ONA`, `OAD`, `OAV` (case-insensitive).
+`Gekijouban` is included even though it wasn't in the original phase
+scope — it's a confirmed real value, semantically identical to `Movie`.
+`TV` and `SP` are deliberately excluded: `TV` denotes the mainline
+episode category (suggesting it would mean suggesting regular episodes
+for exclusion), and `SP` has a documented real-title collision noted in
+Anitomy's own source. If this list is ever revisited, don't shrink it
+back to "just the phase-3 prompt's original list" — that list was a
+starting guess, not the settled answer; this one is.
+
 ### CLI bare-invocation contract
 Every command group with subcommands (`config`, `sync`) must have an
 explicit, documented answer for what happens when it's invoked with no
@@ -251,6 +299,28 @@ non-TTY context (piped/scripted invocation) must fall back to listing
 choices with an index rather than hanging on a prompt that can't render.
 Not built until Phase 5; noted here so the crate choice and UX aren't
 improvised under time pressure later.
+
+### Anitomy-candidate confirmation stays list-only, not interactive
+Bare `tsuzuki exclude` (no path) lists Anitomy-suggested OVA/Special/
+Movie candidates plus the exact `tsuzuki exclude "<path>"` command for
+each — it does not run an interactive y/n walkthrough, and there is no
+separate indexed `--confirm` follow-up command. Same reasoning as the
+`--root` disambiguation case (§3): `exclude` stays non-interactive by
+design, and re-running it with an explicit path reuses Phase 2's already-
+validated logic rather than adding a new command surface or new
+cross-invocation state (an index from a prior "list" call would only be
+valid if nothing on disk changed in between — a fragile guarantee this
+project avoids relying on elsewhere).
+
+### Clippy's strict gate is scoped to `-p tsuzuki --no-deps`, not `--workspace`
+`vendor/anitomy` is a workspace member (needed for `cargo build` to work
+at all) but is off-limits code (see the hands-off policy above) — it was
+never held to Tsuzuki's own lint bar and doing so now would mean either
+restyling vendored third-party code for no functional reason, or having
+every future phase's verification fail against pre-existing, unrelated
+lints. `cargo build --workspace` still checks the whole thing compiles;
+only the strict `-D warnings` clippy gate is scoped down. See
+COMMANDS.md for the exact command.
 
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess

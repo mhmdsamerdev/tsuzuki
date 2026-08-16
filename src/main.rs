@@ -1,3 +1,4 @@
+mod anitomy;
 mod cli;
 mod config;
 mod exclude;
@@ -58,9 +59,7 @@ fn dispatch(command: Command, config: &mut Config, config_path: &Path) -> ExitCo
         Command::Start => stub("start"),
         Command::Pause { .. } => stub("pause"),
         Command::Drop { .. } => stub("drop"),
-        Command::Exclude { path: None, .. } => {
-            println!("not implemented: exclude (no path) — candidate suggestions land in Phase 3");
-        }
+        Command::Exclude { path: None, .. } => suggest_candidates_command(config),
         Command::Exclude {
             path: Some(path),
             root,
@@ -141,6 +140,29 @@ fn exclude_command(
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
+    }
+}
+
+/// Bare `tsuzuki exclude` (no path) — lists Anitomy-suggested OVA/Special/
+/// Movie/etc candidates plus the exact `tsuzuki exclude "<path>"` command
+/// for each (CLAUDE.md's "Anitomy-candidate confirmation stays list-only,
+/// not interactive", design.md §5). Never mutates `config` or excludes
+/// anything itself — confirming a candidate is a separate, explicit
+/// re-invocation of `exclude` with a path.
+fn suggest_candidates_command(config: &Config) {
+    let candidates = exclude::suggest_candidates(config, dirs::home_dir().as_deref());
+
+    if candidates.is_empty() {
+        println!("No Anitomy-suggested candidates found under any tracked root.");
+        return;
+    }
+
+    println!("Anitomy-suggested candidates (not yet excluded):");
+    println!();
+    for candidate in &candidates {
+        println!("  {}", candidate.relative_path);
+        println!("    tsuzuki exclude \"{}\"", candidate.relative_path);
+        println!();
     }
 }
 
