@@ -119,6 +119,25 @@ for this specific fallback since it's expected/common. Anitomy failing to
 parse a filename is not a bug to fix upstream; it's the designed fallback
 path, and it must always resolve to *some* usable episode number.
 
+### CLI bare-invocation contract
+Every command group with subcommands (`config`, `sync`) must have an
+explicit, documented answer for what happens when it's invoked with no
+subcommand — never clap's generic "subcommand required" error, which is
+accurate but reads as accidental rather than decided. If the group
+already has a specified default action (`sync` bare = run the sync,
+per `docs/design.md` §9), that action must stay reachable without a
+subcommand — don't model it as a required-subcommand enum that
+accidentally blocks the primary command. If a group has no single
+default meaning (`config` — `get`/`set`/`list`/`edit` are all equally
+valid, none is "the" default), bare invocation prints help and exits 0.
+This does **not** extend to malformed input (bad flags, unknown
+subcommands, missing required args) — that stays on clap's own
+error/usage output. Clap's default error handling is mature and matches
+the rest of the Rust CLI ecosystem (ripgrep, cargo, fd); reimplementing
+it would be exactly the kind of self-inflicted complexity "boring over
+clever" (§2) exists to avoid. Don't extend Tsuzuki's own error-message
+layer beyond the one gap this closes.
+
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
 about user intent (on a break vs. abandoned vs. waiting for episodes to

@@ -313,6 +313,29 @@ A single flat TOML file — not sharded per-series (mpv shards because it tracks
 | `tsuzuki config get/set/list/edit` | Read or write config values, or open the config file directly. |
 | `tsuzuki doctor` | Environment health checks — mpv config flag, watch_later reachability, Flatpak permissions, tracked-root validity, MAL auth status. |
 
+**CLI invocation contract.** Every command group with subcommands
+(`config`, `sync`) must have an explicit, documented behavior for being
+invoked with no subcommand — never left to clap's generic "subcommand
+required" error, which is accurate but reads as an accident rather than a
+decision. Two cases:
+
+- **The group already has a specified default action** — `tsuzuki sync`
+  with no subcommand *is* "run the two-way sync" (above); `login` and
+  `link <series>` are additional subcommands alongside that default, not
+  the only valid ways to invoke `sync`. The bare form must remain
+  reachable in the CLI structure, not accidentally blocked by requiring
+  a subcommand.
+- **The group has no single default meaning** — `tsuzuki config` bare
+  (none of `get`/`set`/`list`/`edit` is "the" default) prints help and
+  exits 0.
+
+This does not extend to malformed input — unknown flags, missing
+required positional arguments, unknown subcommand names all keep clap's
+own error and usage output. That output is already accurate and matches
+the convention of the wider Rust CLI ecosystem (ripgrep, cargo, fd); the
+contract above only closes the one gap where clap's default reads as
+unintentional rather than as a real design decision.
+
 ---
 
 ## 10. Tech Stack & Distribution

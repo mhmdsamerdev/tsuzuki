@@ -4,7 +4,7 @@ mod state;
 
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use cli::{Cli, Command, ConfigCommand, SyncCommand};
 
@@ -54,10 +54,11 @@ fn dispatch(command: Command) {
             Some(SyncCommand::Link { .. }) => stub("sync link"),
         },
         Command::Config { action } => match action {
-            ConfigCommand::Get { .. } => stub("config get"),
-            ConfigCommand::Set { .. } => stub("config set"),
-            ConfigCommand::List => stub("config list"),
-            ConfigCommand::Edit => stub("config edit"),
+            None => print_config_help(),
+            Some(ConfigCommand::Get { .. }) => stub("config get"),
+            Some(ConfigCommand::Set { .. }) => stub("config set"),
+            Some(ConfigCommand::List) => stub("config list"),
+            Some(ConfigCommand::Edit) => stub("config edit"),
         },
         Command::Doctor => stub("doctor"),
     }
@@ -65,6 +66,22 @@ fn dispatch(command: Command) {
 
 fn stub(name: &str) {
     println!("not implemented: {name}");
+}
+
+/// `config` has no single default action (`get`/`set`/`list`/`edit` are all
+/// equally valid) — per CLAUDE.md's CLI bare-invocation contract, bare
+/// `tsuzuki config` prints help and exits 0 rather than clap's generic
+/// "subcommand required" error.
+fn print_config_help() {
+    let root = Cli::command();
+    let bin_name = root.get_name().to_string();
+    let mut config_cmd = root
+        .find_subcommand("config")
+        .expect("config subcommand is defined on Cli")
+        .clone()
+        .bin_name(format!("{bin_name} config"));
+    let _ = config_cmd.print_long_help();
+    println!();
 }
 
 fn fail(message: &str) -> ExitCode {

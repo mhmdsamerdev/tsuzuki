@@ -63,9 +63,13 @@ pub enum Command {
     },
 
     /// Read or write config values, or open the config file directly
+    ///
+    /// `get`/`set`/`list`/`edit` are all equally valid — there's no single
+    /// default action, so bare `tsuzuki config` prints this help instead of
+    /// guessing one.
     Config {
         #[command(subcommand)]
-        action: ConfigCommand,
+        action: Option<ConfigCommand>,
     },
 
     /// Environment health checks (mpv config, watch_later reachability,

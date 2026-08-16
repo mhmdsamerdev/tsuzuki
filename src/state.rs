@@ -100,13 +100,22 @@ mod tests {
     }
 
     #[test]
-    fn read_missing_file_returns_empty_state() {
+    fn read_missing_file_returns_empty_state_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.toml");
 
         assert!(!path.exists());
         let state = read(&path).unwrap();
         assert_eq!(state, State::default());
+
+        assert!(
+            !path.exists(),
+            "read() must not write state.toml on a missing file — only an explicit write() call may"
+        );
+        assert!(
+            fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "read() must not create any file in the state directory on a missing file"
+        );
     }
 
     #[test]
