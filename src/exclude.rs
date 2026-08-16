@@ -1046,4 +1046,216 @@ mod tests {
             "One Piece/One Piece Movie 01.mkv"
         );
     }
+
+    // --- Gap audit: candidate-suggestion completeness ---
+
+    #[test]
+    fn a_suggest_worthy_file_several_directories_deep_is_still_found() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(
+            &root
+                .join("One Piece")
+                .join("Extras")
+                .join("Bonus")
+                .join("Deep")
+                .join("One Piece Movie 01.mkv"),
+        );
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].relative_path,
+            "One Piece/Extras/Bonus/Deep/One Piece Movie 01.mkv"
+        );
+    }
+
+    #[test]
+    fn a_suggest_worthy_type_with_no_parseable_episode_number_is_still_suggested() {
+        // Candidate suggestion only cares about the `Type` element — it
+        // must not implicitly depend on an `Episode` element also being
+        // present. A pure OVA release with no number in its filename at
+        // all (confirmed by direct testing: this parses `Type = "OVA"`
+        // and no `Episode` element whatsoever) is exactly the case where
+        // episode-identity parsing (a separate, independent feature) would
+        // fall back to ordinal — that must have zero effect on whether
+        // this file gets suggested.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("One Piece").join("One Piece - OVA [1080p].mkv"));
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].relative_path,
+            "One Piece/One Piece - OVA [1080p].mkv"
+        );
+    }
+
+    #[test]
+    fn suggestion_matching_is_case_insensitive_on_the_type_value_itself() {
+        // The case-insensitivity claim documented on `SUGGEST_WORTHY_TYPES`
+        // was previously only exercised indirectly (via `is_suggest_worthy`
+        // unit-level reasoning) — this proves it end-to-end through
+        // `suggest_candidates`, using both a fully-lowercase and a
+        // mixed-case `Type` value, both confirmed by direct testing to be
+        // exactly what Anitomy hands back for these filenames (it
+        // preserves the filename's original casing verbatim).
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Show").join("[Group] Show - ova 1 [1080p].mkv"));
+        touch(&root.join("Show").join("[Group] Show - Ova 2 [1080p].mkv"));
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn a_video_file_whose_own_filename_has_no_type_keyword_is_not_suggested_even_inside_a_specials_folder()
+     {
+        // Locks in the "no directory-name inference" design decision as
+        // an explicit regression test, not just an implicit consequence
+        // of "only ever pass the bare filename to Anitomy" (CLAUDE.md's
+        // bare-filename calling rule). A file sitting inside a
+        // `Specials/` folder whose own filename carries no OVA/Special/
+        // Movie keyword must NOT be suggested just because of where it
+        // lives — that would be exactly the folder-based content
+        // classification CLAUDE.md §2/§3 rules out everywhere else.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(
+            &root
+                .join("One Piece")
+                .join("Specials")
+                .join("[Group] One Piece - 01 [1080p].mkv"),
+        );
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert!(
+            candidates.is_empty(),
+            "a filename with no Type keyword must not be suggested just because of its \
+             containing folder's name, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn tv_and_sp_type_values_are_never_suggested() {
+        // Direct negative-case coverage for CLAUDE.md's documented
+        // exclusion of "TV" and "SP" from the suggest-worthy list — up to
+        // now only the *positive* suggest-worthy values had any test
+        // coverage at all. Both filenames are confirmed by direct testing
+        // to parse `Type = "TV"` / `Type = "SP"` respectively (proving
+        // this isn't just "these never get recognized as Type in the
+        // first place" — they do, and are still correctly filtered out).
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Show").join("[Group] Show TV - 05 [1080p].mkv"));
+        touch(&root.join("Show").join("[Group] Show - SP01.mkv"));
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert!(
+            candidates.is_empty(),
+            "TV/SP-typed files must never be suggested, got: {candidates:?}"
+        );
+    }
+
+    // --- Gap audit: symlink interaction with candidate suggestion ---
+
+    #[cfg(unix)]
+    #[test]
+    fn a_suggest_worthy_file_reached_through_a_symlinked_directory_is_still_suggested() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let real_specials = dir.path().join("real-storage").join("Specials");
+        touch(&real_specials.join("One Piece Movie 01.mkv"));
+        fs::create_dir_all(root.join("One Piece")).unwrap();
+        symlink(&real_specials, root.join("One Piece").join("Specials")).unwrap();
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        let candidates = suggest_candidates(&config, None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].relative_path,
+            "One Piece/Specials/One Piece Movie 01.mkv"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_inside_an_excluded_symlinked_directory_is_never_suggested() {
+        // Same ancestry-based, resolved-real-path exclusion check Phase 2
+        // fixed for `series.rs`'s ordering walk (CLAUDE.md's "Exclusion
+        // enforcement checks the resolved path") — `suggest_candidates`
+        // reuses `ordered_episodes_excluding` directly, so this proves
+        // that reuse actually carries the fix through, rather than
+        // assuming it does because the two features share code.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let real_specials = dir.path().join("real-storage").join("Specials");
+        touch(&real_specials.join("One Piece Movie 01.mkv"));
+        fs::create_dir_all(root.join("One Piece")).unwrap();
+        symlink(&real_specials, root.join("One Piece").join("Specials")).unwrap();
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.roots.video_extensions = default_extensions();
+
+        exclude_with_home(&mut config, Path::new("One Piece/Specials"), None, None).unwrap();
+
+        let candidates = suggest_candidates(&config, None);
+        assert!(
+            candidates.is_empty(),
+            "a file inside an excluded symlinked directory must not be suggested, got: {candidates:?}"
+        );
+    }
+
+    // --- Gap audit: vendor workspace-dependency soundness (item 5) ---
+
+    #[test]
+    fn the_tsuzuki_binary_crate_can_call_into_the_vendored_workspace_dependency() {
+        // Not testing Anitomy's parsing correctness (that's
+        // `tsuzuki-anitomy`'s own regression suite, `cargo test -p
+        // tsuzuki-anitomy`) — this is a deliberately named, minimal smoke
+        // test proving the *dependency edge itself* is sound: that code
+        // living in the `tsuzuki` crate can call `tsuzuki_anitomy::parse`
+        // and get real element data back, through the workspace path
+        // dependency the vendor/anitomy/Cargo.toml dev-dependency rename
+        // fix was needed to unblock. Every other test in this file and in
+        // `anitomy.rs` already exercises this same edge incidentally;
+        // this one exists so the guarantee is explicit and self-
+        // documenting rather than a side effect nobody named.
+        let elements = tsuzuki_anitomy::parse("[Group] Show - 05 [1080p].mkv");
+        assert!(
+            elements
+                .iter()
+                .any(|e| e.kind() == ElementKind::Episode && e.value() == "05")
+        );
+    }
 }

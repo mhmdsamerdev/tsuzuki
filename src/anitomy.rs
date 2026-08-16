@@ -135,4 +135,113 @@ mod tests {
 
         assert_eq!(identities[0].episode_number, 2);
     }
+
+    // --- Gap audit: edge cases beyond the happy path ---
+
+    #[test]
+    fn an_episode_element_that_parses_but_isnt_a_valid_u32_falls_back_to_ordinal() {
+        // Anitomy successfully extracts an `Episode` element here — it's
+        // not a parse *failure* the way "no Episode element at all" is —
+        // but "05.5" (a half-episode/recap numbering scheme real anime
+        // releases use) doesn't fit `u32`. Confirmed by direct testing:
+        // Anitomy really does hand back the literal string "05.5", not a
+        // pre-validated integer. `episode_number`'s `.parse::<u32>().ok()`
+        // must treat this the same as no-Episode-at-all and fall back to
+        // ordinal, not panic or silently truncate.
+        let files = vec![PathBuf::from("[Group] Show - 05.5 [1080p].mkv")];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities[0].episode_number, 1);
+    }
+
+    #[test]
+    fn an_empty_file_list_returns_an_empty_vec_without_panicking() {
+        let identities = episode_identity(&[]);
+        assert!(identities.is_empty());
+    }
+
+    #[test]
+    fn duplicate_parsed_episode_numbers_across_different_files_are_silently_allowed() {
+        // Two different releases of the same nominal episode (e.g. two
+        // release groups) both parse to episode 5. `episode_identity`
+        // does not detect or flag this — deliberately: deciding which
+        // file is "really" episode 5 (preferring one release over
+        // another, merging them, erroring) is a judgment call this
+        // annotation-only module has no business making, per CLAUDE.md's
+        // "never infer" (§2) and "Anitomy only annotates, never
+        // reorders". That decision belongs to whatever consumes this
+        // data (Phase 7's MAL sync), not here. This test locks in and
+        // documents that current, deliberate behavior rather than
+        // leaving it implicit.
+        let files = vec![
+            PathBuf::from("[GroupA] Show - 05 [1080p].mkv"),
+            PathBuf::from("[GroupB] Show - 05 [720p].mkv"),
+        ];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities[0].episode_number, 5);
+        assert_eq!(identities[1].episode_number, 5);
+        assert_eq!(identities.len(), 2);
+    }
+
+    #[test]
+    fn a_purely_numeric_filename_has_no_context_for_anitomy_to_recognize_as_an_episode() {
+        // Confirmed by direct testing: a bare "5.mkv" with no other
+        // context parses as `Title = "5"`, not `Episode = "5"` — Anitomy
+        // needs surrounding context (a release group, brackets, a
+        // preceding dash, etc.) to recognize a number as an episode, not
+        // just numeric-ness. This is a real-world naming scheme (loose
+        // single-digit filenames), so the fallback path matters here,
+        // not just for filenames Anitomy can't parse at all.
+        let files = vec![PathBuf::from("5.mkv")];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities[0].episode_number, 1);
+    }
+
+    #[test]
+    fn a_file_with_no_parent_directory_component_still_resolves_its_filename() {
+        // Already at the root of a tracked root (not nested in a series
+        // subfolder) — `Path::file_name()` on a single-component path
+        // must still return that component, not `None`.
+        let files = vec![PathBuf::from("[Group] Show - 03 [1080p].mkv")];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities[0].episode_number, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_filename_falls_back_to_ordinal_without_panicking() {
+        // `Path::file_name()` succeeds (it works on raw OS bytes), but
+        // `.to_str()` returns `None` for invalid UTF-8 — the `?` chain in
+        // `parsed_episode_number` must treat that the same as any other
+        // "couldn't determine an episode number" case, not panic.
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let invalid_utf8 = OsStr::from_bytes(&[0x66, 0x6f, 0xff, 0x6f, b'.', b'm', b'k', b'v']); // "fo\xFFo.mkv"
+        let files = vec![PathBuf::from(invalid_utf8)];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].episode_number, 1);
+    }
+
+    #[test]
+    fn a_multi_episode_range_deterministically_takes_the_first_episode_element() {
+        // Confirmed by direct testing: Anitomy parses an episode range
+        // like "01-02" as *two separate* `Episode` elements ("01" and
+        // "02"), not one range string. `parsed_episode_number` uses
+        // `.find()`, which deterministically takes the first — this test
+        // exists to make that choice visible and locked-in (a real,
+        // observable behavior), not to claim it's the only defensible
+        // one. Neither CLAUDE.md nor design.md §5 specifies range
+        // handling; if that ever needs to change, this test should fail
+        // and be the prompt to make the new behavior equally explicit.
+        let files = vec![PathBuf::from("[Group] Show - 01-02 [1080p].mkv")];
+        let identities = episode_identity(&files);
+
+        assert_eq!(identities[0].episode_number, 1);
+    }
 }
