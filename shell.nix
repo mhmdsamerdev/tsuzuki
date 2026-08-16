@@ -1,0 +1,32 @@
+{ pkgs ? import <nixpkgs> {} }:
+
+pkgs.mkShell {
+  buildInputs = [
+    # Rust toolchain manager — actual compiler version pinned via rustup below,
+    # not via nixpkgs' own rustc, so `rustup show`/`rustup update` behave normally.
+    pkgs.rustup
+
+    # Linker Rust needs on Linux (`cc`). This is the whole reason we're not
+    # fighting the host's dnf/gcc mismatch anymore.
+    pkgs.gcc
+
+    # Needed by any crate that links against a C library via *-sys crates
+    # (pkg-config locates system libs; openssl backs the MAL HTTP client
+    # in Phase 7 unless we end up on rustls instead).
+    pkgs.pkg-config
+    pkgs.openssl
+
+    # Useful, not required: lets `cargo dist` (Phase 8) work without
+    # reaching outside the shell for another toolchain.
+    pkgs.cargo-dist
+  ];
+
+  shellHook = ''
+    # Ensure a stable toolchain + the components we rely on for testing/lint
+    # are present the first time this shell is entered on a machine.
+    rustup default stable >/dev/null 2>&1
+    rustup component add clippy rustfmt >/dev/null 2>&1
+
+    echo "tsuzuki dev shell ready — $(rustc --version)"
+  '';
+}

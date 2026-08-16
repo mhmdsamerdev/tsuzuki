@@ -127,7 +127,28 @@ else. Don't "helpfully" pick a nonzero default later; 0 is correct.
 
 ---
 
-## 4. Tech stack specifics
+## 4. Dev environment
+
+**All build/test/lint commands run inside `nix-shell`**, not against the
+host's system Rust or system gcc. `shell.nix` at the repo root pins the
+toolchain (rustup-managed rustc/cargo, gcc as linker, pkg-config + openssl
+for the eventual MAL HTTP client, cargo-dist for Phase 8). This exists
+because the host's package manager had a transient gcc/glibc version
+mismatch when this project started — nix-shell was the fix, and it's
+stayed the standard because it also means anyone (including a future
+Claude Code session on a different machine) gets an identical toolchain
+without touching system packages. Don't suggest `sudo dnf install` for
+build tooling; if something's missing from the shell, it belongs in
+`shell.nix`, not installed on the host.
+
+If a command in a session transcript or terminal output shows `cargo`/
+`rustc` not found, the fix is `nix-shell` (re-)entry, not a fresh Rust
+install.
+
+Day-to-day commands (build/test/lint/dist) are in `COMMANDS.md` — that
+file is a cheatsheet, not a spec; don't duplicate its contents here.
+
+## 5. Tech stack specifics
 
 - **Rust**, stable toolchain. Startup latency is the entire reason for
   this language choice (sub-tens-of-ms binary start vs. interpreter
@@ -151,7 +172,7 @@ else. Don't "helpfully" pick a nonzero default later; 0 is correct.
 
 ---
 
-## 5. Build phases & session workflow
+## 6. Build phases & session workflow
 
 Phases are defined in full in `docs/design.md` §11 (Phase 0 through
 Phase 8). Reasoning for the phase order and what belongs in each is
@@ -180,7 +201,7 @@ every session's blow-by-blow.
 
 ---
 
-## 6. Doc maintenance
+## 7. Doc maintenance
 
 This file follows the living-spec discipline: only decisions-with-reasoning
 and non-obvious gotchas belong here. Before adding anything new:
