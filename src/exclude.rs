@@ -49,6 +49,13 @@ pub enum ExcludeError {
     /// folder — which `exclude` refuses to touch (CLAUDE.md: that's what
     /// not tracking it, or a future `drop`, is for).
     WholeSeries { relative_path: String },
+    /// `relative_path` was given as an absolute path. Rejected before it
+    /// ever reaches a `.join()` call — `PathBuf::join` silently discards
+    /// its base entirely when given an absolute argument, which would
+    /// otherwise resolve against the filesystem root instead of the
+    /// tracked root (CLAUDE.md's "must be validated as relative before
+    /// any join").
+    NotRelative(PathBuf),
 }
 
 impl fmt::Display for ExcludeError {
@@ -66,6 +73,11 @@ impl fmt::Display for ExcludeError {
                 f,
                 "cannot exclude \"{relative_path}\" — it's an entire series (a depth-1 \
                  directory). Don't track it, or use a future `drop`, instead of excluding it."
+            ),
+            ExcludeError::NotRelative(p) => write!(
+                f,
+                "path must be relative to a tracked root, not absolute: {}",
+                p.display()
             ),
             ExcludeError::Ambiguous {
                 relative_path,
@@ -110,6 +122,13 @@ fn exclude_with_home(
     root_arg: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<ExcludeOutcome, ExcludeError> {
+    // Validated before any `.join()` involving `relative_path` — see
+    // `ExcludeError::NotRelative`'s doc comment for why this has to come
+    // first, not just be "one more check somewhere in here".
+    if relative_path.is_absolute() {
+        return Err(ExcludeError::NotRelative(relative_path.to_path_buf()));
+    }
+
     let chosen_root = match root_arg {
         Some(root_arg) => find_tracked_root(config, root_arg, home)
             .ok_or_else(|| ExcludeError::RootNotFound(root_arg.to_string_lossy().into_owned()))?,
@@ -146,10 +165,18 @@ fn exclude_with_home(
         });
     }
 
+    // Idempotency is checked against the normalized (tilde-expanded,
+    // canonicalized) path, not a raw string comparison on `path` — the
+    // same reused `roots::normalize` helper `add`'s own idempotency check
+    // uses (CLAUDE.md: "if these two checks ever diverge again, that's a
+    // bug, not an acceptable inconsistency"). This is what makes a
+    // trailing slash, a `..` that resolves to the same location, or a
+    // symlink alias all correctly collapse to the same comparison target.
+    let new_normalized = normalize(&resolved, home);
     let already_excluded = config
         .exclusions
         .iter()
-        .any(|e| e.root == chosen_root && e.path == relative_str);
+        .any(|e| normalize(&Path::new(&e.root).join(&e.path), home) == new_normalized);
     if already_excluded {
         return Ok(ExcludeOutcome::AlreadyExcluded {
             root: chosen_root,
@@ -719,19 +746,13 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: confirmed bugs, NOT fixed in this pass. These are
-    // `#[ignore]`d so `cargo test` stays green; run with `-- --ignored`
-    // to reproduce. See the Phase 2 gap-audit report for full writeup. ---
+    // --- Correction pass: these two used to be `#[ignore]`d bug
+    // reproductions (gap-audit). Now fixed — un-ignored and asserting the
+    // correct behavior is the proof. See CLAUDE.md's "Exclusion
+    // persistence and disambiguation" for the fix reasoning. ---
 
     #[test]
-    #[ignore = "known bug (gap-audit): idempotency uses raw string equality \
-                on `path`, not a canonicalized comparison the way `add`'s \
-                idempotency check works (CLAUDE.md says exclude's \
-                already-excluded case follows 'the same pattern as add') — \
-                a trailing slash (or a `..` that resolves to the same \
-                location) is NOT recognized as the same exclusion and a \
-                redundant second entry is silently created"]
-    fn known_bug_trailing_slash_not_recognized_as_already_excluded() {
+    fn a_trailing_slash_variant_of_an_already_excluded_path_is_recognized_as_idempotent() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("One Piece").join("Specials").join("sp01.mkv"));
@@ -743,21 +764,19 @@ mod tests {
         let outcome =
             exclude_with_home(&mut config, Path::new("One Piece/Specials/"), None, None).unwrap();
 
-        // Desired behavior: `ExcludeOutcome::AlreadyExcluded` and
-        // `config.exclusions.len() == 1`. Actual current behavior below.
-        assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
-        assert_eq!(config.exclusions.len(), 2);
+        assert_eq!(
+            outcome,
+            ExcludeOutcome::AlreadyExcluded {
+                root: root.to_string_lossy().into_owned(),
+                relative_path: "One Piece/Specials/".to_string(),
+            }
+        );
+        // No redundant second entry.
+        assert_eq!(config.exclusions.len(), 1);
     }
 
     #[test]
-    #[ignore = "known bug (gap-audit): a leading '/' in the relative path \
-                argument makes `PathBuf::join` treat it as absolute and \
-                discard the tracked root prefix entirely (documented Rust \
-                behavior: joining an absolute path replaces the base) — \
-                every tracked root silently resolves to the exact same \
-                unrelated absolute filesystem path instead of erroring on \
-                the malformed input"]
-    fn known_bug_leading_slash_makes_every_tracked_root_resolve_to_the_same_ignored_path() {
+    fn an_absolute_path_argument_is_rejected_before_it_ever_reaches_join() {
         let dir = tempdir().unwrap();
         let root_a = dir.path().join("Anime");
         let root_b = dir.path().join("AltAnime");
@@ -774,13 +793,29 @@ mod tests {
             .paths
             .push(root_b.to_string_lossy().into_owned());
 
-        // "/etc" is used only because it reliably exists on any Linux
-        // box this test runs on — the point isn't "/etc" specifically,
-        // it's that both roots collapse to the identical resolved path.
-        let matches = find_matches(&config, Path::new("/etc"), None);
+        // "/etc" is used only because it reliably exists on any Linux box
+        // this test runs on — the point is that an absolute path must be
+        // rejected outright, never silently resolved against it.
+        let err = exclude_with_home(&mut config, Path::new("/etc"), None, None).unwrap_err();
 
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].resolved, PathBuf::from("/etc"));
-        assert_eq!(matches[1].resolved, PathBuf::from("/etc"));
+        assert_eq!(err, ExcludeError::NotRelative(PathBuf::from("/etc")));
+        assert!(config.exclusions.is_empty());
+    }
+
+    #[test]
+    fn an_absolute_path_argument_is_rejected_even_with_root_given() {
+        // The guard runs before the `root_arg`/`find_matches` branch
+        // entirely, so this must be rejected the same way regardless of
+        // whether `--root` was also passed.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+
+        let err = exclude_with_home(&mut config, Path::new("/etc"), Some(&root), None).unwrap_err();
+
+        assert_eq!(err, ExcludeError::NotRelative(PathBuf::from("/etc")));
     }
 }

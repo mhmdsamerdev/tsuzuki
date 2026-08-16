@@ -133,6 +133,33 @@ install, non-interactive) wins over minimizing keystrokes here. Contrast
 this deliberately with the resume picker (§8 in docs/design.md), where
 the opposite tradeoff was made for the opposite reason.
 
+**Idempotency comparison must be normalized, not a raw string match.**
+`"One Piece/Specials"` and `"One Piece/Specials/"` (or any other
+equivalent form `add`'s own idempotency check already treats as the same
+path — trailing slash, `..`-resolution, symlink aliasing) must be
+recognized as the same exclusion. Resolve/canonicalize both sides before
+comparing, exactly like `add` does — this was previously stated as
+already matching `add`'s behavior but didn't in practice; if these two
+checks (roots.rs's and exclude.rs's) ever diverge again, that's a bug,
+not an acceptable inconsistency.
+
+**The path argument to `exclude` must be validated as relative before
+any join.** `PathBuf::join` silently discards its base entirely when
+given an absolute path — so an unvalidated leading `/` in user input
+(typo or otherwise) can resolve against the filesystem root instead of
+the tracked root, landing on something completely unrelated. Reject an
+absolute `path` argument outright with a clear error before it ever
+reaches a `.join()` call; never let a malformed argument silently
+resolve to an unintended location.
+
+**Exclusion enforcement checks the resolved (symlink-following) path,
+not the walked entry's own literal path.** Consistent with "symlinks are
+followed everywhere" (Phase 1) — a symlink located outside an excluded
+directory but pointing *into* excluded content must still be excluded,
+because what it resolves to is excluded, even though its own path in the
+tree isn't. Checking only the entry's literal path lets a symlink alias
+silently bypass an exclusion.
+
 ### Anitomy only annotates, never reorders
 `anitomy-rs` parses episode *identity* for MAL sync. When parsing fails,
 fall back to ordinal position — silently, no error surfaced to the user

@@ -137,8 +137,16 @@ fn walk(
         // a post-filter on the sorted result. Skipping an excluded
         // directory here means `walk` never recurses into it, which is
         // what makes a directory exclusion recursive for free.
+        //
+        // The check is against this entry's *resolved* (symlink-followed)
+        // real path, and against exclusion *ancestry* — not just exact
+        // membership — so a symlink located outside an excluded directory
+        // but pointing into excluded content still resolves onto (i.e. is
+        // a descendant of) an excluded real path and is correctly caught,
+        // rather than silently bypassing the exclusion (CLAUDE.md's
+        // "Exclusion enforcement checks the resolved path").
         let real_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if excluded.contains(&real_path) {
+        if is_excluded(&real_path, excluded) {
             continue;
         }
 
@@ -166,6 +174,16 @@ fn walk(
     out.extend(files);
 
     Ok(())
+}
+
+/// True if `real_path` is itself an excluded real path, or a descendant of
+/// one — an ancestry check, not exact-set membership, since an excluded
+/// directory's own real path is the only entry recorded for it (nothing
+/// pre-expands it into every descendant path underneath).
+fn is_excluded(real_path: &Path, excluded: &HashSet<PathBuf>) -> bool {
+    excluded
+        .iter()
+        .any(|e| real_path == e || real_path.starts_with(e))
 }
 
 fn is_dir_following_symlinks(path: &Path) -> bool {
@@ -583,20 +601,14 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: confirmed bug, NOT fixed in this pass. `#[ignore]`d
-    // so `cargo test` stays green; run with `-- --ignored` to reproduce.
-    // See the Phase 2 gap-audit report for full writeup. ---
+    // --- Correction pass: this used to be an `#[ignore]`d bug
+    // reproduction (gap-audit). Now fixed — un-ignored and asserting the
+    // correct behavior is the proof. See CLAUDE.md's "Exclusion
+    // enforcement checks the resolved ... path" for the fix reasoning. ---
 
     #[cfg(unix)]
     #[test]
-    #[ignore = "known bug (gap-audit): exclusion membership is checked by \
-                exact real-path equality against the excluded directory's \
-                own canonical path, not by real-path ancestry — a symlink \
-                *outside* the excluded directory that points at content \
-                *inside* it resolves (via canonicalize) to a real path \
-                that was never added to the excluded set, so the content \
-                leaks back into ordering under the alias's name"]
-    fn known_bug_symlink_alias_reaches_excluded_content_via_a_different_path() {
+    fn a_symlink_alias_pointing_into_excluded_content_is_also_excluded() {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -613,12 +625,12 @@ mod tests {
         let episodes =
             ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
 
-        // Desired behavior: only "Season 1/ep01.mkv" (the alias should
-        // be excluded too, since it's the same real content). Actual
-        // current behavior below — the alias leaks through.
+        // The alias resolves (via canonicalize) to the exact same real
+        // file the exclusion targets, so it's excluded too, even though
+        // its own path in the tree is outside "Specials".
         assert_eq!(
             relative_order(&series_path, &episodes),
-            vec!["Season 1/ep01.mkv", "Season 1/sp01-alias.mkv"]
+            vec!["Season 1/ep01.mkv"]
         );
     }
 
