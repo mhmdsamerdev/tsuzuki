@@ -3,7 +3,7 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 1 — Tracked roots & episode ordering (done)
+**Current phase:** Phase 2 — Exclusions (done)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -59,10 +59,81 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     idempotency detection matches correctly across `~`-form and
     absolute-form for the same root.
 
+- Phase 2 — Exclusions:
+  - `Config.exclusions: Vec<Exclusion>` added (`src/config.rs`), each
+    entry storing a tracked root's own persisted literal form plus a
+    relative path under it — `[[exclusions]]` array-of-tables in TOML,
+    e.g. `root = "~/Anime"`, `path = "One Piece/Specials"`. Defaults to
+    empty; `#[serde(default)]` so a pre-Phase-2 config.toml without the
+    key still reads cleanly.
+  - `tsuzuki exclude <path> [--root <root>]` is real (`src/exclude.rs` +
+    `main.rs` wiring): resolves `<path>` against every tracked root
+    containing it, matching the full decision table from CLAUDE.md/
+    design.md §3 — zero matches errors, exactly one match validates and
+    persists, multiple matches without `--root` print the exact numbered
+    + re-invocation format from design.md §3 and exit non-zero, multiple
+    matches with `--root` resolve directly, already-excluded is
+    idempotent (exit 0), and excluding a depth-1 directory (a whole
+    series) is rejected. `roots.rs`'s `expand_tilde`/`normalize` helpers
+    were made `pub(crate)` so `exclude.rs` reuses the exact same
+    tilde-expansion/canonicalization logic `add` uses, rather than
+    duplicating it.
+  - Bare `tsuzuki exclude` (no path) is still a stub this phase, per
+    design.md §11 — Anitomy-suggested candidates land in Phase 3.
+  - `series.rs`'s `ordered_episodes` is now a thin wrapper around a new
+    `ordered_episodes_excluding(series_path, video_extensions, excluded)`
+    — exclusion filtering happens at directory-entry collection time,
+    before each level's `sort_by` call, not as a post-filter on the
+    sorted result. Excluding a directory means `walk` simply never
+    descends into it, which makes the recursive removal free. Not yet
+    wired into any user-facing command (`list`/`status`/`start` are
+    Phase 5, per scope).
+  - 60 unit tests total (up from 42): config.rs exclusion persistence
+    round-trip + missing-key-defaults-to-empty; exclude.rs's full
+    decision table (single-root success, idempotent re-exclude,
+    nonexistent-path error, whole-series rejection including the
+    depth-1-file-is-not-a-whole-series distinction, two-root ambiguity
+    listing both + exact Display-format assertion against design.md's
+    example, `--root`-disambiguated resolution, unknown `--root` error,
+    literal-tilde-form persistence, `excluded_paths_for_root` filtering);
+    series.rs's directory-exclusion-is-recursive, single-file-exclusion,
+    cross-series-isolation (excluding in one series doesn't touch an
+    identically-structured sibling), and an equivalence test confirming
+    `ordered_episodes` with no exclusions matches
+    `ordered_episodes_excluding` with an empty list. All passing, zero
+    clippy/fmt warnings.
+  - Manually verified against a scratch `HOME` with two tracked roots
+    (`~/Anime`, `~/AltAnime`) sharing `One Piece/Specials`: the
+    no-`--root` case prints the exact ambiguous-match format from
+    design.md §3 and exits non-zero; `--root ~/Anime` succeeds and
+    persists `root = "~/Anime"` (not an expanded path) to config.toml;
+    re-running the same command reports "already excluded" and exits 0;
+    excluding a whole series (`One Piece`, `Monster`) is rejected with a
+    clear message, exit non-zero.
+  - Gap-audit pass found and reproduced three bugs (each as an
+    `#[ignore]`d test): idempotency comparing raw strings instead of
+    normalized paths (a trailing slash wasn't recognized as the same
+    exclusion), an absolute `path` argument silently discarding the
+    tracked root via `PathBuf::join`'s documented replace-on-absolute
+    behavior, and exclusion enforcement checking exact real-path
+    membership instead of ancestry (a symlink outside an excluded
+    directory pointing into it could bypass the exclusion).
+  - Correction pass fixed all three: `exclude.rs`'s already-excluded
+    check now reuses `roots::normalize` (the same helper `add`'s
+    idempotency check uses) instead of comparing raw strings; an
+    absolute `path` argument is now rejected with a clear
+    `ExcludeError::NotRelative` before any `.join()`; `series.rs`'s walk
+    now checks each entry's resolved path against exclusion *ancestry*
+    (`real_path == e || real_path.starts_with(e)`) instead of exact
+    `HashSet` membership. All three previously-`#[ignore]`d tests are
+    now un-ignored and passing as part of the normal suite — 72 tests
+    total, 0 ignored.
+
 **Next up:**
-- Phase 2 — Exclusions (design.md §11): `tsuzuki exclude`, path
-  resolution against tracked roots, the multi-root ambiguity case,
-  wiring exclusions to run before the Phase 1 sort.
+- Phase 3 — Anitomy integration (design.md §11): episode-identity
+  parsing (annotation only, never reordering — see CLAUDE.md's "Anitomy
+  only annotates, never reorders"), and bare `tsuzuki exclude`'s
+  suggested-candidates flow.
 
 **Open questions blocking further work:**
 - (none)
