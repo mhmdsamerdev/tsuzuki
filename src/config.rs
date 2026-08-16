@@ -15,6 +15,8 @@ pub struct Config {
     pub roots: Roots,
     pub mpv: Mpv,
     pub mal: Mal,
+    #[serde(default)]
+    pub exclusions: Vec<Exclusion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +42,18 @@ pub struct Mal {
     pub client_id: String,
 }
 
+/// One `tsuzuki exclude`d file or directory (CLAUDE.md's "Exclusion
+/// persistence and disambiguation"). `root` stores the tracked root's own
+/// persisted literal form (whatever's in `roots.paths`, e.g. `~/Anime`),
+/// never a resolved absolute path — this is what keeps an exclusion
+/// portable across machines the same way a tracked root is. `path` is
+/// relative to that root, exactly as passed to `exclude`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Exclusion {
+    pub root: String,
+    pub path: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -61,6 +75,7 @@ impl Default for Config {
             mal: Mal {
                 client_id: String::new(),
             },
+            exclusions: Vec::new(),
         }
     }
 }
@@ -227,5 +242,62 @@ mod tests {
         );
         assert_eq!(config.mpv.watch_later_dir, "");
         assert_eq!(config.mal.client_id, "");
+        assert!(config.exclusions.is_empty());
+    }
+
+    #[test]
+    fn exclusions_round_trip_through_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.roots.paths.push("~/Anime".to_string());
+        config.exclusions.push(Exclusion {
+            root: "~/Anime".to_string(),
+            path: "One Piece/Specials".to_string(),
+        });
+        config.exclusions.push(Exclusion {
+            root: "~/Anime".to_string(),
+            path: "Monster/stray-clip.mkv".to_string(),
+        });
+
+        write(&path, &config).unwrap();
+        let reread = read(&path).unwrap();
+
+        assert_eq!(reread.exclusions, config.exclusions);
+        assert_eq!(reread.exclusions[0].root, "~/Anime");
+        assert_eq!(reread.exclusions[0].path, "One Piece/Specials");
+    }
+
+    #[test]
+    fn missing_exclusions_key_defaults_to_empty_on_read() {
+        // A config.toml written before Phase 2 (or hand-edited without an
+        // [[exclusions]] section) must still read cleanly rather than
+        // erroring on a missing field.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[thresholds]
+resume_seconds = 120
+completion_remaining_seconds = 180
+auto_pause_days = 0
+
+[roots]
+paths = []
+video_extensions = ["mkv"]
+
+[mpv]
+watch_later_dir = ""
+
+[mal]
+client_id = ""
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert!(config.exclusions.is_empty());
     }
 }

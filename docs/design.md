@@ -77,7 +77,23 @@ tsuzuki exclude "One Piece/Specials"
 # resolves to ~/Anime/One Piece/Specials
 ```
 
-Excluding a directory excludes everything under it, recursively. Excluding a single file covers a stray file sitting alongside real episodes. If the same relative path exists under more than one tracked root (possible with composable roots), Tsuzuki doesn't guess — it lists the matches and asks the user to specify which one. Either way, excluded content is skipped by ordering and "next episode" logic entirely, but remains playable manually and still trackable if opened directly.
+Excluding a directory excludes everything under it, recursively. Excluding a single file covers a stray file sitting alongside real episodes. If the same relative path exists under more than one tracked root (possible with composable roots), Tsuzuki doesn't guess — it lists every matching absolute path and the exact `--root` invocation to disambiguate:
+
+```
+$ tsuzuki exclude "One Piece/Specials"
+Ambiguous: "One Piece/Specials" exists under more than one tracked root:
+
+  1. /home/user/Anime/One Piece/Specials
+  2. /home/user/AltAnime/One Piece/Specials
+
+Re-run with --root to specify which one:
+  tsuzuki exclude "One Piece/Specials" --root ~/Anime
+  tsuzuki exclude "One Piece/Specials" --root ~/AltAnime
+```
+
+`--root` stays script-friendly on purpose — unlike the resume picker (§8), this is a rare setup action, not the daily reflex path, so scriptability wins over interactivity here. Either way, excluded content is skipped by ordering and "next episode" logic entirely, but remains playable manually and still trackable if opened directly.
+
+`exclude` validates the resolved path exists on disk before excluding it, exiting non-zero with a clear error otherwise — consistent with `add`'s validate-now behavior. Excluding an entire series folder (the depth-1 directory itself, not something under it) is rejected as invalid usage: "don't track this series" is what not adding it, or a future `drop`, is for — allowing `exclude` to also remove a whole series would create a confusing third way to make one disappear.
 
 Running `tsuzuki exclude` with no path surfaces Anitomy-suggested candidates (see §5) — files whose parsed type looks like OVA/Special/Movie — for the user to confirm. Nothing is ever excluded automatically.
 
@@ -283,7 +299,7 @@ tsuzuki config edit
 **The resume picker itself:**
 
 - **Exactly one `in_progress` series** → bare `tsuzuki` resumes it directly, no picker — preserves the one-command demo.
-- **More than one** → shows a short choice list.
+- **More than one** → an interactive arrow-key selector (↑/↓ to move, Enter to confirm) — not a type-a-number prompt. This is the one place in the tool where an interactive-only UX is the right call: it's the daily-use reflex path the whole tool is built around, so minimizing keystrokes matters more here than scriptability does (contrast `tsuzuki exclude`'s ambiguity case, §3, which stays script-friendly via a `--root` flag instead, since that's a rare setup action). Requires a real TTY; a non-interactive context (piped/scripted `tsuzuki`) falls back to listing the choices and their index instead of hanging on a prompt that can't render.
 - **Zero** → falls through to `tsuzuki start` behavior.
 
 **Config vs. state — two separate files.** Config is what a human tunes; state is what Tsuzuki writes as it runs. State lives at:

@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod exclude;
 mod roots;
 mod series;
 mod state;
@@ -57,7 +58,13 @@ fn dispatch(command: Command, config: &mut Config, config_path: &Path) -> ExitCo
         Command::Start => stub("start"),
         Command::Pause { .. } => stub("pause"),
         Command::Drop { .. } => stub("drop"),
-        Command::Exclude { .. } => stub("exclude"),
+        Command::Exclude { path: None, .. } => {
+            println!("not implemented: exclude (no path) — candidate suggestions land in Phase 3");
+        }
+        Command::Exclude {
+            path: Some(path),
+            root,
+        } => return exclude_command(&path, root.as_deref(), config, config_path),
         Command::Sync { action } => match action {
             None => stub("sync"),
             Some(SyncCommand::Login) => stub("sync login"),
@@ -95,6 +102,42 @@ fn add_command(path: &Path, config: &mut Config, config_path: &Path) -> ExitCode
                 ));
             }
             println!("added tracked root: {}", as_typed.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
+/// `tsuzuki exclude <path> [--root <root>]` — resolves `path` against
+/// tracked roots and persists the exclusion (CLAUDE.md's "Exclusion
+/// persistence and disambiguation"). Ambiguous matches and validation
+/// failures print `ExcludeError`'s `Display` output as-is — it already
+/// includes the exact `--root` re-invocations design.md §3 specifies.
+fn exclude_command(
+    path: &str,
+    root: Option<&Path>,
+    config: &mut Config,
+    config_path: &Path,
+) -> ExitCode {
+    match exclude::exclude(config, Path::new(path), root) {
+        Ok(exclude::ExcludeOutcome::AlreadyExcluded {
+            root,
+            relative_path,
+        }) => {
+            println!("already excluded: \"{relative_path}\" under {root}");
+            ExitCode::SUCCESS
+        }
+        Ok(exclude::ExcludeOutcome::Excluded {
+            root,
+            relative_path,
+        }) => {
+            if let Err(e) = config::write(config_path, config) {
+                return fail(&format!(
+                    "could not write config at {}: {e}",
+                    config_path.display()
+                ));
+            }
+            println!("excluded: \"{relative_path}\" under {root}");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),

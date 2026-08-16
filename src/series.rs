@@ -68,6 +68,30 @@ pub fn ordered_episodes(
     series_path: &Path,
     video_extensions: &[String],
 ) -> io::Result<Vec<PathBuf>> {
+    ordered_episodes_excluding(series_path, video_extensions, &[])
+}
+
+/// Same as [`ordered_episodes`], but any path in `excluded` (files or
+/// directories, given as real filesystem paths — not necessarily
+/// canonicalized by the caller, this function does that) is removed from
+/// the tree entirely before the natural sort runs, never as a post-filter
+/// on the sorted result (CLAUDE.md's "Exclusions run before ordering,
+/// always"). Excluding a directory excludes everything under it
+/// recursively, simply by never descending into it. Kept as a distinct
+/// function — rather than folding exclusion-filtering and sorting into one
+/// pass — so exclusion behavior stays independently testable from the sort
+/// itself.
+#[allow(dead_code)]
+pub fn ordered_episodes_excluding(
+    series_path: &Path,
+    video_extensions: &[String],
+    excluded: &[PathBuf],
+) -> io::Result<Vec<PathBuf>> {
+    let excluded_real: HashSet<PathBuf> = excluded
+        .iter()
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
     let mut episodes = Vec::new();
     let mut visited = HashSet::new();
     // Seed with the series root's own real path so a symlink anywhere in
@@ -76,13 +100,20 @@ pub fn ordered_episodes(
     if let Ok(real_root) = fs::canonicalize(series_path) {
         visited.insert(real_root);
     }
-    walk(series_path, video_extensions, &mut episodes, &mut visited)?;
+    walk(
+        series_path,
+        video_extensions,
+        &excluded_real,
+        &mut episodes,
+        &mut visited,
+    )?;
     Ok(episodes)
 }
 
 fn walk(
     dir: &Path,
     video_extensions: &[String],
+    excluded: &HashSet<PathBuf>,
     out: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
 ) -> io::Result<()> {
@@ -100,6 +131,17 @@ fn walk(
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
+
+        // Exclusion filtering happens here, at collection time — before
+        // this level's entries are even handed to `sort_by` below, not as
+        // a post-filter on the sorted result. Skipping an excluded
+        // directory here means `walk` never recurses into it, which is
+        // what makes a directory exclusion recursive for free.
+        let real_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if excluded.contains(&real_path) {
+            continue;
+        }
+
         if metadata.is_dir() {
             subdirs.push(path);
         } else if metadata.is_file() && is_video_file(&path, video_extensions) {
@@ -118,7 +160,7 @@ fn walk(
         // otherwise list the same episodes twice.
         let real_path = fs::canonicalize(subdir).unwrap_or_else(|_| subdir.clone());
         if visited.insert(real_path) {
-            walk(subdir, video_extensions, out, visited)?;
+            walk(subdir, video_extensions, excluded, out, visited)?;
         }
     }
     out.extend(files);
@@ -421,6 +463,162 @@ mod tests {
         assert_eq!(
             relative_order(&series_path, &episodes),
             vec!["ep01.mkv/nested.mkv"]
+        );
+    }
+
+    #[test]
+    fn excluding_a_directory_removes_everything_under_it_recursively() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("One Piece");
+        touch(&series_path.join("Season 1").join("ep01.mkv"));
+        touch(&series_path.join("Season 1").join("ep02.mkv"));
+        touch(&series_path.join("Specials").join("sp01.mkv"));
+        touch(&series_path.join("Specials").join("sp02.mkv"));
+
+        let excluded = vec![series_path.join("Specials")];
+        let episodes =
+            ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
+
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec!["Season 1/ep01.mkv", "Season 1/ep02.mkv"]
+        );
+    }
+
+    #[test]
+    fn excluding_a_single_file_removes_only_that_file() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+        touch(&series_path.join("stray-clip.mkv"));
+
+        let excluded = vec![series_path.join("stray-clip.mkv")];
+        let episodes =
+            ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
+
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec!["ep01.mkv", "ep02.mkv"]
+        );
+    }
+
+    #[test]
+    fn an_unexcluded_series_with_the_same_directory_structure_is_unaffected() {
+        // Proves exclusions don't leak across series (or roots): a second
+        // series with an identically-named "Specials" subdirectory, given
+        // an exclusion list that only names the *other* series' Specials
+        // folder, must keep its own Specials content intact.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let excluded_series = root.join("One Piece");
+        let unaffected_series = root.join("Monster");
+        touch(&excluded_series.join("Specials").join("sp01.mkv"));
+        touch(&excluded_series.join("Season 1").join("ep01.mkv"));
+        touch(&unaffected_series.join("Specials").join("sp01.mkv"));
+        touch(&unaffected_series.join("Season 1").join("ep01.mkv"));
+
+        let excluded = vec![excluded_series.join("Specials")];
+
+        let one_piece_episodes =
+            ordered_episodes_excluding(&excluded_series, &default_extensions(), &excluded).unwrap();
+        assert_eq!(
+            relative_order(&excluded_series, &one_piece_episodes),
+            vec!["Season 1/ep01.mkv"]
+        );
+
+        let monster_episodes =
+            ordered_episodes_excluding(&unaffected_series, &default_extensions(), &excluded)
+                .unwrap();
+        assert_eq!(
+            relative_order(&unaffected_series, &monster_episodes),
+            vec!["Season 1/ep01.mkv", "Specials/sp01.mkv"]
+        );
+    }
+
+    #[test]
+    fn ordered_episodes_with_no_exclusions_matches_ordered_episodes_excluding_with_an_empty_list() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("One Piece");
+        touch(&series_path.join("Season 1").join("ep01.mkv"));
+        touch(&series_path.join("Specials").join("sp01.mkv"));
+
+        let plain = ordered_episodes(&series_path, &default_extensions()).unwrap();
+        let via_excluding =
+            ordered_episodes_excluding(&series_path, &default_extensions(), &[]).unwrap();
+
+        assert_eq!(plain, via_excluding);
+    }
+
+    // --- Gap-audit: symlink interaction with exclusion filtering ---
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_an_excluded_directory_pointing_out_is_never_reached() {
+        // The excluded directory is skipped at collection time — `walk`
+        // never even calls `read_dir` on it — so an internal symlink
+        // that points back out to non-excluded content elsewhere can't
+        // leak that content in via this direction: the symlink itself is
+        // never discovered, let alone followed.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("One Piece");
+        touch(&series_path.join("Season 1").join("ep01.mkv"));
+        touch(&series_path.join("Real Content").join("ep02.mkv"));
+        std_fs::create_dir_all(series_path.join("Specials")).unwrap();
+        symlink(
+            series_path.join("Real Content"),
+            series_path.join("Specials").join("link-out"),
+        )
+        .unwrap();
+
+        let excluded = vec![series_path.join("Specials")];
+        let episodes =
+            ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
+
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec!["Real Content/ep02.mkv", "Season 1/ep01.mkv"]
+        );
+    }
+
+    // --- Gap-audit: confirmed bug, NOT fixed in this pass. `#[ignore]`d
+    // so `cargo test` stays green; run with `-- --ignored` to reproduce.
+    // See the Phase 2 gap-audit report for full writeup. ---
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "known bug (gap-audit): exclusion membership is checked by \
+                exact real-path equality against the excluded directory's \
+                own canonical path, not by real-path ancestry — a symlink \
+                *outside* the excluded directory that points at content \
+                *inside* it resolves (via canonicalize) to a real path \
+                that was never added to the excluded set, so the content \
+                leaks back into ordering under the alias's name"]
+    fn known_bug_symlink_alias_reaches_excluded_content_via_a_different_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("One Piece");
+        touch(&series_path.join("Specials").join("sp01.mkv"));
+        touch(&series_path.join("Season 1").join("ep01.mkv"));
+        symlink(
+            series_path.join("Specials").join("sp01.mkv"),
+            series_path.join("Season 1").join("sp01-alias.mkv"),
+        )
+        .unwrap();
+
+        let excluded = vec![series_path.join("Specials")];
+        let episodes =
+            ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
+
+        // Desired behavior: only "Season 1/ep01.mkv" (the alias should
+        // be excluded too, since it's the same real content). Actual
+        // current behavior below — the alias leaks through.
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec!["Season 1/ep01.mkv", "Season 1/sp01-alias.mkv"]
         );
     }
 

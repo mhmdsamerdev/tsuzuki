@@ -89,13 +89,18 @@ fn add_root_with_home(
 /// tilde-expanded form rather than erroring — idempotency checks must not
 /// fail just because an unrelated stored entry is currently unreachable.
 /// This is a comparison-only helper — its output is never written back to
-/// config.
-fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
+/// config. `pub(crate)` so `exclude.rs` can resolve a `--root` argument
+/// against a tracked root's literal form the same way `add`'s idempotency
+/// check does, rather than duplicating this logic.
+pub(crate) fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
     let expanded = expand_tilde(path, home);
     fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
-fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
+/// `pub(crate)` so `exclude.rs` can expand a tracked root's literal form
+/// (e.g. `~/Anime`) the same way `add_root` does, rather than duplicating
+/// tilde-expansion logic.
+pub(crate) fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~")
         && let Some(home) = home
     {

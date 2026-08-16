@@ -54,6 +54,12 @@ pub enum Command {
     Exclude {
         /// Path relative to a tracked root; omit to see suggested candidates
         path: Option<String>,
+
+        /// Tracked root to resolve `path` against, when it exists under
+        /// more than one (see the ambiguous-match error for the exact
+        /// invocation to use)
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 
     /// Run or configure MyAnimeList sync

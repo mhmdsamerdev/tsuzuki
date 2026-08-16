@@ -112,6 +112,27 @@ verify exclusions still fully remove nodes pre-sort — don't let excluded
 files leak into natural-sort comparisons even if their final output
 position ends up correct by luck.
 
+### Exclusion persistence and disambiguation
+Exclusions persist in `config.toml` (not `state.toml`) — they're an
+explicit, human-declared, one-time rule, same category as tracked roots,
+not something Tsuzuki derives while running. Like roots (above), the
+stored form must stay portable: store the relative path plus a reference
+to which tracked root it belongs to (using that root's own persisted
+literal form as the key), never a resolved absolute path baked to one
+machine. `exclude` validates the resolved path exists on disk before
+excluding, matching `add`'s validate-now behavior — an exclude of a
+typo'd path should error, not silently accept garbage. Excluding an
+entire series folder (a depth-1 directory itself) is rejected as invalid
+usage — not tracking it, or a future `drop`, is the correct tool for
+that; allowing `exclude` to also remove a whole series would be a third,
+confusing way to make one disappear. When the same relative path exists
+under more than one tracked root, resolution is a `--root <path>` flag,
+not an interactive prompt — `exclude` is a rare setup action, not the
+daily reflex path, so staying scriptable (usable in a script/dotfiles
+install, non-interactive) wins over minimizing keystrokes here. Contrast
+this deliberately with the resume picker (§8 in docs/design.md), where
+the opposite tradeoff was made for the opposite reason.
+
 ### Anitomy only annotates, never reorders
 `anitomy-rs` parses episode *identity* for MAL sync. When parsing fails,
 fall back to ordinal position — silently, no error surfaced to the user
@@ -191,6 +212,18 @@ the kind of silent failure the project avoids everywhere else. The
 canonical stored/documented form stays the bare extension (no dot), per
 §8's example; the normalization only exists to make the dotted form also
 work rather than fail silently.
+
+### Resume picker is interactive (arrow-key select), not a numbered prompt — Phase 5
+Deciding this now so it isn't re-litigated later: the multi-`in_progress`
+resume picker (§8) uses a real interactive selector (↑/↓, Enter — via a
+crate like `dialoguer` or `inquire`), not "type a number." This is the
+one place in the tool where losing scriptability is the right tradeoff —
+it's the daily one-command reflex path the whole tool exists for, so
+minimizing keystrokes matters more than non-interactive use here. A
+non-TTY context (piped/scripted invocation) must fall back to listing
+choices with an index rather than hanging on a prompt that can't render.
+Not built until Phase 5; noted here so the crate choice and UX aren't
+improvised under time pressure later.
 
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
