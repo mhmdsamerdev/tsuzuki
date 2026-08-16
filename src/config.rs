@@ -80,18 +80,31 @@ pub fn config_path() -> io::Result<PathBuf> {
 /// Reads config from `path`. If the file doesn't exist, writes and returns
 /// defaults instead of erroring.
 pub fn read(path: &Path) -> io::Result<Config> {
-    match fs::read_to_string(path) {
+    let mut config = match fs::read_to_string(path) {
         Ok(contents) => {
-            let config: Config = toml::from_str(&contents)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            Ok(config)
+            toml::from_str(&contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let config = Config::default();
             write(path, &config)?;
-            Ok(config)
+            config
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    normalize_video_extensions(&mut config);
+    Ok(config)
+}
+
+/// Strips a leading `.` from each `video_extensions` entry, so a
+/// hand-typed `.mkv` behaves identically to the documented bare `mkv`
+/// form (CLAUDE.md's "video_extensions entries are normalized on read").
+/// In-memory only — the on-disk file is never silently rewritten just
+/// because it was read; only an explicit `write` changes it.
+fn normalize_video_extensions(config: &mut Config) {
+    for ext in &mut config.roots.video_extensions {
+        if let Some(stripped) = ext.strip_prefix('.') {
+            *ext = stripped.to_string();
+        }
     }
 }
 
@@ -158,6 +171,46 @@ mod tests {
         assert_eq!(
             fs::read(&occupied).unwrap(),
             b"unrelated file, blocks the parent dir"
+        );
+    }
+
+    #[test]
+    fn video_extensions_with_leading_dots_are_normalized_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.roots.video_extensions =
+            vec![".mkv".to_string(), "mp4".to_string(), ".AVI".to_string()];
+        write(&path, &config).unwrap();
+
+        let reread = read(&path).unwrap();
+        assert_eq!(
+            reread.roots.video_extensions,
+            vec!["mkv".to_string(), "mp4".to_string(), "AVI".to_string()]
+        );
+    }
+
+    #[test]
+    fn dotted_and_bare_video_extensions_normalize_to_the_same_result() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let dotted_path = dir.path().join("dotted.toml");
+        let mut dotted = Config::default();
+        dotted.roots.video_extensions = vec![".mkv".to_string(), ".mp4".to_string()];
+        write(&dotted_path, &dotted).unwrap();
+
+        let bare_path = dir.path().join("bare.toml");
+        let mut bare = Config::default();
+        bare.roots.video_extensions = vec!["mkv".to_string(), "mp4".to_string()];
+        write(&bare_path, &bare).unwrap();
+
+        let dotted_read = read(&dotted_path).unwrap();
+        let bare_read = read(&bare_path).unwrap();
+
+        assert_eq!(
+            dotted_read.roots.video_extensions,
+            bare_read.roots.video_extensions
         );
     }
 

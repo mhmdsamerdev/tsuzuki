@@ -169,6 +169,29 @@ versionable in a dotfiles repo) and the `~`-form example already shown
 there. If a future phase needs an absolute path (e.g. for filesystem
 scanning), expand at the point of use — never persist the expanded form.
 
+### Symlinks are followed everywhere, with cycle protection
+A symlinked series folder or symlinked episode file behaves exactly like
+a real one — "the user's filesystem is already their library" (§2)
+includes symlinks as a legitimate, ordinary part of that filesystem, not
+something to silently hide. This must be applied consistently: any
+filesystem-walking code (series enumeration, episode-tree building, root
+validation/comparison) uses stat semantics (follows symlinks), never
+lstat semantics (which would silently make symlinked content invisible
+with no error). Because following symlinks makes cycles possible (a
+symlink pointing back into its own ancestry), any recursive walk must
+track canonicalized real paths already visited and stop descending into
+a repeat — this guard is not optional once symlinks are followed at all.
+
+### video_extensions entries are normalized on read (leading dot stripped)
+A config entry of `.mkv` and `mkv` are treated identically — config.rs
+strips a leading `.` if present when loading `video_extensions`. Without
+this, a natural, common way to hand-type the list (`.mkv` instead of
+`mkv`) would silently match nothing, with no error surfaced — exactly
+the kind of silent failure the project avoids everywhere else. The
+canonical stored/documented form stays the bare extension (no dot), per
+§8's example; the normalization only exists to make the dotted form also
+work rather than fail silently.
+
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
 about user intent (on a break vs. abandoned vs. waiting for episodes to

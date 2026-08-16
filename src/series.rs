@@ -5,6 +5,7 @@
 //! `tempfile`-fabricated trees. Not wired into any user-facing command yet
 //! (that's Phase 5); this module only needs to be callable and correct.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,7 +26,11 @@ pub struct Series {
 /// Enumerates the immediate child directories of `root` as series — depth
 /// 1 only, no recursion into what counts as a series, verbatim directory
 /// name. Non-directory entries directly under `root` are ignored; a series
-/// is always a directory.
+/// is always a directory. Follows symlinks (stat semantics, not lstat) —
+/// a symlinked series folder behaves exactly like a real one (CLAUDE.md's
+/// "Symlinks are followed everywhere, with cycle protection"). No cycle
+/// protection is needed here: this function never recurses, so a symlink
+/// cycle among `root`'s immediate children can't cause unbounded work.
 ///
 /// Results are naturally sorted by name for deterministic output, but this
 /// ordering isn't meaningful yet — Phase 5's `list`/`start` decide how
@@ -35,12 +40,10 @@ pub fn series_in_root(root: &Path) -> io::Result<Vec<Series>> {
     let mut series = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
+        let path = entry.path();
+        if is_dir_following_symlinks(&path) {
             let name = entry.file_name().to_string_lossy().into_owned();
-            series.push(Series {
-                path: entry.path(),
-                name,
-            });
+            series.push(Series { path, name });
         }
     }
     series.sort_by(|a, b| natord::compare(&a.name, &b.name));
@@ -53,27 +56,53 @@ pub fn series_in_root(root: &Path) -> io::Result<Vec<Series>> {
 /// video files are compared naturally against each other and appended.
 /// Only files whose extension matches `video_extensions` (case-insensitive)
 /// are included as leaves — directories are never filtered by extension.
+///
+/// Follows symlinks (stat semantics) for both directories and files, per
+/// CLAUDE.md — a symlinked subdirectory is recursed into and a symlinked
+/// episode file is included exactly like a real one. Because following
+/// symlinks makes cycles possible, the walk tracks canonicalized real
+/// paths already visited and stops descending into a repeat rather than
+/// recursing forever.
 #[allow(dead_code)]
 pub fn ordered_episodes(
     series_path: &Path,
     video_extensions: &[String],
 ) -> io::Result<Vec<PathBuf>> {
     let mut episodes = Vec::new();
-    walk(series_path, video_extensions, &mut episodes)?;
+    let mut visited = HashSet::new();
+    // Seed with the series root's own real path so a symlink anywhere in
+    // the tree that points back to the root is caught immediately, rather
+    // than causing one full duplicate pass over the root's own files.
+    if let Ok(real_root) = fs::canonicalize(series_path) {
+        visited.insert(real_root);
+    }
+    walk(series_path, video_extensions, &mut episodes, &mut visited)?;
     Ok(episodes)
 }
 
-fn walk(dir: &Path, video_extensions: &[String], out: &mut Vec<PathBuf>) -> io::Result<()> {
+fn walk(
+    dir: &Path,
+    video_extensions: &[String],
+    out: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> io::Result<()> {
     let mut subdirs = Vec::new();
     let mut files = Vec::new();
 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let file_type = entry.file_type()?;
         let path = entry.path();
-        if file_type.is_dir() {
+        // `fs::metadata` follows symlinks (unlike `DirEntry::file_type`,
+        // which reports the symlink itself). A broken symlink or a
+        // read/permission race makes this fail — such an entry is
+        // silently skipped rather than aborting the whole walk, the same
+        // way a non-matching extension is silently excluded.
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
             subdirs.push(path);
-        } else if file_type.is_file() && is_video_file(&path, video_extensions) {
+        } else if metadata.is_file() && is_video_file(&path, video_extensions) {
             files.push(path);
         }
     }
@@ -82,11 +111,23 @@ fn walk(dir: &Path, video_extensions: &[String], out: &mut Vec<PathBuf>) -> io::
     files.sort_by(|a, b| natord::compare(&entry_name(a), &entry_name(b)));
 
     for subdir in &subdirs {
-        walk(subdir, video_extensions, out)?;
+        // Cycle protection: only descend if this subdirectory's real
+        // (symlink-resolved) path hasn't been visited yet in this walk.
+        // Also naturally deduplicates two different aliases (e.g. two
+        // symlinks) that resolve to the same real directory, which would
+        // otherwise list the same episodes twice.
+        let real_path = fs::canonicalize(subdir).unwrap_or_else(|_| subdir.clone());
+        if visited.insert(real_path) {
+            walk(subdir, video_extensions, out, visited)?;
+        }
     }
     out.extend(files);
 
     Ok(())
+}
+
+fn is_dir_following_symlinks(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
 
 fn entry_name(path: &Path) -> String {
@@ -105,6 +146,7 @@ fn is_video_file(path: &Path, video_extensions: &[String]) -> bool {
 mod tests {
     use super::*;
     use std::fs::{self as std_fs, File};
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     fn touch(path: &Path) {
@@ -348,13 +390,15 @@ mod tests {
     #[test]
     fn leading_dot_in_configured_extension_does_not_match_bare_file_extension() {
         // `Path::extension()` returns the extension without its leading
-        // dot, and `is_video_file` compares against `video_extensions`
-        // entries as-is with no normalization. A hand-edited config using
-        // ".mkv" instead of design.md §8's documented bare "mkv" form
-        // silently matches nothing — no error surfaced, consistent with
-        // how the rest of config.rs treats video_extensions (no
-        // validation/normalization on read). This test documents that
-        // contract so it isn't accidentally "fixed" into silent inference.
+        // dot, and `is_video_file` compares against whatever list it's
+        // given as-is, with no normalization of its own — normalizing a
+        // leading dot is config.rs's job at load time (see
+        // config.rs::video_extensions_with_leading_dots_are_normalized_on_read),
+        // deliberately not repeated per-file-comparison here (CLAUDE.md).
+        // This test documents that `ordered_episodes` itself stays
+        // literal: a caller that bypasses `config::read` and hands it a
+        // raw dotted extension still gets this behavior, not a silent
+        // second normalization pass.
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("Dotted Config");
         touch(&series_path.join("ep01.mkv"));
@@ -378,6 +422,97 @@ mod tests {
             relative_order(&series_path, &episodes),
             vec!["ep01.mkv/nested.mkv"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_subdirectory_under_a_tracked_root_is_enumerated_as_a_series() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        let real_series = dir.path().join("real-storage").join("Monster");
+        std_fs::create_dir_all(&real_series).unwrap();
+
+        symlink(&real_series, root.join("Monster")).unwrap();
+
+        let series = series_in_root(&root).unwrap();
+        let names: Vec<_> = series.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["Monster"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_episode_file_is_included_in_ordered_episodes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Series");
+        std_fs::create_dir_all(&series_path).unwrap();
+        touch(&series_path.join("ep01.mkv"));
+
+        let real_ep02 = dir.path().join("real-storage").join("ep02.mkv");
+        touch(&real_ep02);
+        symlink(&real_ep02, series_path.join("ep02.mkv")).unwrap();
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec!["ep01.mkv", "ep02.mkv"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cycle_does_not_hang_or_panic() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Cycle Series");
+        let nested = series_path.join("nested");
+        std_fs::create_dir_all(&nested).unwrap();
+        touch(&series_path.join("ep01.mkv"));
+
+        // `nested/back` symlinks back to the series root itself — a cycle
+        // a naive recursive walk would follow forever once symlinks are
+        // followed at all.
+        symlink(&series_path, nested.join("back")).unwrap();
+
+        let series_path_clone = series_path.clone();
+        let extensions = default_extensions();
+        let handle = std::thread::spawn(move || ordered_episodes(&series_path_clone, &extensions));
+
+        let result = wait_with_timeout(handle, Duration::from_secs(5)).expect(
+            "ordered_episodes did not return within the timeout — \
+             likely an infinite loop from the symlink cycle",
+        );
+
+        let episodes = result.unwrap();
+        // The cycle must not cause ep01.mkv to be listed more than once.
+        assert_eq!(relative_order(&series_path, &episodes), vec!["ep01.mkv"]);
+    }
+
+    /// Polls a `JoinHandle` instead of blocking on `.join()`, so a
+    /// regression that reintroduces infinite recursion fails this test
+    /// loudly (assertion/panic) instead of hanging the whole test binary
+    /// (and therefore CI) indefinitely. The spawned thread itself can't be
+    /// killed if it never returns — it's leaked for the rest of the
+    /// process — but the test polling it always returns within `timeout`.
+    fn wait_with_timeout<T: Send + 'static>(
+        handle: std::thread::JoinHandle<T>,
+        timeout: Duration,
+    ) -> Option<T> {
+        let start = Instant::now();
+        loop {
+            if handle.is_finished() {
+                return handle.join().ok();
+            }
+            if start.elapsed() > timeout {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Not a correctness assertion — ordering isn't wired to any command
