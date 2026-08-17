@@ -1,7 +1,9 @@
 mod anitomy;
 mod cli;
 mod config;
+mod duration;
 mod exclude;
+mod mpv;
 mod roots;
 mod series;
 mod state;

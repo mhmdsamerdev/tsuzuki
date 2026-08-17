@@ -1,0 +1,715 @@
+//! Reading mpv's `watch_later` files (CLAUDE.md's "mpv `watch_later`
+//! reading, not IPC or launching mpv", design.md §4).
+//!
+//! Tsuzuki never launches mpv or holds an IPC socket — it only reads mpv's
+//! own `watch_later` entries after the fact, from a fixed list of candidate
+//! locations (or a user-configured override), merges duplicates
+//! freshest-file-wins, filters to tracked roots, and classifies each
+//! position against the resume/completion thresholds. No caller yet (Phase
+//! 5 wires this into `resume`/`status`/`current`/...) —
+//! `#[allow(dead_code)]`, matching `series.rs`/`anitomy.rs`'s established
+//! not-yet-wired convention.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::config::Config;
+use crate::duration::DurationOutcome;
+use crate::roots::{expand_tilde, normalize};
+
+/// One candidate `watch_later` directory location, tagged with the OS it
+/// applies to (matched against `std::env::consts::OS`) — a data table, not
+/// scattered `if cfg!(target_os)` checks, so macOS/Windows entries can be
+/// added later (once their real paths are verified — design.md §4 marks
+/// them unverified) without restructuring this lookup.
+struct WatchLaterCandidate {
+    os: &'static str,
+    /// Joined onto the user's home directory.
+    relative: &'static str,
+}
+
+/// design.md §4's exact candidate list. v1 is Linux-only (CLAUDE.md §5);
+/// macOS/Windows rows are deliberately not added yet.
+const CANDIDATES: &[WatchLaterCandidate] = &[
+    WatchLaterCandidate {
+        os: "linux",
+        relative: ".local/state/mpv/watch_later",
+    },
+    WatchLaterCandidate {
+        os: "linux",
+        relative: ".cache/mpv/watch_later",
+    },
+    WatchLaterCandidate {
+        os: "linux",
+        relative: ".var/app/io.mpv.Mpv/.local/state/mpv/watch_later",
+    },
+    WatchLaterCandidate {
+        os: "linux",
+        relative: ".var/app/io.mpv.Mpv/.cache/mpv/watch_later",
+    },
+    WatchLaterCandidate {
+        os: "linux",
+        relative: "snap/mpv/current/.local/state/mpv/watch_later",
+    },
+];
+
+/// The OS-default candidate `watch_later` directories, joined onto `home`.
+/// Selecting by `std::env::consts::OS` keeps this one call site as the only
+/// platform check — no per-call `cfg!(target_os = ...)` branching.
+#[allow(dead_code)]
+fn candidate_watch_later_dirs(home: &Path) -> Vec<PathBuf> {
+    CANDIDATES
+        .iter()
+        .filter(|c| c.os == std::env::consts::OS)
+        .map(|c| home.join(c.relative))
+        .collect()
+}
+
+/// Resolves the directories to scan: `watch_later_dir_override` (if
+/// non-empty) REPLACES the OS-default candidate list entirely — only that
+/// one directory is scanned, defaults are not also merged in (CLAUDE.md's
+/// "`watch_later_dir` config override"). If `home` can't be resolved and no
+/// override is set, returns an empty list rather than guessing.
+#[allow(dead_code)]
+fn resolve_watch_later_dirs(watch_later_dir_override: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    if !watch_later_dir_override.is_empty() {
+        return vec![expand_tilde(Path::new(watch_later_dir_override), home)];
+    }
+    match home {
+        Some(home) => candidate_watch_later_dirs(home),
+        None => Vec::new(),
+    }
+}
+
+/// One parsed, tracked-root-filtered `watch_later` entry.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchLaterEntry {
+    /// The path mpv wrote in the entry's comment line — the file the entry
+    /// is for. Not necessarily canonicalized.
+    pub source_path: PathBuf,
+    /// Parsed from the entry's `start=` line.
+    pub position_seconds: f64,
+    /// The entry file's own mtime — used both for the per-path
+    /// freshest-wins merge and for picking the single most recent entry.
+    pub mtime: SystemTime,
+}
+
+/// Parses one `watch_later` entry file. Returns `None` for a `# redirect
+/// entry` (no real position — an internal mpv pointer from opening a
+/// directory/playlist, not playback state) or for any entry that doesn't
+/// fit the expected shape (missing `start=`, first line isn't a `#`
+/// comment, unparseable float, unreadable mtime) — malformed entries are
+/// skipped, never abort the caller's scan.
+fn parse_entry_file(path: &Path) -> Option<WatchLaterEntry> {
+    let contents = fs::read_to_string(path).ok()?;
+    let mut lines = contents.lines();
+    let first_line = lines.next()?;
+
+    if first_line == "# redirect entry" {
+        return None;
+    }
+
+    let source_str = first_line.strip_prefix("# ")?;
+    if source_str.is_empty() {
+        return None;
+    }
+    let source_path = PathBuf::from(source_str);
+
+    let position_seconds = lines
+        .find_map(|line| line.strip_prefix("start="))
+        .and_then(|rest| rest.trim().parse::<f64>().ok())?;
+
+    let mtime = fs::metadata(path).ok()?.modified().ok()?;
+
+    Some(WatchLaterEntry {
+        source_path,
+        position_seconds,
+        mtime,
+    })
+}
+
+/// Keeps only entries whose `source_path` falls under one of `tracked_roots`
+/// (reusing `roots::normalize`, the same tilde-expand-then-canonicalize
+/// comparison `add`/`exclude` already use — not a second comparison
+/// helper).
+fn filter_to_tracked_roots(
+    entries: Vec<WatchLaterEntry>,
+    tracked_roots: &[String],
+    home: Option<&Path>,
+) -> Vec<WatchLaterEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let real_source = normalize(&entry.source_path, home);
+            tracked_roots.iter().any(|root| {
+                let real_root = normalize(Path::new(root), home);
+                real_source.starts_with(&real_root)
+            })
+        })
+        .collect()
+}
+
+/// Merges entries by `source_path`, per-path freshest-file-wins: when the
+/// same source path has an entry in more than one candidate directory, only
+/// the one whose entry file has the newer mtime survives. Deliberately
+/// per-path, not per-directory — a single fresh entry in an otherwise-stale
+/// directory must not cause every other genuinely-valid entry in that
+/// directory to be dropped.
+fn merge_freshest_wins(entries: Vec<WatchLaterEntry>, home: Option<&Path>) -> Vec<WatchLaterEntry> {
+    let mut by_path: HashMap<PathBuf, WatchLaterEntry> = HashMap::new();
+    for entry in entries {
+        let key = normalize(&entry.source_path, home);
+        match by_path.get(&key) {
+            Some(existing) if existing.mtime >= entry.mtime => {}
+            _ => {
+                by_path.insert(key, entry);
+            }
+        }
+    }
+    by_path.into_values().collect()
+}
+
+/// Scans every resolved `watch_later` directory, parses entries, filters to
+/// tracked roots, and merges duplicates freshest-file-wins (design.md §4
+/// steps 1-4, CLAUDE.md's cross-directory merge). A candidate directory
+/// that doesn't exist on disk is silently skipped, not an error.
+#[allow(dead_code)]
+pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> Vec<WatchLaterEntry> {
+    let dirs = resolve_watch_later_dirs(&config.mpv.watch_later_dir, home);
+
+    let mut raw = Vec::new();
+    for dir in &dirs {
+        if !dir.exists() {
+            continue;
+        }
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(parsed) = parse_entry_file(&path) {
+                raw.push(parsed);
+            }
+        }
+    }
+
+    let filtered = filter_to_tracked_roots(raw, &config.roots.paths, home);
+    merge_freshest_wins(filtered, home)
+}
+
+/// The single most-recently-modified entry (by its entry file's own mtime)
+/// among `entries` — design.md §4 step 5, "what you were watching."
+#[allow(dead_code)]
+pub fn most_recent_entry(entries: &[WatchLaterEntry]) -> Option<&WatchLaterEntry> {
+    entries.iter().max_by_key(|e| e.mtime)
+}
+
+/// What a saved position (and, if known, the file's total duration) means
+/// for playback, per CLAUDE.md's fixed resume/completion thresholds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaybackAction {
+    /// Below `resume_seconds` — treated as noise, not a real bookmark.
+    StartFromZero,
+    /// At or above `resume_seconds`, and not within `completion_remaining_seconds` of the end.
+    Resume(f64),
+    /// Within `completion_remaining_seconds` of the end.
+    Completed,
+}
+
+/// The result of classifying one entry's position against the configured
+/// thresholds. `duration` is always carried through — including the
+/// `DurationError` reason when unknown — rather than being dropped once
+/// `action` is decided, so a caller (`doctor`, or a future diagnostic) can
+/// still inspect why a completion check was skipped.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Classification {
+    pub action: PlaybackAction,
+    pub duration: DurationOutcome,
+}
+
+/// Classifies a saved `position_seconds` against `resume_seconds` and
+/// `completion_remaining_seconds` (CLAUDE.md's "Threshold classification").
+/// Position is checked against `resume_seconds` first: a position below the
+/// resume threshold is always `StartFromZero`, even in the edge case of a
+/// very short file where the remaining time would also independently
+/// qualify as `Completed` — see this phase's report for why this ordering
+/// was chosen. When `duration` is `Unknown`, the completion check is
+/// skipped for this entry only; the position-based classification still
+/// applies.
+#[allow(dead_code)]
+pub fn classify(
+    position_seconds: f64,
+    duration: DurationOutcome,
+    resume_seconds: u64,
+    completion_remaining_seconds: u64,
+) -> Classification {
+    let action = if position_seconds < resume_seconds as f64 {
+        PlaybackAction::StartFromZero
+    } else if let DurationOutcome::Known(total_seconds) = duration {
+        let remaining = total_seconds - position_seconds;
+        if remaining <= completion_remaining_seconds as f64 {
+            PlaybackAction::Completed
+        } else {
+            PlaybackAction::Resume(position_seconds)
+        }
+    } else {
+        PlaybackAction::Resume(position_seconds)
+    };
+
+    Classification { action, duration }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::duration::DurationError;
+    use std::fs::{self as std_fs, File};
+    use std::io::Write;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    fn write_entry(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std_fs::create_dir_all(parent).unwrap();
+        }
+        let mut f = File::create(path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+    }
+
+    fn set_mtime(path: &Path, when: SystemTime) {
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    // --- Entry parsing ---
+
+    #[test]
+    fn a_normal_entry_parses_path_and_position() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("abc123.mkv");
+        write_entry(
+            &entry_path,
+            "# /home/user/Anime/Show/ep01.mkv\nstart=565.231000\n",
+        );
+
+        let entry = parse_entry_file(&entry_path).unwrap();
+        assert_eq!(
+            entry.source_path,
+            PathBuf::from("/home/user/Anime/Show/ep01.mkv")
+        );
+        assert_eq!(entry.position_seconds, 565.231);
+    }
+
+    #[test]
+    fn a_redirect_entry_is_discarded() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("redirect.mkv");
+        write_entry(&entry_path, "# redirect entry\n");
+
+        assert!(parse_entry_file(&entry_path).is_none());
+    }
+
+    #[test]
+    fn a_malformed_entry_missing_start_is_skipped() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("no-start.mkv");
+        write_entry(&entry_path, "# /home/user/Anime/Show/ep01.mkv\n");
+
+        assert!(parse_entry_file(&entry_path).is_none());
+    }
+
+    #[test]
+    fn a_malformed_entry_with_garbage_first_line_is_skipped() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("garbage.mkv");
+        write_entry(&entry_path, "not a comment line at all\nstart=10.0\n");
+
+        assert!(parse_entry_file(&entry_path).is_none());
+    }
+
+    #[test]
+    fn a_malformed_entry_with_unparseable_start_value_is_skipped() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("bad-float.mkv");
+        write_entry(
+            &entry_path,
+            "# /home/user/Anime/Show/ep01.mkv\nstart=not-a-number\n",
+        );
+
+        assert!(parse_entry_file(&entry_path).is_none());
+    }
+
+    #[test]
+    fn a_malformed_entry_alongside_a_valid_one_does_not_abort_the_scan() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let watch_later = dir.path().join("watch_later");
+        std_fs::create_dir_all(root.join("Show")).unwrap();
+        touch(&root.join("Show").join("ep01.mkv"));
+        touch(&root.join("Show").join("ep02.mkv"));
+
+        write_entry(
+            &watch_later.join("valid"),
+            &format!(
+                "# {}\nstart=42.0\n",
+                root.join("Show").join("ep01.mkv").display()
+            ),
+        );
+        write_entry(&watch_later.join("malformed"), "garbage, no comment line\n");
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.mpv.watch_later_dir = watch_later.to_string_lossy().into_owned();
+
+        let entries = scan_watch_later(&config, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].position_seconds, 42.0);
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std_fs::create_dir_all(parent).unwrap();
+        }
+        File::create(path).unwrap();
+    }
+
+    // --- Tracked-root filtering ---
+
+    #[test]
+    fn an_entry_outside_every_tracked_root_is_filtered_out() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+
+        let entries = vec![WatchLaterEntry {
+            source_path: dir.path().join("SomewhereElse").join("clip.mkv"),
+            position_seconds: 10.0,
+            mtime: SystemTime::now(),
+        }];
+
+        let filtered =
+            filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn an_entry_under_a_tracked_root_survives_filtering() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+
+        let entries = vec![WatchLaterEntry {
+            source_path: root.join("Show").join("ep01.mkv"),
+            position_seconds: 10.0,
+            mtime: SystemTime::now(),
+        }];
+
+        let filtered =
+            filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    // --- Cross-directory merge: per-path freshest-file-wins ---
+
+    #[test]
+    fn same_source_path_in_two_directories_the_newer_mtime_wins() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Show").join("ep01.mkv"));
+
+        let dir_a = dir.path().join("watch_later_a");
+        let dir_b = dir.path().join("watch_later_b");
+        let source = root.join("Show").join("ep01.mkv");
+
+        write_entry(
+            &dir_a.join("entry"),
+            &format!("# {}\nstart=100.0\n", source.display()),
+        );
+        write_entry(
+            &dir_b.join("entry"),
+            &format!("# {}\nstart=200.0\n", source.display()),
+        );
+
+        let now = SystemTime::now();
+        set_mtime(&dir_a.join("entry"), now - Duration::from_secs(60));
+        set_mtime(&dir_b.join("entry"), now);
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        // Scan both directories directly via the lower-level pieces, since
+        // `watch_later_dir` only ever points at one directory.
+        let mut raw = Vec::new();
+        for dir in [&dir_a, &dir_b] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                if let Some(parsed) = parse_entry_file(&entry.path()) {
+                    raw.push(parsed);
+                }
+            }
+        }
+        let filtered = filter_to_tracked_roots(raw, &config.roots.paths, None);
+        let merged = merge_freshest_wins(filtered, None);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].position_seconds, 200.0);
+    }
+
+    #[test]
+    fn merge_is_per_path_not_per_directory() {
+        // dir_a has a stale entry for X and a fresh entry for Y (no
+        // duplicate of Y anywhere else). dir_b has a fresher duplicate of
+        // X. Both X (from dir_b) and Y (from dir_a) must survive the
+        // merge — a fresh entry in dir_b must not cause dir_a's genuinely
+        // valid, undisputed Y entry to be dropped.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Show").join("x.mkv"));
+        touch(&root.join("Show").join("y.mkv"));
+
+        let dir_a = dir.path().join("watch_later_a");
+        let dir_b = dir.path().join("watch_later_b");
+        let x = root.join("Show").join("x.mkv");
+        let y = root.join("Show").join("y.mkv");
+
+        write_entry(
+            &dir_a.join("x-entry"),
+            &format!("# {}\nstart=10.0\n", x.display()),
+        );
+        write_entry(
+            &dir_a.join("y-entry"),
+            &format!("# {}\nstart=20.0\n", y.display()),
+        );
+        write_entry(
+            &dir_b.join("x-entry"),
+            &format!("# {}\nstart=99.0\n", x.display()),
+        );
+
+        let now = SystemTime::now();
+        set_mtime(&dir_a.join("x-entry"), now - Duration::from_secs(120));
+        set_mtime(&dir_a.join("y-entry"), now - Duration::from_secs(120));
+        set_mtime(&dir_b.join("x-entry"), now);
+
+        let mut raw = Vec::new();
+        for dir in [&dir_a, &dir_b] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                if let Some(parsed) = parse_entry_file(&entry.path()) {
+                    raw.push(parsed);
+                }
+            }
+        }
+        let filtered = filter_to_tracked_roots(raw, &[root.to_string_lossy().into_owned()], None);
+        let merged = merge_freshest_wins(filtered, None);
+
+        assert_eq!(merged.len(), 2);
+        let x_entry = merged.iter().find(|e| e.source_path == x).unwrap();
+        let y_entry = merged.iter().find(|e| e.source_path == y).unwrap();
+        assert_eq!(x_entry.position_seconds, 99.0, "dir_b's fresher X must win");
+        assert_eq!(
+            y_entry.position_seconds, 20.0,
+            "dir_a's undisputed Y must survive even though dir_a also lost its X"
+        );
+    }
+
+    // --- watch_later_dir override ---
+
+    #[test]
+    fn override_replaces_the_default_candidate_list_entirely() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        touch(&root.join("Show").join("ep01.mkv"));
+
+        // A valid entry sitting only in a default-candidate path.
+        let default_candidate = home.path().join(".local/state/mpv/watch_later");
+        write_entry(
+            &default_candidate.join("entry"),
+            &format!(
+                "# {}\nstart=42.0\n",
+                root.join("Show").join("ep01.mkv").display()
+            ),
+        );
+
+        // The override points elsewhere entirely, with nothing in it.
+        let override_dir = home.path().join("custom_watch_later");
+        std_fs::create_dir_all(&override_dir).unwrap();
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.mpv.watch_later_dir = override_dir.to_string_lossy().into_owned();
+
+        let entries = scan_watch_later(&config, Some(home.path()));
+        assert!(
+            entries.is_empty(),
+            "the default-candidate entry must be absent once an override is set"
+        );
+    }
+
+    #[test]
+    fn empty_override_falls_back_to_os_default_candidates() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        touch(&root.join("Show").join("ep01.mkv"));
+
+        let default_candidate = home.path().join(".local/state/mpv/watch_later");
+        write_entry(
+            &default_candidate.join("entry"),
+            &format!(
+                "# {}\nstart=42.0\n",
+                root.join("Show").join("ep01.mkv").display()
+            ),
+        );
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        // watch_later_dir left at its default "" value.
+
+        let entries = scan_watch_later(&config, Some(home.path()));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].position_seconds, 42.0);
+    }
+
+    #[test]
+    fn a_nonexistent_candidate_directory_is_skipped_without_erroring() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        // Nothing created under any watch_later candidate path at all.
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+
+        let entries = scan_watch_later(&config, Some(home.path()));
+        assert!(entries.is_empty());
+    }
+
+    // --- Candidate path table ---
+
+    #[test]
+    fn linux_candidates_match_design_doc_exactly() {
+        let home = PathBuf::from("/home/user");
+        let dirs = candidate_watch_later_dirs(&home);
+
+        if std::env::consts::OS == "linux" {
+            assert_eq!(
+                dirs,
+                vec![
+                    home.join(".local/state/mpv/watch_later"),
+                    home.join(".cache/mpv/watch_later"),
+                    home.join(".var/app/io.mpv.Mpv/.local/state/mpv/watch_later"),
+                    home.join(".var/app/io.mpv.Mpv/.cache/mpv/watch_later"),
+                    home.join("snap/mpv/current/.local/state/mpv/watch_later"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_with_no_home_and_no_override_returns_empty() {
+        let dirs = resolve_watch_later_dirs("", None);
+        assert!(dirs.is_empty());
+    }
+
+    // --- most_recent_entry ---
+
+    #[test]
+    fn most_recent_entry_picks_the_newest_mtime() {
+        let now = SystemTime::now();
+        let entries = vec![
+            WatchLaterEntry {
+                source_path: PathBuf::from("/a.mkv"),
+                position_seconds: 1.0,
+                mtime: now - Duration::from_secs(100),
+            },
+            WatchLaterEntry {
+                source_path: PathBuf::from("/b.mkv"),
+                position_seconds: 2.0,
+                mtime: now,
+            },
+        ];
+
+        let most_recent = most_recent_entry(&entries).unwrap();
+        assert_eq!(most_recent.source_path, PathBuf::from("/b.mkv"));
+    }
+
+    #[test]
+    fn most_recent_entry_on_empty_slice_returns_none() {
+        assert!(most_recent_entry(&[]).is_none());
+    }
+
+    // --- Threshold classification ---
+
+    #[test]
+    fn position_just_below_resume_threshold_starts_from_zero() {
+        let result = classify(
+            119.9,
+            DurationOutcome::Unknown(DurationError::Unreadable),
+            120,
+            180,
+        );
+        assert_eq!(result.action, PlaybackAction::StartFromZero);
+    }
+
+    #[test]
+    fn position_exactly_at_resume_threshold_is_not_start_from_zero() {
+        let result = classify(
+            120.0,
+            DurationOutcome::Unknown(DurationError::Unreadable),
+            120,
+            180,
+        );
+        assert_ne!(result.action, PlaybackAction::StartFromZero);
+    }
+
+    #[test]
+    fn position_just_above_resume_threshold_is_not_start_from_zero() {
+        let result = classify(
+            120.1,
+            DurationOutcome::Unknown(DurationError::Unreadable),
+            120,
+            180,
+        );
+        assert_ne!(result.action, PlaybackAction::StartFromZero);
+    }
+
+    #[test]
+    fn remaining_just_above_completion_threshold_resumes() {
+        // duration 1000, position such that remaining = 180.1 (> 180 threshold)
+        let result = classify(819.9, DurationOutcome::Known(1000.0), 120, 180);
+        assert_eq!(result.action, PlaybackAction::Resume(819.9));
+    }
+
+    #[test]
+    fn remaining_exactly_at_completion_threshold_is_completed() {
+        // remaining = 180.0, at the threshold.
+        let result = classify(820.0, DurationOutcome::Known(1000.0), 120, 180);
+        assert_eq!(result.action, PlaybackAction::Completed);
+    }
+
+    #[test]
+    fn remaining_just_below_completion_threshold_is_completed() {
+        let result = classify(820.1, DurationOutcome::Known(1000.0), 120, 180);
+        assert_eq!(result.action, PlaybackAction::Completed);
+    }
+
+    #[test]
+    fn unknown_duration_skips_completion_check_but_still_resumes_from_position() {
+        let outcome = DurationOutcome::Unknown(DurationError::Unreadable);
+        let result = classify(500.0, outcome.clone(), 120, 180);
+        assert_eq!(result.action, PlaybackAction::Resume(500.0));
+        assert_eq!(result.duration, outcome);
+    }
+
+    #[test]
+    fn unknown_duration_reason_is_carried_through_even_when_position_based_classification_applies()
+    {
+        let outcome = DurationOutcome::Unknown(DurationError::Io("permission denied".to_string()));
+        let result = classify(500.0, outcome.clone(), 120, 180);
+        assert_eq!(result.duration, outcome);
+    }
+}

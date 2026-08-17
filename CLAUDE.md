@@ -322,6 +322,77 @@ lints. `cargo build --workspace` still checks the whole thing compiles;
 only the strict `-D warnings` clippy gate is scoped down. See
 COMMANDS.md for the exact command.
 
+### Threshold precedence when position + completion checks overlap (short files)
+On a short enough file, a single saved position can satisfy both
+`resume_seconds` (small enough to count as noise) and
+`completion_remaining_seconds` (close enough to that file's own ending) at
+once — the two zones only stay separate on episode-length video. Current
+code (`src/mpv.rs`'s `classify()`) has the position check win: such a case
+resolves to `StartFromZero`, never `Completed`. Reasoning: getting this
+wrong the other way silently claims progress the user may not have actually
+watched, where getting it wrong this way only costs a possible rewatch of a
+few seconds — and the real completion signal for a fully-watched file (no
+`watch_later` entry at all) still catches these cases independently once
+Phase 5 exists, so erring conservative here doesn't lose real detection.
+This is this session's judgment call, not something docs/design.md specifies
+— if real usage says the other order feels more correct, this is a one-line
+change in `classify()`, not a structural one; revisit if it doesn't hold up.
+
+### Open question (Phase 5): how "current episode" advances when the user manually skips ahead
+If a user manually opens episode 2 in mpv without ever resolving episode 1's
+bookmark (episode 1's `watch_later` entry still sits there, unresolved),
+episode 2's entry file becomes the most-recently-modified one, so Phase 4's
+`most_recent_entry` surfaces it as "what you were watching" regardless of
+episode 1's own state. What isn't decided yet: whether the series' persisted
+cursor (`state.toml`, Phase 5) simply tracks "most recent touched file" as
+current — meaning it silently moves past episode 1 without ever marking it
+completed or otherwise resolving it — or whether skipping ahead should be
+required to explicitly resolve what was left behind first. Must be settled
+before Phase 5's kickoff prompt is written; not a Phase 4 concern.
+
+### Completion threshold needs episode duration — mpv's watch_later files don't have it
+`completion_remaining_seconds` (§8) requires knowing how much of an episode is
+*left* — but mpv's `watch_later` entries only ever store the resume position
+(`start=`), never the file's total duration (verified directly against mpv's
+own option docs: `--watch-later-options` never includes anything duration-
+like, since duration isn't a settable "option" mpv tracks per-file). Tsuzuki
+has to get duration itself, from the video file's own container header — not
+from mpv.
+
+**No external program (no `ffprobe` shell-out).** Requiring a separately
+installed program contradicts local-first/no-moving-parts and Tsuzuki's own
+startup-latency rationale (§5/§10) — a Rust dependency compiled into the
+binary is strictly better here: works everywhere the binary works, no PATH
+lookup, no "is it installed" failure mode.
+
+**`symphonia` (pure Rust, MPL-2.0) reads the header, used for metadata/probe
+only — never asked to decode actual audio/video frames.** Confirmed directly
+against Symphonia's own docs: it has real demuxers for MKV/WebM and ISO/MP4
+(mp4/mov use the same box structure), covering most real libraries as one
+dependency. It does **not** support `avi`.
+
+**Dispatch is by content-probe, never by file extension.** Hand the file to
+Symphonia's own format-auto-detection first — never a hardcoded "if `.mkv`/
+`.webm`/`.mp4` use Symphonia, if `.avi` use X" branch. `video_extensions` is
+user-configurable and open-ended (§8) — an extension-keyed dispatch table
+would silently stop covering new formats the moment someone adds one to their
+config that Symphonia already supports. Only if Symphonia's probe fails to
+identify the file at all does a small hand-written fallback reader (for
+`avi`'s simple RIFF `avih` header — total-frames × microseconds-per-frame,
+no dependency needed for one legacy field) get tried as the next rung, not
+as an extension-gated special case.
+
+**Unreadable duration is surfaced, never silently dropped.** If neither
+Symphonia's probe nor the fallback reader can determine a file's duration,
+the completion-by-remaining-time check is skipped for that file only (the
+resume threshold still works fine from position alone, and the absence-based
+completion signal — Phase 5 — still catches genuine completion eventually).
+But the *reason* duration couldn't be read is preserved in the return value,
+not collapsed to a bare `None` — Phase 4 has no user-facing command of its
+own yet, so it's Phase 5 (or `doctor`, Phase 6) that decides where the user
+actually sees this, same pattern as Anitomy's parse-fallback in Phase 3:
+built correctly now, surfaced later, never silently discarded now.
+
 ### auto_pause_days defaults to 0 (never auto-pause)
 This is deliberate, not a placeholder. A nonzero default would be a guess
 about user intent (on a break vs. abandoned vs. waiting for episodes to
@@ -361,7 +432,10 @@ file is a cheatsheet, not a spec; don't duplicate its contents here.
 - **clap** for the CLI, **serde + toml** for config/state, **anitomy-rs**
   (pure Rust — this is a hard requirement, not a preference; a C++-backed
   binding reintroduces a toolchain dependency the whole distribution
-  strategy is built to avoid).
+  strategy is built to avoid), **symphonia** (pure Rust, metadata/probe use
+  only — reading episode duration for the completion threshold; see the
+  "Completion threshold needs episode duration" decision above for why and
+  its avi fallback).
 - **Testing:** `cargo test` + `assert_cmd` (end-to-end against the
   compiled binary) + `tempfile` (fabricated directory trees for ordering/
   exclusion tests — never touch the real filesystem or a real mpv
