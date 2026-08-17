@@ -312,11 +312,4 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
   user after this phase before continuing to Phase 6.
 
 **Open questions blocking further work:**
-- exact mechanism for absence-based completion.
-  Phase 4 gives Phase 5 "what mpv's bookmark files currently say, for tracked files." Phase 5 has state.toml's memory of what was previously in_progress. The rule ("no bookmark for a file that was clearly open = completed") needs a precise mechanism, not just the general idea:
-
-  For each series currently in_progress, state.toml presumably remembers which specific file was last open. Does Phase 5 check only that one file's bookmark for absence, or every file ever known in-progress for that series?
-  What if the file's bookmark entry still exists, but it's old/stale — does "absence" mean "no entry at all," or does it also cover "entry exists but predates the last time Tsuzuki checked"?
-  First-ever run for a freshly-added file (nothing in state.toml yet): there's no "before" to compare against, so this can't fire — confirm this is just treated as "never watched," not a false completion.
-
-  Not a blocker for Phase 4 — Phase 4 doesn't touch this. Must be resolved before Phase 5's kickoff prompt is written, since it directly shapes state.toml's schema (it needs to remember which file, not just which series, was last in-progress).
+- cleared

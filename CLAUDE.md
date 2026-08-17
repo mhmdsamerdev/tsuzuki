@@ -78,9 +78,56 @@ never leave a half-written state file. Any new state-writing code path
 must go through the same atomic-write helper; don't add a second write
 path that writes in place "just this once."
 
-### mpv `watch_later` reading, not IPC or launching mpv
-Tsuzuki never launches mpv or holds an IPC socket. It only reads mpv's own
-`watch_later` files after the fact. This means:
+**A moved or renamed series folder is indistinguishable from deletion, and
+this is intentional, not a gap.** Tsuzuki has no path-history or rename
+detection anywhere — series identity is the literal directory name (§3/
+design.md §3, "no parsing, no aliasing"), so a folder at a new path or new
+name is, by that same rule, simply a different, never-before-seen series
+as far as Tsuzuki is concerned. The old record becomes exactly as orphaned
+as a genuine deletion (handled identically, below); the new location
+appears in `series_in_root`'s walk as a brand-new, untracked series with no
+history. Do not add rename detection later "for convenience" — matching a
+new folder back to an old record by any heuristic (name similarity, file
+count, whatever) is precisely the fuzzy inference §2 rules out everywhere
+else.
+
+**A `state.toml` record whose series has been deleted from disk stays
+inert until explicitly cleaned, never auto-removed.** `start`/`list`
+already can't show a deleted series wrong, structurally — they cross-
+reference `state.toml` against a live walk of the tracked root (`series_in_root`,
+Phase 1), and a deleted folder simply can't appear in that walk regardless
+of what `state.toml` still says. The real risk is narrower: the automatic
+resume picker (bare `tsuzuki`) resolves a specific file an `in_progress`
+record points to — if that record's series was deleted, the file's gone
+too, and this must degrade gracefully (skip it, never crash, never treat
+it as resumable), same "one bad entry doesn't abort the whole scan"
+precedent used everywhere else in this project. But the stale record
+itself must NOT be silently deleted the moment its path fails to resolve —
+that would be inference (assuming a missing path means the user wants the
+record forgotten) in a project that avoids exactly that everywhere else.
+Cleanup is `doctor`'s job (Phase 6): it must detect an orphaned
+`state.toml` record (tracked once, no longer resolvable on disk) and hand
+back the exact command to clear it — same list-and-hand-back-the-command
+pattern §3 already uses for exclude ambiguity and Anitomy suggestions —
+never automatic. The exact cleanup command's shape isn't decided yet; that's
+Phase 6 scope, not now. Don't let this silently vanish into "tracked-root
+validity" being read as root-level only — it must include per-series
+validity within a still-tracked root, not just whether the root itself
+still exists.
+
+### mpv `watch_later` reading is launcher-independent — tracking never needs an IPC socket, but resuming does spawn mpv
+**Corrected wording — the previous phrasing here ("Tsuzuki never launches
+mpv") was misleading and, read literally, would have blocked Phase 5's
+whole reason to exist.** What's actually true, and what matters: *tracking*
+doesn't depend on Tsuzuki being the one that launched mpv — it only reads
+`watch_later` files after the fact, so it works identically whether a file
+was opened by Tsuzuki, a file manager, or the terminal. That's a completely
+separate question from *resuming*, which is a core feature: `tsuzuki` /
+`resume` / `start` genuinely do spawn `mpv <file> --start=<seconds>` (a
+plain fire-and-forget process launch, then immediately let go) — otherwise
+the tool's entire one-command pitch (§1) is meaningless. What's actually
+ruled out is holding an ongoing IPC socket or requiring control over an
+already-running mpv instance — never a bare spawn-and-release. This means:
 - **`write-filename-in-watch-later-config=yes` is a hard prerequisite** —
   without it, entries are only MD5 hashes of the path, which are
   one-way and unrecoverable. `doctor` must check for this explicitly,
@@ -338,17 +385,95 @@ This is this session's judgment call, not something docs/design.md specifies
 — if real usage says the other order feels more correct, this is a one-line
 change in `classify()`, not a structural one; revisit if it doesn't hold up.
 
-### Open question (Phase 5): how "current episode" advances when the user manually skips ahead
-If a user manually opens episode 2 in mpv without ever resolving episode 1's
-bookmark (episode 1's `watch_later` entry still sits there, unresolved),
-episode 2's entry file becomes the most-recently-modified one, so Phase 4's
-`most_recent_entry` surfaces it as "what you were watching" regardless of
-episode 1's own state. What isn't decided yet: whether the series' persisted
-cursor (`state.toml`, Phase 5) simply tracks "most recent touched file" as
-current — meaning it silently moves past episode 1 without ever marking it
-completed or otherwise resolving it — or whether skipping ahead should be
-required to explicitly resolve what was left behind first. Must be settled
-before Phase 5's kickoff prompt is written; not a Phase 4 concern.
+**`start`'s listing distinguishes never-started from dropped by whether a
+`state.toml` record exists at all — no new marker needed.** A series that
+was manually `drop`ped and one whose last real episode's bookmark simply
+disappeared (the only detectable "finished the whole series" signal, given
+the binge-watching trace gap below) are treated identically in `start`'s
+display: both show as "Rewatch?" rather than plain "Start," since both are
+genuinely the same situation from the user's side — reopening any episode
+naturally re-populates progress either way (§8). A series with no
+`state.toml` record at all (truly never touched) shows plain "Start."
+This needs zero new persisted data — a manual drop and a detected
+completion already collapse to the same underlying state (`dropped`, no
+active bookmark), so the display only needs to check "does a record for
+this series exist," never "why does this record exist." Deliberately no
+fourth `completed` state was added — see "Completion detection has a real,
+permanent blind spot" below for why one wouldn't even be reliably
+detectable most of the time.
+
+### Completion detection has a real, permanent blind spot — clean binges leave no trace at all
+mpv only ever writes a `watch_later` entry when a file is quit *mid-*
+playback. If an episode plays through naturally to its end and the next
+one auto-advances, mpv never writes anything for it — there's no bookmark
+to later find absent, because none was ever created. This means a user who
+binges several episodes in one sitting without ever quitting mid-file
+leaves **zero detectable trace** for any of them; Tsuzuki cannot see this
+happened, and no amount of clever inference fixes it, because the
+information genuinely doesn't exist on disk anywhere. This is the direct,
+accepted cost of the "never launches an IPC socket, only reads
+after-the-fact files" architecture (§4/design.md §4) — closing this gap
+completely would require real-time observation of playback, which is
+explicitly the thing this project chose not to build. **The practical
+rule this leaves:** the cursor can only advance across a hop where the user
+quit mid-file at least once (a real, ≥`resume_seconds` observation) —
+Tsuzuki scans forward from the last confirmed position through the
+series' natural-sort order and jumps to the furthest file with a currently-
+real bookmark, without needing to individually resolve or mark anything
+in between (no per-episode watched log exists in `state.toml`'s schema,
+and none should be added — see the MAL-sync precedent in design.md §7:
+reaching a later point is already treated as sufficient evidence of
+forward progress elsewhere in this design, same principle applied
+locally). If nothing past the last confirmed position currently has a
+real bookmark — including the pure clean-binge-to-the-series'-actual-end
+case — the cursor simply stays at its last confirmed point. This is not a
+failure to fix; it's the tool honestly reporting the boundary of what it
+can actually know.
+
+### Cursor movement: noise never touches saved state, absence check is per-series, a single run chains fully
+Settles the open question left after Phase 4 about how the cursor advances
+when the user manually skips ahead. The full mechanism, worked out by
+stress-testing scenarios rather than asserting it from feel:
+
+**A sub-`resume_seconds` reading is invisible to `state.toml`, not
+"treated as start-from-zero."** This is a sharper rule than it first
+sounds, for a concrete reason: mpv itself has no concept of Tsuzuki's noise
+threshold — if a series already has a real, saved position (say 15 minutes
+into an episode), and the user briefly reopens that same file and quits
+after 45 seconds, mpv's own `watch_later` file now physically says 45
+seconds, clobbering the real 15-minute mark that was there a moment ago. If
+Tsuzuki blindly propagated whatever it just read, one accidental short peek
+would silently erase real progress — the same category of mistake §2's MAL
+sync rule already exists to prevent ("never write a smaller number... has
+to hold even in edge cases"), just against local state instead of MAL. So:
+a sub-threshold reading never creates a new `state.toml` record, and —
+critically — never overwrites an existing real (≥`resume_seconds`) one
+either. Only another real observation can ever move a series' saved
+position, in either direction.
+
+**The absence-based-completion check is per-series, not "check the single
+globally-freshest file."** Phase 4's `most_recent_entry` only identifies
+one thing: the single most-recently-touched file across everything scanned.
+That's not sufficient on its own for Phase 5, because `state.toml` has to
+track multiple `in_progress` series simultaneously (design.md §8's resume
+picker exists specifically because more than one can be in progress at
+once) — a series watched Monday and one watched Tuesday are both still
+legitimately in progress today. So each run does two separate jobs, not
+one: (a) for every series already `in_progress`, check whether *that
+series' own last-known file* still has a bookmark at all — its absence is
+the completion signal, independent of what's newest elsewhere; (b) separately,
+check whether any real (≥`resume_seconds`) new activity happened anywhere,
+which is what can move a cursor or start a new `in_progress` record.
+
+**A single invocation must resolve a full state transition, not just one
+step of one.** Binge-watching is a normal usage pattern, not an edge case:
+finish episode 1 (mpv deletes its bookmark = completion) and be several
+real minutes into episode 2 before `tsuzuki` is ever run again. One run
+must chain through the whole thing — recognize episode 1's completion,
+advance the cursor to episode 2, and pick up episode 2's already-real
+position — not stop after the first step and require a second invocation
+to "catch up." Don't implement this as a single comparison per run; it has
+to resolve however many steps actually happened since the last check.
 
 **An absent OS-default candidate directory stays silent — an explicit
 `watch_later_dir` override that doesn't resolve must be surfaced, not

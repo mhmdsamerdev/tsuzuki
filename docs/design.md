@@ -101,7 +101,7 @@ Running `tsuzuki exclude` with no path surfaces Anitomy-suggested candidates (se
 
 ## 4. Playback Tracking
 
-Tsuzuki doesn't launch mpv itself or hold an IPC socket to observe playback. mpv already solves the position-tracking problem: whenever a file is quit mid-playback, mpv writes a `watch_later` entry containing the resume timestamp, regardless of how it was launched — terminal, file manager, or Tsuzuki.
+Tsuzuki's *tracking* doesn't depend on being the one that launched mpv — it only reads `watch_later` files after the fact, so it works identically whether a file was opened by Tsuzuki, a file manager, or the terminal. mpv already solves the position-tracking problem: whenever a file is quit mid-playback, mpv writes a `watch_later` entry containing the resume timestamp, regardless of how it was launched. *Resuming*, however — `tsuzuki`/`resume`/`start` picking an episode and opening it — is a real, core feature: Tsuzuki spawns `mpv <file> --start=<seconds>` directly (a plain fire-and-forget launch, then it lets go). What's ruled out is holding an ongoing IPC socket or needing control over an already-running mpv instance — not launching mpv at all.
 
 **Prerequisite: `write-filename-in-watch-later-config` must be enabled.** By default, mpv identifies each entry only by an MD5 hash of the file's path — a one-way hash, unrecoverable. Tsuzuki requires one line in the user's `mpv.conf`:
 
@@ -205,8 +205,10 @@ Start which one?
 Covers three cases, unified by "not currently in the automatic `in_progress` picker":
 
 - **Never started** → opens at episode 1.
-- **Dropped** → same as never-started, since progress was reset (§8).
+- **Dropped** → same underlying mechanics as never-started (open at episode 1, opening any episode naturally re-populates progress), but the listing itself says "Rewatch?" rather than "Start," since a dropped series was, at some point, actually watched — including the one case Tsuzuki can detect a series was watched to its true end (its final episode's bookmark disappeared with nothing left to advance to; see §8). No new state or persisted marker exists for this — the display only checks whether a `state.toml` record exists at all for that series, not why.
 - **Paused** → resumes at its saved position, not episode 1 — the one case where `start` genuinely resumes rather than begins fresh.
+
+A series folder that's been moved, renamed, or deleted from a tracked root is indistinguishable to Tsuzuki from a fresh, never-tracked series appearing in its place — series identity is the literal directory name, with no path-history or rename detection anywhere (§3). Any prior progress becomes an orphaned record rather than following the move; see §8 for how that's handled.
 
 No metadata, no posters, no scraping — just a filtered enumeration of directory names and state Tsuzuki already has.
 
@@ -294,7 +296,15 @@ tsuzuki config edit
 - **`paused`** (`tsuzuki pause <series>`) — position kept, removed from the picker, appears in `tsuzuki start` at its saved position. Opening any episode directly in mpv naturally re-populates progress and pulls it back to `in_progress` — no separate "unpause" command needed.
 - **`dropped`** (`tsuzuki drop <series>`) — position reset. Reappears in `tsuzuki start` exactly like a never-started series.
 
-**No default auto-expiry.** `auto_pause_days = 0` means an `in_progress` series never automatically loses that status, no matter how long it's untouched — a fixed timeout would be a guess about intent (abandoned vs. on a break vs. waiting for more episodes to air) that this design avoids everywhere else. If the user opts in by setting `auto_pause_days` to a nonzero value, an idle `in_progress` series is automatically moved to `paused` — never `dropped`, since that's destructive and stays a manual-only action regardless of config.
+**How the cursor actually moves.** A saved position below `resume_seconds` isn't just "too small to resume from" — it's invisible to `state.toml` entirely, in both directions. It never creates a new record, and — this matters — it never overwrites an existing real one either. This has to be strict: mpv itself has no concept of Tsuzuki's noise threshold, so if a series already has a genuine saved position and the user briefly reopens that same file and quits seconds later, mpv's own file now says whatever that brief position was, overwriting the real one underneath it. If Tsuzuki propagated that blindly, one accidental short peek would erase real progress — the same category of mistake the MAL sync rule already guards against (§7: "never overwrite down... has to hold even in edge cases"), just applied locally. Only another real (≥`resume_seconds`) observation can ever move a series' position.
+
+Because more than one series can be genuinely `in_progress` at once, checking "is anything newly completed" isn't a single global check — each `in_progress` series' own last-known file gets checked for whether its bookmark still exists, independently of whatever else is freshest elsewhere. And because binge-watching in one sitting is completely normal, a single `tsuzuki` invocation has to resolve the whole chain of what happened since the last check — episode 3 completing *and* the user already being real minutes into episode 5 — not just the first step of it.
+
+**The one thing this can't see: a clean binge leaves no trace at all.** mpv only writes a `watch_later` entry when a file is quit *mid*-playback. Play straight through several episodes back to back, letting each one auto-advance, and none of them ever get a bookmark — there's nothing to later find absent, because nothing was ever written. This is the direct, accepted cost of never holding an IPC socket (above) rather than observing playback live; no amount of clever inference recovers information that was never recorded. In practice: the cursor can only jump forward across a hop where the user quit mid-file at least once, scanning forward through natural-sort order to the furthest file with a currently-real bookmark. If nothing past the last confirmed point currently has one — including the case where the user finished the whole series cleanly — the cursor just stays where it last had real evidence. That's the tool being honest about what it can know, not a bug to chase.
+
+**A deleted or moved-away series' record doesn't disappear on its own.** `start`/`list` already can't misrepresent a deleted series, since they're built from a live directory walk, not `state.toml` alone. But a stale `state.toml` record for it doesn't get silently removed either — that would be Tsuzuki guessing the user wants it forgotten. It sits inert (never shown, never resumable) until `doctor` (§9) surfaces it explicitly as something to clean up.
+
+ `auto_pause_days = 0` means an `in_progress` series never automatically loses that status, no matter how long it's untouched — a fixed timeout would be a guess about intent (abandoned vs. on a break vs. waiting for more episodes to air) that this design avoids everywhere else. If the user opts in by setting `auto_pause_days` to a nonzero value, an idle `in_progress` series is automatically moved to `paused` — never `dropped`, since that's destructive and stays a manual-only action regardless of config.
 
 **The resume picker itself:**
 
@@ -330,7 +340,7 @@ A single flat TOML file — not sharded per-series (mpv shards because it tracks
 | `tsuzuki sync link <series>` | Manually resolve a series-to-MAL-ID mapping when exact-title matching fails. |
 | `tsuzuki sync` | Run the two-way, non-destructive sync against MAL. |
 | `tsuzuki config get/set/list/edit` | Read or write config values, or open the config file directly. |
-| `tsuzuki doctor` | Environment health checks — mpv config flag, watch_later reachability, Flatpak permissions, tracked-root validity, MAL auth status. |
+| `tsuzuki doctor` | Environment health checks — mpv config flag, watch_later reachability (including a configured `watch_later_dir` override that doesn't resolve), Flatpak permissions, tracked-root validity, orphaned per-series `state.toml` records (a series deleted/moved/renamed out from under a still-tracked root), MAL auth status. |
 
 **CLI invocation contract.** Every command group with subcommands
 (`config`, `sync`) must have an explicit, documented behavior for being
