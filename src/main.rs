@@ -276,6 +276,14 @@ fn print_scan_warning(warning: &mpv::ScanWarning) {
     }
 }
 
+/// What to actually play: the resolved file, starting position, and its
+/// episode number.
+struct PlaybackTarget {
+    file: PathBuf,
+    position_seconds: f64,
+    episode_number: u32,
+}
+
 /// Resolves what file + starting position to actually play for a given
 /// series: a real `in_progress`/`paused` record resumes at its saved
 /// position; a `dropped` record or no record at all starts at the first
@@ -283,13 +291,21 @@ fn print_scan_warning(warning: &mpv::ScanWarning) {
 /// `resume`/`start` share one selection mechanism per CLAUDE.md — this
 /// single function backs both). `None` means the series currently has no
 /// video files to play at all.
+///
+/// The episode number is always freshly resolved here via
+/// `anitomy::episode_identity` — the exact same mechanism `reconcile.rs`
+/// uses to populate a record's own `episode_number` — rather than trusting
+/// `record.episode_number` directly. That field is only meaningful for a
+/// non-`Dropped` record continuing at its own stored position; the
+/// start-fresh case (no record, or `Dropped`) has no record-side episode
+/// number to fall back on at all, and would otherwise show nothing.
 fn playback_target(
     config: &Config,
     home: Option<&Path>,
     root: &str,
     name: &str,
     record: Option<&SeriesRecord>,
-) -> Option<(PathBuf, f64)> {
+) -> Option<PlaybackTarget> {
     let expanded_root = roots::expand_tilde(Path::new(root), home);
     let series_path = expanded_root.join(name);
     let excluded = exclude::excluded_paths_for_root(config, root, home);
@@ -300,22 +316,51 @@ fn playback_target(
         return None;
     }
 
-    if let Some(r) = record
-        && r.status != Status::Dropped
-    {
-        let target = expanded_root.join(&r.current_relative_path);
-        let real_target = roots::normalize(&target, home);
-        if let Some(file) = ordered
-            .iter()
-            .find(|p| roots::normalize(p, home) == real_target)
-        {
-            return Some((file.clone(), r.position_seconds));
-        }
-        // The record's file isn't in the current ordering (excluded/moved
-        // since) — fall through to starting fresh rather than erroring.
-    }
+    // `Some((idx, position))` only when a usable (non-`Dropped`) record's
+    // own file was actually found in the current ordering — carrying both
+    // its real index and its real stored position together, so there's no
+    // way for one to resolve from the record while the other silently
+    // defaults (the bug in an earlier draft of this function: treating
+    // "index happens to be 0" as indistinguishable from "no record was
+    // found," which would have shown position 0 even for a record
+    // genuinely paused/in-progress at episode 1's own real position).
+    let resolved = record
+        .filter(|r| r.status != Status::Dropped)
+        .and_then(|r| {
+            let target = expanded_root.join(&r.current_relative_path);
+            let real_target = roots::normalize(&target, home);
+            ordered
+                .iter()
+                .position(|p| roots::normalize(p, home) == real_target)
+                .map(|idx| (idx, r.position_seconds))
+        });
+    let (index, position_seconds) = resolved.unwrap_or((0, 0.0));
 
-    Some((ordered[0].clone(), 0.0))
+    let identities = anitomy::episode_identity(&ordered);
+    let episode_number = identities
+        .get(index)
+        .map(|id| id.episode_number)
+        .unwrap_or((index + 1) as u32);
+
+    Some(PlaybackTarget {
+        file: ordered[index].clone(),
+        position_seconds,
+        episode_number,
+    })
+}
+
+/// `mm:ss` (or `h:mm:ss` past an hour) — matches the display format
+/// CLAUDE.md's resume-message wording expects.
+fn format_timestamp(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes:02}:{secs:02}")
+    }
 }
 
 /// Launches `name` under `root`, printing a one-line confirmation on
@@ -332,10 +377,20 @@ fn play_series(
 ) -> ExitCode {
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
-        Some((file, position)) => {
-            match launch::resume_playback(&config.mpv.command_override, home, &file, position) {
+        Some(target) => {
+            match launch::resume_playback(
+                &config.mpv.command_override,
+                home,
+                &target.file,
+                target.position_seconds,
+            ) {
                 Ok(()) => {
-                    println!("{verb} \"{name}\" — {}", file.display());
+                    println!(
+                        "{verb} \"{name}\" — episode {} ({}) — {}",
+                        target.episode_number,
+                        format_timestamp(target.position_seconds),
+                        target.file.display()
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(&e.to_string()),
