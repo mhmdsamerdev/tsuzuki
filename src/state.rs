@@ -283,6 +283,44 @@ mod tests {
     }
 
     #[test]
+    fn a_pre_phase_5_schema_state_toml_fails_cleanly_not_silently_or_with_a_panic() {
+        // Gap-audit sweep item: is a pre-Phase-5 state.toml reachable in
+        // practice, and if one somehow existed, what happens reading it
+        // now? In practice: no command ever called `write()` before this
+        // phase (confirmed via `git log -p -- src/main.rs` — the one write
+        // call that briefly existed in the very first scaffolding commit
+        // wrote nothing but an empty default and was removed the same day,
+        // before this phase, and no real `~/.local/share/tsuzuki/` exists
+        // on this development machine at all), so no real installation can
+        // have a genuinely old-format file. This test covers the
+        // hypothetical anyway: the old schema (`BTreeMap<String,
+        // SeriesState>` under a bare `[series."name"]` table, keyed by name
+        // alone, fields `current_path`/no `root`/no `updated_at`) is a
+        // fundamentally different TOML shape from today's `[[series]]`
+        // array-of-tables — deserialization must fail with a typed error,
+        // never panic and never silently produce a wrong/partial `State`.
+        // `main.rs`'s `reconcile_state` already turns any `Err` here into a
+        // plain command error, not a crash — no migration path exists or is
+        // needed for a format that was never actually shipped.
+        let old_format = r#"
+[series."One Piece"]
+status = "in_progress"
+current_path = "One Piece/Season 2/ep01.mkv"
+position_seconds = 340.5
+episode_number = 27
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        fs::write(&path, old_format).unwrap();
+
+        let result = read(&path);
+        assert!(
+            result.is_err(),
+            "an old-schema file must not silently parse as valid (possibly empty) new-schema state"
+        );
+    }
+
+    #[test]
     fn find_and_find_mut_look_up_by_composite_key_not_name_alone() {
         let mut state = sample_state();
         assert!(state.find("~/Anime", "One Piece").is_some());

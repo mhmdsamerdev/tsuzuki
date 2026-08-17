@@ -46,6 +46,7 @@ fn main() -> ExitCode {
     };
 
     let home = dirs::home_dir();
+    let is_tty = picker::stdin_is_tty();
 
     dispatch(
         cli.command.unwrap_or(Command::Resume {
@@ -56,22 +57,34 @@ fn main() -> ExitCode {
         &config_path,
         &state_path,
         home.as_deref(),
+        is_tty,
     )
 }
 
+/// `is_tty` is resolved once here (the one real call to
+/// `picker::stdin_is_tty()` in the whole binary) and threaded down as a
+/// plain `bool`, rather than `resume_command`/`start_command` each querying
+/// it internally — this is what makes "an explicit series argument bypasses
+/// the picker even when a TTY is available" a testable claim rather than
+/// just a structural one only provable by reading the code.
 fn dispatch(
     command: Command,
     config: &mut Config,
     config_path: &Path,
     state_path: &Path,
     home: Option<&Path>,
+    is_tty: bool,
 ) -> ExitCode {
     match command {
-        Command::Resume { series, root } => resume_command(series, root, config, state_path, home),
+        Command::Resume { series, root } => {
+            resume_command(series, root, config, state_path, home, is_tty)
+        }
         Command::Status => status_command(config, state_path, home),
         Command::List => list_command(config, state_path, home),
         Command::Add { path } => add_command(&path, config, config_path),
-        Command::Start { series, root } => start_command(series, root, config, state_path, home),
+        Command::Start { series, root } => {
+            start_command(series, root, config, state_path, home, is_tty)
+        }
         Command::Pause { series, root } => {
             pause_command(&series, root.as_deref(), config, state_path, home)
         }
@@ -378,6 +391,7 @@ fn resume_command(
     config: &Config,
     state_path: &Path,
     home: Option<&Path>,
+    is_tty: bool,
 ) -> ExitCode {
     let (state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -408,13 +422,12 @@ fn resume_command(
     match in_progress.len() {
         // Zero `in_progress` series falls through to `start`'s behavior
         // (design.md §6).
-        0 => start_command(None, None, config, state_path, home),
+        0 => start_command(None, None, config, state_path, home, is_tty),
         1 => {
             let o = &in_progress[0];
             play_series(config, &state, &o.root, &o.name, home, "Resuming")
         }
         _ => {
-            let is_tty = picker::stdin_is_tty();
             let outcome = picker::pick(
                 &in_progress,
                 |o| {
@@ -427,6 +440,7 @@ fn resume_command(
                 is_tty,
                 "Resume which series?",
                 |line| println!("{line}"),
+                picker::dialoguer_select,
             );
             match outcome {
                 picker::PickerOutcome::Selected(o) => {
@@ -521,6 +535,7 @@ fn start_command(
     config: &Config,
     state_path: &Path,
     home: Option<&Path>,
+    is_tty: bool,
 ) -> ExitCode {
     let (state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -553,13 +568,13 @@ fn start_command(
     println!("Available to start:");
     println!();
 
-    let is_tty = picker::stdin_is_tty();
     let outcome = picker::pick(
         &eligible,
         overview::start_line,
         is_tty,
         "Start which one?",
         |line| println!("{line}"),
+        picker::dialoguer_select,
     );
     match outcome {
         picker::PickerOutcome::Selected(o) => {
@@ -656,5 +671,274 @@ fn drop_command(
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::File::create(path).unwrap();
+    }
+
+    fn tracked_config(roots: &[&Path]) -> Config {
+        let mut config = Config::default();
+        for root in roots {
+            config.roots.paths.push(root.to_string_lossy().into_owned());
+        }
+        // Any test that reaches `play_series` ends up calling
+        // `launch::resume_playback` with the real, unmocked native/Flatpak
+        // detection — on a machine with a real Flatpak mpv install (this
+        // dev machine has one, discovered during the implementation
+        // session), that would actually spawn it. `true` is a standard,
+        // always-present, instantly-exiting program — bypasses detection
+        // entirely and keeps these tests side-effect-free and fast.
+        config.mpv.command_override = "true".to_string();
+        config
+    }
+
+    fn record(root: &Path, name: &str, status: Status) -> SeriesRecord {
+        SeriesRecord {
+            root: root.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            status,
+            current_relative_path: format!("{name}/ep01.mkv"),
+            position_seconds: 200.0,
+            episode_number: Some(1),
+            updated_at: 1,
+        }
+    }
+
+    // --- Sweep item: `pause`/`drop` --root disambiguation against a real
+    // name collision (two actually identically-named series under two real
+    // tracked roots), verified via the resulting state.toml mutation. ---
+
+    #[test]
+    fn pause_command_root_disambiguates_between_two_real_identically_named_series() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("Anime");
+        let root_b = dir.path().join("AltAnime");
+        touch(&root_a.join("Monster").join("ep01.mkv"));
+        touch(&root_b.join("Monster").join("ep01.mkv"));
+
+        let config = tracked_config(&[&root_a, &root_b]);
+        let state_path = dir.path().join("state.toml");
+        let state = State {
+            series: vec![
+                record(&root_a, "Monster", Status::InProgress),
+                record(&root_b, "Monster", Status::InProgress),
+            ],
+        };
+        state::write(&state_path, &state).unwrap();
+
+        let exit = pause_command("Monster", Some(&root_b), &config, &state_path, None);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after
+                .find(&root_b.to_string_lossy(), "Monster")
+                .unwrap()
+                .status,
+            Status::Paused,
+            "the --root-specified series must be paused"
+        );
+        assert_eq!(
+            after
+                .find(&root_a.to_string_lossy(), "Monster")
+                .unwrap()
+                .status,
+            Status::InProgress,
+            "the identically-named series under the OTHER root must be completely untouched"
+        );
+    }
+
+    #[test]
+    fn drop_command_root_disambiguates_between_two_real_identically_named_series() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("Anime");
+        let root_b = dir.path().join("AltAnime");
+        touch(&root_a.join("Monster").join("ep01.mkv"));
+        touch(&root_b.join("Monster").join("ep01.mkv"));
+
+        let config = tracked_config(&[&root_a, &root_b]);
+        let state_path = dir.path().join("state.toml");
+        let state = State {
+            series: vec![
+                record(&root_a, "Monster", Status::InProgress),
+                record(&root_b, "Monster", Status::InProgress),
+            ],
+        };
+        state::write(&state_path, &state).unwrap();
+
+        let exit = drop_command("Monster", Some(&root_a), &config, &state_path, None);
+        assert_eq!(exit, ExitCode::SUCCESS);
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after
+                .find(&root_a.to_string_lossy(), "Monster")
+                .unwrap()
+                .status,
+            Status::Dropped
+        );
+        assert_eq!(
+            after
+                .find(&root_b.to_string_lossy(), "Monster")
+                .unwrap()
+                .status,
+            Status::InProgress,
+            "the identically-named series under the OTHER root must be completely untouched"
+        );
+    }
+
+    #[test]
+    fn pause_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("Anime");
+        let root_b = dir.path().join("AltAnime");
+        touch(&root_a.join("Monster").join("ep01.mkv"));
+        touch(&root_b.join("Monster").join("ep01.mkv"));
+
+        let config = tracked_config(&[&root_a, &root_b]);
+        let state_path = dir.path().join("state.toml");
+        let state = State {
+            series: vec![
+                record(&root_a, "Monster", Status::InProgress),
+                record(&root_b, "Monster", Status::InProgress),
+            ],
+        };
+        state::write(&state_path, &state).unwrap();
+
+        let exit = pause_command("Monster", None, &config, &state_path, None);
+        assert_eq!(exit, ExitCode::FAILURE);
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after, state,
+            "an ambiguous pause must mutate neither record"
+        );
+    }
+
+    // --- Sweep item: `resume`/`start`'s explicit-arg path, --root
+    // disambiguation via the shared `explicit_play`/`target::resolve_series_root`
+    // mechanism, proven via exit code (one root's series has playable
+    // episodes, the other's doesn't — a wrong resolution would flip which
+    // call succeeds). ---
+
+    #[test]
+    fn explicit_play_root_disambiguates_between_two_real_identically_named_series() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("Anime");
+        let root_b = dir.path().join("AltAnime");
+        // root_a's "Monster" exists but has no video files at all.
+        fs::create_dir_all(root_a.join("Monster")).unwrap();
+        // root_b's "Monster" has a real episode.
+        touch(&root_b.join("Monster").join("ep01.mkv"));
+
+        let config = tracked_config(&[&root_a, &root_b]);
+        let state = State::default();
+
+        let exit_a = explicit_play(
+            "Monster",
+            Some(&root_a),
+            &config,
+            &state,
+            None,
+            "resume",
+            "Resuming",
+        );
+        assert_eq!(
+            exit_a,
+            ExitCode::FAILURE,
+            "root_a's Monster has zero episodes — resolving there must fail"
+        );
+
+        let exit_b = explicit_play(
+            "Monster",
+            Some(&root_b),
+            &config,
+            &state,
+            None,
+            "resume",
+            "Resuming",
+        );
+        assert_eq!(
+            exit_b,
+            ExitCode::SUCCESS,
+            "root_b's Monster has a real episode — --root must have actually reached it, \
+             not silently resolved to root_a (or anywhere else) regardless of the flag"
+        );
+    }
+
+    #[test]
+    fn resume_command_explicit_arg_bypasses_the_picker_even_when_a_tty_is_available() {
+        // Multiple in_progress series exist — enough that the bare/no-arg
+        // path would hit the `_ =>` many-choices branch and call the real
+        // `dialoguer`-backed picker. `is_tty: true` is passed explicitly
+        // (the whole point of threading it in from `dispatch` instead of
+        // querying it inside this function) — if an explicit series
+        // argument ever regressed into reaching the picker code under
+        // these exact conditions, `dialoguer::Select::interact_opt()` would
+        // either error out (no real controllable terminal in a test
+        // harness) or, worse, hang. Run on a background thread with a
+        // bounded wait so a real regression fails loudly instead of
+        // hanging the whole test binary — same precedent as
+        // `series.rs`'s symlink-cycle test.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Monster").join("ep01.mkv"));
+        touch(&root.join("One Piece").join("ep01.mkv"));
+
+        let config = tracked_config(&[&root]);
+        let state_path = dir.path().join("state.toml");
+        let state = State {
+            series: vec![
+                record(&root, "Monster", Status::InProgress),
+                record(&root, "One Piece", Status::InProgress),
+            ],
+        };
+        state::write(&state_path, &state).unwrap();
+
+        let series = Some("Monster".to_string());
+        let exit = wait_with_timeout(
+            move || resume_command(series, None, &config, &state_path, None, true),
+            Duration::from_secs(5),
+        )
+        .expect(
+            "resume_command with an explicit series arg did not return within the timeout — \
+             likely a regression that reached the interactive picker despite an explicit arg",
+        );
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+    }
+
+    /// Runs `f` on a background thread and polls for completion instead of
+    /// blocking on `.join()`, so a regression that hangs (e.g. an
+    /// accidental interactive prompt in a non-interactive test) fails this
+    /// test loudly via a bounded wait instead of hanging the whole test
+    /// binary indefinitely.
+    fn wait_with_timeout<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+        timeout: Duration,
+    ) -> Option<T> {
+        let handle = std::thread::spawn(f);
+        let start = Instant::now();
+        loop {
+            if handle.is_finished() {
+                return handle.join().ok();
+            }
+            if start.elapsed() > timeout {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

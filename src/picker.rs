@@ -32,18 +32,22 @@ pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// Presents `items` for selection. When `is_tty` is true, uses a real
-/// arrow-key selector (`dialoguer`); otherwise prints each item (via
-/// `label`) with a 1-based index through `print_line` and returns
-/// `Listed` without ever blocking on input. `is_tty` is passed in rather
-/// than queried internally so this stays fully unit-testable without a
-/// real terminal.
+/// Presents `items` for selection. When `is_tty` is true, calls `select`
+/// with the rendered labels and returns whichever index it picks (`None` =
+/// cancelled); otherwise prints each item (via `label`) with a 1-based
+/// index through `print_line` and returns `Listed` without ever blocking on
+/// input. Both `is_tty` and `select` are passed in rather than the real TTY
+/// check / `dialoguer` call being hardcoded — this is what makes the actual
+/// selection path (not just the non-TTY fallback) genuinely unit-testable:
+/// a test can inject a fake `select` and drive a fabricated choice all the
+/// way through to `PickerOutcome::Selected`, without a real terminal.
 pub fn pick<T: Clone>(
     items: &[T],
     label: impl Fn(&T) -> String,
     is_tty: bool,
     prompt: &str,
     mut print_line: impl FnMut(&str),
+    select: impl FnOnce(&str, &[String]) -> Option<usize>,
 ) -> PickerOutcome<T> {
     if !is_tty {
         for (i, item) in items.iter().enumerate() {
@@ -53,15 +57,23 @@ pub fn pick<T: Clone>(
     }
 
     let labels: Vec<String> = items.iter().map(&label).collect();
-    match dialoguer::Select::new()
+    match select(prompt, &labels) {
+        Some(index) => PickerOutcome::Selected(items[index].clone()),
+        None => PickerOutcome::Cancelled,
+    }
+}
+
+/// The real, production `select` implementation: a `dialoguer` arrow-key
+/// selector. This is the *only* place `dialoguer` is touched in this
+/// module — `pick` itself never references it — so production code passes
+/// this function pointer while tests pass a fake closure instead.
+pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {
+    dialoguer::Select::new()
         .with_prompt(prompt)
-        .items(&labels)
+        .items(labels)
         .default(0)
         .interact_opt()
-    {
-        Ok(Some(index)) => PickerOutcome::Selected(items[index].clone()),
-        Ok(None) | Err(_) => PickerOutcome::Cancelled,
-    }
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -79,6 +91,7 @@ mod tests {
             false,
             "Pick one",
             |line| printed.push(line.to_string()),
+            |_, _| panic!("select must never be called in the non-TTY branch"),
         );
 
         assert_eq!(outcome, PickerOutcome::Listed);
@@ -96,10 +109,68 @@ mod tests {
             false,
             "Pick one",
             |line| printed.push(line.to_string()),
+            |_, _| panic!("select must never be called in the non-TTY branch"),
         );
 
         assert_eq!(outcome, PickerOutcome::Listed);
         assert!(printed.is_empty());
+    }
+
+    #[test]
+    fn tty_selection_path_drives_a_fabricated_choice_through_to_selected() {
+        // Sweep finding: the TTY branch used to call `dialoguer::Select`
+        // directly, with no way to exercise it in a test at all. `select`
+        // being injected is what makes this possible: a fake selector
+        // stands in for a real terminal, proving `pick`'s own selection
+        // logic (labels built correctly, chosen index mapped back to the
+        // right item) independent of `dialoguer` or a real TTY.
+        let items = vec!["Monster".to_string(), "One Piece".to_string()];
+
+        let outcome = pick(
+            &items,
+            |s| s.clone(),
+            true,
+            "Resume which series?",
+            |_| panic!("print_line must never be called in the TTY branch"),
+            |prompt, labels| {
+                assert_eq!(prompt, "Resume which series?");
+                assert_eq!(labels, &["Monster".to_string(), "One Piece".to_string()]);
+                Some(1)
+            },
+        );
+
+        assert_eq!(outcome, PickerOutcome::Selected("One Piece".to_string()));
+    }
+
+    #[test]
+    fn tty_selection_labels_are_built_from_the_label_closure_not_the_raw_items() {
+        let items = vec![1, 2, 3];
+        let outcome = pick(
+            &items,
+            |n| format!("item #{n}"),
+            true,
+            "Pick",
+            |_| {},
+            |_, labels| {
+                assert_eq!(
+                    labels,
+                    &[
+                        "item #1".to_string(),
+                        "item #2".to_string(),
+                        "item #3".to_string()
+                    ]
+                );
+                Some(2)
+            },
+        );
+        assert_eq!(outcome, PickerOutcome::Selected(3));
+    }
+
+    #[test]
+    fn tty_selection_cancelled_reports_cancelled_not_a_default_selection() {
+        let items = vec!["Monster".to_string()];
+        let outcome = pick(&items, |s| s.clone(), true, "Pick one", |_| {}, |_, _| None);
+        assert_eq!(outcome, PickerOutcome::Cancelled);
     }
 
     #[test]

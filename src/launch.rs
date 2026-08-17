@@ -85,12 +85,32 @@ pub fn resolve_mpv_command(
 }
 
 /// True if an executable named `mpv` exists somewhere on `$PATH` — a plain
-/// filesystem check, not a spawn.
+/// filesystem check, not a spawn. Checks the executable permission bit, not
+/// just file presence: `is_file()` alone would report success for a
+/// non-executable file that merely happens to be named `mpv`, which would
+/// then only fail — still cleanly, as a typed `Spawn` error, never a panic —
+/// at actual launch time instead of being correctly rejected during
+/// resolution. The permission check is still a single `stat` call, not a
+/// spawn, so it stays exactly as cheap as CLAUDE.md's "cheap existence
+/// check" requires.
 fn native_mpv_on_path() -> bool {
     let Some(path_var) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&path_var).any(|dir| dir.join("mpv").is_file())
+    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join("mpv")))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Known Flatpak app-install locations for `io.mpv.Mpv` — a plain directory
@@ -230,6 +250,35 @@ mod tests {
             0.0,
         );
         assert!(matches!(result, Err(LaunchError::Spawn(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_named_mpv_on_path_is_not_resolved_as_native() {
+        // Sweep finding: `native_mpv_on_path` originally used `is_file()`
+        // alone, which can't distinguish "exists" from "is actually
+        // runnable" — a stray non-executable file literally named `mpv`
+        // sitting on PATH would have falsely resolved as native, only
+        // failing later at spawn time. This proves the fix at the real
+        // `is_executable_file` level: a file with no execute bit set must
+        // not be reported as present.
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake_mpv = dir.path().join("mpv");
+        fs::write(&fake_mpv, b"not actually a binary").unwrap();
+        let mut perms = fs::metadata(&fake_mpv).unwrap().permissions();
+        perms.set_mode(0o644); // readable/writable, deliberately not executable
+        fs::set_permissions(&fake_mpv, perms).unwrap();
+
+        assert!(!is_executable_file(&fake_mpv));
+
+        // And the inverse: marking it executable makes it resolve.
+        let mut perms = fs::metadata(&fake_mpv).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_mpv, perms).unwrap();
+        assert!(is_executable_file(&fake_mpv));
     }
 
     #[test]

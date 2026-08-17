@@ -483,6 +483,41 @@ mod tests {
     }
 
     #[test]
+    fn reconciles_own_write_is_stable_across_a_second_call_with_nothing_new_on_disk() {
+        // Gap-audit required finding #1, third write path: reconcile's own
+        // write (the "new activity"/"completion advances the cursor" path)
+        // always stores exactly the real values it just found — never a
+        // zeroed/cleared placeholder — so it must never manufacture a false
+        // diff against itself on the very next call. Proven by calling
+        // reconcile twice with nothing touched on disk in between and
+        // asserting the second call is a true no-op (updated_at unchanged).
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+
+        let mut state = State::default();
+        reconcile(&config, &mut state, None);
+        let updated_at_after_first_call = state
+            .find(&root.to_string_lossy(), "Monster")
+            .unwrap()
+            .updated_at;
+
+        reconcile(&config, &mut state, None);
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.updated_at, updated_at_after_first_call,
+            "a second reconcile call with nothing new on disk must not treat \
+             reconcile's own prior write as new activity"
+        );
+    }
+
+    #[test]
     fn a_dropped_series_with_an_unchanged_bookmark_stays_dropped_across_reconcile_calls() {
         // Regression test for a real bug caught during Phase 5's dogfood
         // pass: `drop` used to zero `position_seconds` while leaving
@@ -598,6 +633,58 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_series_reactivates_when_a_new_real_bookmark_appears_on_a_later_episode() {
+        // Gap-audit required finding #2: CLAUDE.md's "forward-scan is
+        // strictly forward" note documents that a Paused record must NOT
+        // reactivate from an EARLIER real bookmark. This is the other
+        // direction, which is a genuinely different case and must not be
+        // blocked the same way: the user opens a LATER episode directly,
+        // bypassing tsuzuki entirely, while the series sits paused at
+        // episode 1. That's forward motion from the paused baseline and
+        // must correctly flip the record back to in_progress at the new,
+        // later position — nothing about `Paused` status should suppress
+        // forward movement, only backward movement is meant to be blocked.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+        touch(&series_path.join("ep03.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        // ep01's own old bookmark is still there, completely unchanged...
+        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 200.0);
+        // ...but the user has since opened ep03 directly and quit mid-file.
+        write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 500.0);
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::Paused,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 200.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
+        reconcile(&config, &mut state, None);
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.status,
+            Status::InProgress,
+            "a genuinely later real bookmark must reactivate a paused series"
+        );
+        assert_eq!(record.current_relative_path, "Monster/ep03.mkv");
+        assert_eq!(record.position_seconds, 500.0);
+        assert!(record.updated_at > 1);
+    }
+
+    #[test]
     fn a_duration_based_completed_reading_is_treated_like_absence_and_scanning_continues() {
         // Real fixture: ~5.0s duration. With resume_seconds=1 and
         // completion_remaining_seconds=2, quitting at 4.0s (1.0s remaining)
@@ -634,6 +721,68 @@ mod tests {
             "a Completed-classified entry on ep01 must not be the landing point"
         );
         assert_eq!(record.position_seconds, 1.5);
+    }
+
+    #[test]
+    fn single_run_chains_through_both_completion_signals_and_an_ordinary_resume() {
+        // Gap-audit required finding #3: absence and duration-based
+        // Completed have each only ever been exercised independently (one
+        // signal, nothing after it). Real usage can chain both in the same
+        // sitting: ep01 completes cleanly (mpv writes no entry at all —
+        // absence), ep02 is quit during the credits (a real position within
+        // completion_remaining_seconds of a known duration — Completed),
+        // and the user is already genuinely partway into ep03 (an ordinary
+        // real Resume position). All three must resolve in a single
+        // reconcile() call, landing on ep03 — not stopping at ep02 just
+        // because it was the first entry actually present.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        let fixture = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/short.mkv"
+        ));
+        fs::create_dir_all(&series_path).unwrap();
+        // ep01 has no watch_later entry at all (absence) — no real content
+        // needed, duration is never probed for a file with no entry.
+        touch(&series_path.join("ep01.mkv"));
+        // ep02/ep03 need a real, probeable duration (~5.0s each).
+        fs::copy(&fixture, series_path.join("ep02.mkv")).unwrap();
+        fs::copy(&fixture, series_path.join("ep03.mkv")).unwrap();
+
+        let mut config = default_config(&root);
+        config.thresholds.resume_seconds = 1;
+        config.thresholds.completion_remaining_seconds = 2;
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+
+        // ep01: no entry at all -> absence.
+        // ep02: 4.0s into ~5.0s -> 1.0s remaining -> Completed.
+        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 4.0);
+        // ep03: 1.5s into ~5.0s -> 3.5s remaining -> ordinary Resume.
+        write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 1.5);
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::InProgress,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 3.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
+        reconcile(&config, &mut state, None);
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.current_relative_path, "Monster/ep03.mkv",
+            "must chain past both ep01's absence and ep02's Completed reading in one call"
+        );
+        assert_eq!(record.position_seconds, 1.5);
+        assert_eq!(record.status, Status::InProgress);
     }
 
     #[test]

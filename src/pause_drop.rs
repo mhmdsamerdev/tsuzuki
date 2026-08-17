@@ -132,6 +132,24 @@ mod tests {
     }
 
     #[test]
+    fn pause_never_mutates_position_or_current_path() {
+        // Gap-audit required finding #1: `pause` is the other write path
+        // besides `drop` that could in principle repeat the same
+        // zero/clear-causes-a-false-reconcile-diff mistake CLAUDE.md now
+        // documents. Explicit evidence it doesn't: every field except
+        // `status`/`updated_at` must be byte-for-byte identical afterward.
+        let before = record(Status::InProgress);
+        let mut state = State {
+            series: vec![before.clone()],
+        };
+        pause(&mut state, "~/Anime", "Monster").unwrap();
+        let after = state.find("~/Anime", "Monster").unwrap();
+        assert_eq!(after.current_relative_path, before.current_relative_path);
+        assert_eq!(after.position_seconds, before.position_seconds);
+        assert_eq!(after.episode_number, before.episode_number);
+    }
+
+    #[test]
     fn pause_on_already_paused_is_idempotent() {
         let mut state = State {
             series: vec![record(Status::Paused)],
@@ -170,14 +188,20 @@ mod tests {
         // doc comment) — "position reset" is a playback-time behavior, not
         // a stored-field mutation; zeroing it here would make an unchanged
         // watch_later entry look like new activity to the next reconcile.
+        // Checks every non-status field, not just position_seconds — the
+        // same class of bug could just as easily have zeroed
+        // current_relative_path or episode_number instead.
+        let before = record(Status::InProgress);
         let mut state = State {
-            series: vec![record(Status::InProgress)],
+            series: vec![before.clone()],
         };
         let outcome = drop_series(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::Changed);
-        let r = state.find("~/Anime", "Monster").unwrap();
-        assert_eq!(r.status, Status::Dropped);
-        assert_eq!(r.position_seconds, 500.0);
+        let after = state.find("~/Anime", "Monster").unwrap();
+        assert_eq!(after.status, Status::Dropped);
+        assert_eq!(after.current_relative_path, before.current_relative_path);
+        assert_eq!(after.position_seconds, before.position_seconds);
+        assert_eq!(after.episode_number, before.episode_number);
     }
 
     #[test]

@@ -202,13 +202,36 @@ mod tests {
     }
 
     #[test]
-    fn the_three_display_words_are_pairwise_distinct() {
-        let start = start_display_word(None);
-        let resume = start_display_word(Some(Status::Paused));
-        let rewatch = start_display_word(Some(Status::Dropped));
-        assert_ne!(start, resume);
-        assert_ne!(resume, rewatch);
-        assert_ne!(start, rewatch);
+    fn all_four_real_states_produce_correct_and_distinct_words_together() {
+        // Gap-audit sweep item: four separate single-state tests could each
+        // individually pass while still being wrong relative to each other
+        // (e.g. two states accidentally sharing a string). This constructs
+        // one series per real state — never-started, paused, dropped,
+        // in_progress — in a single test and asserts on all four outputs
+        // together, so a regression that makes any two collide is caught
+        // here even if each one still "looks right" in isolation.
+        let never_started = start_display_word(None);
+        let paused = start_display_word(Some(Status::Paused));
+        let dropped = start_display_word(Some(Status::Dropped));
+        let in_progress = start_display_word(Some(Status::InProgress));
+
+        assert_eq!(never_started, "Start");
+        assert_eq!(paused, "Resume");
+        assert_eq!(dropped, "Rewatch?");
+        // in_progress never legitimately reaches start's listing (filtered
+        // out by eligible_for_start), but the function stays total — it
+        // falls back to the same word a real resumable position uses.
+        assert_eq!(in_progress, "Resume");
+
+        let words = [never_started, paused, dropped];
+        for i in 0..words.len() {
+            for j in (i + 1)..words.len() {
+                assert_ne!(
+                    words[i], words[j],
+                    "the three real start-listing states must never share a display word"
+                );
+            }
+        }
     }
 
     #[test]
