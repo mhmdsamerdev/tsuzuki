@@ -398,7 +398,7 @@ Wire in anitomy-rs, parse episode numbers, fallback to ordinal position, and the
 Candidate-path list per OS/install method, parsing entries (including skipping redirect entries), resume/completion thresholds, filtering to tracked roots. This is the first phase touching another program's on-disk format, so it deserves its own focused pass — and it's easy to test with fabricated watch_later files, no real mpv needed.
 
 **Phase 5 — State machine & core commands**
-This is the payoff phase: in_progress/paused/dropped, the resume picker (0/1/many logic), and tsuzuki / resume / status / current / list / start / pause / drop. Everything from Phases 1–4 gets tied together here into the actual one-command demo. I'd stop and manually dogfood after this phase — it's the point where the tool becomes real.
+This is the payoff phase: in_progress/paused/dropped, the resume picker (0/1/many logic), and tsuzuki / resume / status / list / start / pause / drop. Everything from Phases 1–4 gets tied together here into the actual one-command demo. I'd stop and manually dogfood after this phase — it's the point where the tool becomes real.
 
 **Phase 6 — doctor**
 Full environment checks (mpv config flag, watch_later reachability, Flatpak permission gap, tracked-root validity, MAL auth status once Phase 7 exists). Doing it last means it can genuinely check everything rather than being built incrementally and forgotten.

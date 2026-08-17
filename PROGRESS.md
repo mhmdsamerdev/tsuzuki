@@ -305,11 +305,69 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     tsuzuki`, never bare `cargo fmt`.
   - Not wired into any command, `state.toml` untouched — Phase 5 does
     both.
+- Phase 5 — Planning & design (chat only, no code yet):
+  - Resolved both open questions Phase 4 left blocking Phase 5: the exact
+    absence-based-completion mechanism (per-series, checks only the one
+    file `state.toml` remembers as current, no baseline = can't fire), and
+    how the cursor advances when the user skips ahead manually.
+  - Full `state.toml` schema settled: records keyed by (tracked root's
+    literal persisted form, series name) — never name alone, since
+    composable roots allow the same series name under two roots at once;
+    `updated_at` moves only on genuine persisted state changes, never on a
+    scan or a sub-`resume_seconds` reading.
+  - Cursor-movement mechanics worked out by stress-testing concrete
+    scenarios (not just asserted): a sub-`resume_seconds` reading is
+    invisible to saved state in both directions — critically, it must
+    never overwrite an existing *real* position, since mpv itself has no
+    concept of Tsuzuki's noise threshold and would otherwise let one
+    accidental short reopen silently erase real progress. Documented as a
+    permanent, accepted architectural limit: a clean binge (never quitting
+    mid-file) leaves mpv's `watch_later` zero trace at all — no amount of
+    inference recovers information that was never written.
+  - Deleted/moved/renamed series: treated identically to a fresh,
+    untracked series appearing in its place (series identity is the
+    literal directory name, no rename detection, ever). The old
+    `state.toml` record goes inert, never auto-deleted — cleanup is
+    pinned as a required `doctor` (Phase 6) check, not automatic.
+  - Corrected a real doc bug: "Tsuzuki never launches mpv" was misleading
+    — tracking is launcher-independent, but resuming does spawn mpv
+    directly (fire-and-forget, no IPC socket held).
+  - Full command-surface review (not just accepted as originally drafted):
+    `current` was cut entirely (fully subsumed by `status`); `pause`/`drop`
+    given explicit `--root` disambiguation (same mechanism as `exclude`),
+    idempotent re-invocation, and a unified "no real progress to act on"
+    error covering both never-started and already-dropped; allowed state
+    transitions made explicit, `Dropped→Paused` ruled out on purpose.
+  - mpv launch strategy settled: cheap existence check (never
+    attempt-and-catch a failed spawn) to resolve native vs. Flatpak, new
+    `[mpv] command_override` config field to skip detection entirely.
+  - `list`'s ordering (grouped by status, alphabetical within group) and
+    `start`'s three separate display words (Start/Resume/Rewatch?) locked
+    in — the Resume/Rewatch? distinction was caught by literally
+    simulating a terminal session end-to-end, not obvious from the state
+    mechanics alone; an earlier pass had conflated paused with dropped.
+  - Full session simulated by hand (fresh install → add → start → resume
+    → binge → pause → drop → disambiguation case) against the settled
+    design before writing Phase 5's prompt, specifically to catch gaps
+    like the above before they became rebuilds.
+  - New `scenario-stress-test` skill created as a byproduct — captures the
+    "test the rule against real, adversarial numbers/sequences before
+    trusting it" discipline that caught most of the above, for reuse on
+    future decisions.
+  - All of the above written into `CLAUDE.md`; `docs/design.md` updated
+    for the product-level changes (commands table, Cold Start section).
+    Phase 5's kickoff prompt is written and ready to hand off.
 
 **Next up:**
-- Phase 5 — State machine & core commands (design.md §11) — not yet
-  started. Dogfood checkpoint per CLAUDE.md §6: pause and confirm with the
-  user after this phase before continuing to Phase 6.
+- Phase 5 — State machine & core commands (design.md §11). Design work is
+  done — every open question from Phase 4 is resolved, plus a full round
+  of additional Phase 5-specific decisions (state.toml's schema, the
+  shared reconcile-before-acting rule, pause/drop semantics and allowed
+  transitions, mpv launch resolution, the `current` command being cut,
+  start's three display words) are all written into CLAUDE.md. Kickoff
+  prompt is written and ready to hand off. Code not started yet. Dogfood
+  checkpoint per CLAUDE.md §6: pause and confirm with the user after this
+  phase before continuing to Phase 6.
 
 **Open questions blocking further work:**
 - cleared

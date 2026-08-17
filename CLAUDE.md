@@ -404,22 +404,23 @@ This is this session's judgment call, not something docs/design.md specifies
 — if real usage says the other order feels more correct, this is a one-line
 change in `classify()`, not a structural one; revisit if it doesn't hold up.
 
-**`start`'s listing distinguishes never-started from dropped by whether a
-`state.toml` record exists at all — no new marker needed.** A series that
-was manually `drop`ped and one whose last real episode's bookmark simply
-disappeared (the only detectable "finished the whole series" signal, given
-the binge-watching trace gap below) are treated identically in `start`'s
-display: both show as "Rewatch?" rather than plain "Start," since both are
-genuinely the same situation from the user's side — reopening any episode
-naturally re-populates progress either way (§8). A series with no
-`state.toml` record at all (truly never touched) shows plain "Start."
-This needs zero new persisted data — a manual drop and a detected
-completion already collapse to the same underlying state (`dropped`, no
-active bookmark), so the display only needs to check "does a record for
-this series exist," never "why does this record exist." Deliberately no
-fourth `completed` state was added — see "Completion detection has a real,
-permanent blind spot" below for why one wouldn't even be reliably
-detectable most of the time.
+**`start`'s listing has three distinct display words, one per state — this
+was caught by literally simulating a session, not obvious from the state
+mechanics alone.** Never-started (no `state.toml` record) → **"Start."**
+Paused → **"Resume"** (at its saved position) — genuinely different from
+the other two; a paused series has a real position waiting, not a reset
+one. Dropped (manually, or via the one detectable "finished the whole
+series" signal — see the binge-watching trace gap below) → **"Rewatch?"**
+— manual-drop and detected-completion collapse to the same display and the
+same underlying state, since both are genuinely the same situation from the
+user's side: reopening any episode naturally re-populates progress either
+way (§8), and this needs zero new persisted data to tell them apart — the
+display only checks "does a record exist, and what state is it in," never
+"why." A `paused` record must never be mislabeled "Rewatch?" — that word is
+specifically for a reset/dropped position, not a genuinely resumable one.
+Deliberately no fourth `completed` state was added — see "Completion
+detection has a real, permanent blind spot" below for why one wouldn't even
+be reliably detectable most of the time.
 
 ### Completion detection has a real, permanent blind spot — clean binges leave no trace at all
 mpv only ever writes a `watch_later` entry when a file is quit *mid-*
@@ -629,9 +630,11 @@ attempting one and catching failure before trying the other.** A
 become "try spawning native mpv, catch the failure, then try the Flatpak
 invocation," since a failed spawn attempt is real, wasted process-launch
 overhead directly against the tool's own startup-latency rationale (§5).
-Check existence once, spawn only the one that's actually there. A config
-override (mirroring `watch_later_dir`'s shape) lets a user with both
-installed pin one explicitly, skipping detection entirely on every future
+Check existence once, spawn only the one that's actually there. A new
+`[mpv] command_override` config field (empty string default = auto-detect;
+same empty-means-default shape as `watch_later_dir`) lets a user with both
+installed pin the exact launch command explicitly (e.g.
+`"flatpak run io.mpv.Mpv"`), skipping detection entirely on every future
 invocation. If neither resolves, or the spawn itself still fails for some
 other reason, that's a plain, clear command error — never a panic, and
 `doctor` (Phase 6) checking mpv availability proactively doesn't make this
