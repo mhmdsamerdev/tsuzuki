@@ -3,7 +3,7 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 3 — Anitomy integration (done)
+**Current phase:** Phase 4 — mpv `watch_later` reading (done)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -224,8 +224,92 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     unchanged logic and persists to `config.toml`; re-running bare
     `exclude` afterward correctly reports zero candidates.
 
+- Phase 4 — mpv `watch_later` reading:
+  - **`src/duration.rs`** (new): episode duration probing, standalone and
+    not yet wired to any command. `probe_duration(path) -> DurationOutcome`
+    tries `symphonia`'s own content-based format probe first (no extension
+    hint given at all — never dispatches by `.mkv`/`.mp4`/etc, only by
+    file content, per CLAUDE.md), reading duration straight off
+    `FormatReader::media_info()` (works regardless of track type, so no
+    audio track is required). Falls back to a small hand-written AVI
+    `avih` RIFF-header reader (`total_frames × microseconds_per_frame`)
+    only when Symphonia's probe fails to identify the file — never gated
+    on the `.avi` extension. `DurationOutcome::Known(f64)` /
+    `Unknown(DurationError)` (`Io`/`Unreadable`) — an unreadable duration
+    is always surfaced with a real reason, never collapsed to a bare
+    `None`. `symphonia = { version = "0.6.1", default-features = false,
+    features = ["mkv", "isomp4"] }` — scoped to exactly the containers
+    `video_extensions` needs (mkv covers webm too; isomp4 covers
+    mp4/mov); avi has no Symphonia support, hence the fallback.
+  - **`src/mpv.rs`** (new): reads mpv's own `watch_later` files, standalone
+    and not yet wired to any command. Candidate-path table
+    (`WatchLaterCandidate { os, relative }`, matched against
+    `std::env::consts::OS` — one platform check, not scattered `cfg!`)
+    with design.md §4's exact 5 Linux candidates (native ×2, Flatpak ×2,
+    Snap ×1); `watch_later_dir` config override replaces the candidate
+    list entirely rather than merging with it. Entry parsing discards
+    `# redirect entry` files and skips any malformed entry (missing
+    `start=`, unparseable float, non-comment first line) without aborting
+    the scan. Tracked-root filtering reuses `roots::normalize` (the same
+    helper `add`/`exclude` use) rather than a second comparison path.
+    Cross-directory duplicates are merged per-*path* (not per-directory)
+    freshest-file-wins. `classify()` turns a position + `DurationOutcome`
+    into `StartFromZero` / `Resume(f64)` / `Completed` against
+    `resume_seconds`/`completion_remaining_seconds` — on the overlap edge
+    case (a short file where both thresholds fire at once),
+    `StartFromZero` wins, a deliberate, documented (CLAUDE.md) judgment
+    call, not a coin flip.
+  - `tests/fixtures/{short.mkv,short.mp4}` (new, ~4.4KB/4.8KB, 5.0s
+    duration each): tiny real ffmpeg-generated fixtures, committed to the
+    repo, used to test Symphonia's actual content-probe path against real
+    container bytes rather than only fabricated ones. ffmpeg/ffprobe were
+    only ever used locally to generate these bytes — neither is a Tsuzuki
+    dependency or ever shelled out to at runtime.
+  - Real-world timing (`probe_duration` against a real 20-minute/1200s
+    synthetic mkv fixture, not committed): **212µs release / 653µs
+    debug** — confirms duration probing is nowhere near a startup-latency
+    concern (CLAUDE.md §5).
+  - **Gap-audit pass** (separate review pass, not the implementation
+    session): confirmed duration probing is genuinely **lazy** — nothing
+    in `mpv.rs`'s own code calls `probe_duration`; `classify()` takes a
+    `DurationOutcome` as a parameter rather than computing one, so Phase 5
+    is the one that decides when (and for which single entry) to probe.
+    Added 11 tests: corrupt/non-video files (zero-byte, plain text
+    renamed `.mkv`) resolving cleanly to `Unknown` with no panic; a
+    redirect entry with a trailing `start=` line still discarded as a
+    redirect; a missing tracked root and a deleted source file both
+    filtering cleanly with no panic; a 3-way merge proving freshest-wins
+    isn't order-dependent; an exact-mtime-tie determinism test; and the
+    threshold-overlap precedence case.
+  - **Correction pass** (CLAUDE.md's "An absent OS-default candidate
+    directory stays silent — an explicit `watch_later_dir` override that
+    doesn't resolve must be surfaced, not silent"): `scan_watch_later`'s
+    return type changed from `Vec<WatchLaterEntry>` to
+    `ScanResult { entries, warning: Option<ScanWarning> }`. An override
+    that doesn't exist on disk now returns `ScanWarning::WatchLaterDirNotFound`
+    carrying the value exactly as configured (unexpanded, matching
+    `AddError::NotFound`'s existing convention) alongside the (still
+    empty) entries — not an error, the scan still completes. An absent
+    OS-default candidate directory stays exactly as silent as before,
+    proven by its own explicit test rather than inferred from the
+    override case. Still zero printing anywhere in this module — the
+    warning is returned data only; no command exists yet to display it.
+  - 143 tests total (up from 84 at the end of Phase 3), all passing, zero
+    warnings under the scoped gate (`cargo clippy -p tsuzuki --no-deps --
+    -D warnings`, both with and without `--tests`), `cargo fmt -p tsuzuki
+    --check` clean. Two whole-workspace `cargo fmt` runs accidentally
+    reformatted the off-limits `vendor/anitomy/` during this phase (once
+    in the implementation session, once in the gap-audit session) — both
+    caught via `git status` before finishing and reverted. Any future
+    session running `cargo fmt` on this repo must scope it to `-p
+    tsuzuki`, never bare `cargo fmt`.
+  - Not wired into any command, `state.toml` untouched — Phase 5 does
+    both.
+
 **Next up:**
-- Phase 4 — mpv `watch_later` reading (design.md §11/§4) — not yet started.
+- Phase 5 — State machine & core commands (design.md §11) — not yet
+  started. Dogfood checkpoint per CLAUDE.md §6: pause and confirm with the
+  user after this phase before continuing to Phase 6.
 
 **Open questions blocking further work:**
 - exact mechanism for absence-based completion.
