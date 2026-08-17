@@ -335,17 +335,36 @@ canonical stored/documented form stays the bare extension (no dot), per
 §8's example; the normalization only exists to make the dotted form also
 work rather than fail silently.
 
-### Resume picker is interactive (arrow-key select), not a numbered prompt — Phase 5
-Deciding this now so it isn't re-litigated later: the multi-`in_progress`
-resume picker (§8) uses a real interactive selector (↑/↓, Enter — via a
-crate like `dialoguer` or `inquire`), not "type a number." This is the
-one place in the tool where losing scriptability is the right tradeoff —
-it's the daily one-command reflex path the whole tool exists for, so
-minimizing keystrokes matters more than non-interactive use here. A
-non-TTY context (piped/scripted invocation) must fall back to listing
-choices with an index rather than hanging on a prompt that can't render.
-Not built until Phase 5; noted here so the crate choice and UX aren't
-improvised under time pressure later.
+### Series selection: interactive by default, explicit when scripted — `resume`/`start`, Phase 5
+`tsuzuki resume` and `tsuzuki start` share one selection mechanism, decided
+now so it isn't improvised under time pressure later. Invoked with no
+explicit series argument, and a real TTY is available: a real interactive
+arrow-key selector (↑/↓, Enter — via a crate like `dialoguer`/`inquire`),
+not "type a number." This is the one place in the tool where losing
+scriptability is the right tradeoff — it's the daily one-command reflex
+path the whole tool exists for, so minimizing keystrokes matters more than
+non-interactive use here. But — this was a real gap in the earlier version
+of this note — the picker must not be the *only* way to complete the
+action: both commands also accept an explicit series name (with `--root`
+when the same name exists under more than one tracked root, same mechanism
+as `exclude`/`pause`/`drop`), so the action can always be completed
+non-interactively and used reliably from scripts, without ever depending on
+a TTY existing at all. In a non-TTY context with no explicit series given:
+never hang waiting for input — list the available choices with indexes and
+exit without performing the action (non-zero exit, see "informed but did
+not complete the action" below). An explicit series argument always bypasses
+the picker entirely and proceeds directly, TTY or not. The interactive
+picker is a convenience layered on top of a fully scriptable command, never
+a requirement of the command's actual semantics.
+
+### `current` was cut — folded into `status`
+An earlier draft of the command list (design.md §9) had `tsuzuki current`
+as a separate command ("which series would bare `tsuzuki` resume right
+now"). Revisited during Phase 5 planning: it added no information `status`
+can't already show — a single `in_progress` series is `status`'s one row;
+multiple are `status`'s full list, which can just note that running
+`tsuzuki` bare will prompt among them. Cut entirely rather than kept as a
+redundant thin wrapper — one fewer command surface, zero lost capability.
 
 ### Anitomy-candidate confirmation stays list-only, not interactive
 Bare `tsuzuki exclude` (no path) lists Anitomy-suggested OVA/Special/
@@ -549,6 +568,105 @@ air) — exactly the category of inference this project avoids everywhere
 else. Don't "helpfully" pick a nonzero default later; 0 is correct.
 
 ---
+
+### `state.toml` record identity, root reference, and `updated_at`
+A series record is keyed by **both** its tracked root and its literal
+series name — never name alone. Composable roots (§3 above) mean the same
+series name can legitimately exist under more than one tracked root at
+once (`Anime/Monster` vs. `Anime/Rewatches/Monster`), and they must stay
+distinct records with independent progress, same as everywhere else this
+project handles composable roots. The root reference stores that root's own
+**persisted literal config form** — exactly the same mechanism exclusions
+already use (§3, "Exclusion persistence and disambiguation") — never a
+resolved absolute path or a synthesized ID; this preserves the same
+portability guarantee roots and exclusions already have (§3, "Roots are
+persisted in the form the user typed"). Each record also carries an
+`updated_at` timestamp, needed to give `auto_pause_days` any real meaning
+at all — nothing currently tracks how idle a series actually is.
+**`updated_at` only moves on a genuine, persisted state change** — never
+on a mere scan or invocation, and never on a sub-`resume_seconds`
+observation, since those are already explicitly forbidden from touching
+saved state at all (see "Cursor movement" above). It measures real idle
+time, not how often the command happened to run.
+
+### `pause`/`drop`: root disambiguation, no-record errors, and the allowed transitions
+`pause <series>` and `drop <series>` use the exact same `--root`
+disambiguation mechanism `exclude` already established, when the same
+series name exists under more than one tracked root — not a new, second
+disambiguation UX.
+
+**Both error, rather than silently creating a record, when the target has
+no real progress to act on** — this covers two cases identically: a series
+with no `state.toml` record at all (never started), and one that's already
+`dropped` (progress already reset, nothing left to pause). `pause`/`drop`
+act on existing progress; they don't manufacture a starting point. This is
+one rule, not two special cases — "is there anything real to act on,"
+consistently applied.
+
+**Allowed transitions:** `in_progress → paused`, `in_progress → dropped`,
+`paused → in_progress`, `paused → dropped`. **`dropped → paused` does not
+exist** — dropped is a dead end reachable only by opening an episode
+directly, which (per §8) naturally re-populates progress and goes straight
+back to `in_progress`, never through `pause`. Re-invoking `pause` on an
+already-`paused` series, or `drop` on an already-`dropped` one, is
+idempotent — exit 0, no-op — same precedent as `add` re-registering an
+already-tracked root; a script re-running a harmless action shouldn't look
+like a failure.
+
+### Launching mpv: fire-and-forget, cheap existence check before spawn, install-method detection
+Resuming (`tsuzuki`/`resume`/`start` picking an episode) spawns
+`mpv <file> --start=<seconds>` and immediately lets go — it does not block
+waiting for mpv to exit, and it does not re-scan `watch_later` the moment
+mpv exits either. Consistent with the passive, after-the-fact
+`watch_later` architecture (§3, "mpv `watch_later` reading is
+launcher-independent"): state reconciliation happens the next time Tsuzuki
+is invoked, exactly like every other read of mpv's state, not as a special
+case tied to having just launched something.
+
+**Native vs. Flatpak mpv is resolved by a cheap existence check, never by
+attempting one and catching failure before trying the other.** A
+`PATH` lookup is a fast filesystem check, not a spawn — this must never
+become "try spawning native mpv, catch the failure, then try the Flatpak
+invocation," since a failed spawn attempt is real, wasted process-launch
+overhead directly against the tool's own startup-latency rationale (§5).
+Check existence once, spawn only the one that's actually there. A config
+override (mirroring `watch_later_dir`'s shape) lets a user with both
+installed pin one explicitly, skipping detection entirely on every future
+invocation. If neither resolves, or the spawn itself still fails for some
+other reason, that's a plain, clear command error — never a panic, and
+`doctor` (Phase 6) checking mpv availability proactively doesn't make this
+the *only* place a launch failure is ever surfaced.
+
+### Every state-touching command reconciles against current mpv reality first, through one shared function
+`list`, `status`, `pause`, `drop`, and the resume/`start` picker must all
+run the same "resolve `state.toml` against what mpv currently says"
+step before doing anything else — through one shared function, not five
+commands each quietly implementing their own freshness check. This
+guarantees identical behavior by construction (e.g. `pause <series>`
+correctly sees a series that secretly already completed since the last
+check, before acting on stale info) rather than by every command happening
+to agree today and silently drifting apart later.
+
+### `list` ordering and episode-number display
+`list`'s ordering is fixed and deterministic, never "whatever iteration
+order falls out": grouped by status first — `in_progress`, then `paused`,
+then `dropped`, then never-started — alphabetical by series name within
+each group. Episode number shown in `list`/`start` (design.md §6/§9's
+"ep. 9" mockups) uses Anitomy's parsed episode number when available,
+falling back to ordinal position — same precedent as everywhere else
+Anitomy annotates without deciding order (§3), applied to display.
+
+### Output convention: warnings on stderr, real output on stdout; non-completion exits non-zero
+Any surfaced warning (a `ScanWarning`, a `DurationOutcome::Unknown` reason,
+etc. — see Phase 4's decisions above) goes to stderr; normal command
+output goes to stdout — matches the ripgrep/cargo convention this project
+already follows elsewhere (§3, "CLI bare-invocation contract"), and keeps
+piping/scripting against stdout clean. A command that *informs* the user
+of something but doesn't *complete* the requested action exits non-zero —
+this isn't a new rule, it's the same precedent `exclude`'s ambiguity case
+already set (§3): a non-interactive picker listing choices without picking
+one falls in the same bucket, so a script chaining `tsuzuki && next-thing`
+correctly sees that nothing was actually resumed.
 
 ## 4. Dev environment
 

@@ -326,21 +326,20 @@ A single flat TOML file — not sharded per-series (mpv shards because it tracks
 
 | Command | Purpose |
 |---|---|
-| `tsuzuki` | Resume the current series. Single `in_progress` series → resumes directly. Multiple → shows a picker. None → falls through to `start` behavior. |
-| `tsuzuki resume` | Explicit alias for the above. |
-| `tsuzuki status` | Show what's currently `in_progress`. |
-| `tsuzuki current` | Show which series bare `tsuzuki` would resume right now. |
-| `tsuzuki list` | List all tracked series and their progress/status. |
+| `tsuzuki` | Resume the current series. Single `in_progress` series → resumes directly. Multiple → interactive picker (arrow-key select) if a TTY is available, otherwise lists choices with an index and exits without resuming. None → falls through to `start` behavior. |
+| `tsuzuki resume [series] [--root <root>]` | Explicit alias for the above. Accepts an optional explicit series name (with `--root` to disambiguate a name shared across composable roots) to bypass the picker and complete non-interactively — always usable from a script, never dependent on a TTY. |
+| `tsuzuki status` | Show what's currently `in_progress` — every such series, its progress, and (if more than one) a note that running bare `tsuzuki` will prompt among them. Subsumes the earlier separate `current` command, cut as redundant during Phase 5 planning. |
+| `tsuzuki list` | List all tracked series and their progress/status — grouped `in_progress` → `paused` → `dropped` → never-started, alphabetical within each group. |
 | `tsuzuki add <path>` | Register a tracked root. |
-| `tsuzuki start` | List series outside the automatic picker — never-started, dropped (open at ep. 1), and paused (resume at saved position). |
-| `tsuzuki pause <series>` | Remove from the resume picker, keep saved position. |
-| `tsuzuki drop <series>` | Reset progress; series reappears in `start` as if new. |
+| `tsuzuki start [series] [--root <root>]` | List series outside the automatic picker — never-started, dropped/completed (shown as "Rewatch?"), and paused (resume at saved position). Same explicit-argument/interactive-picker behavior as `resume`. |
+| `tsuzuki pause <series> [--root <root>]` | Remove from the resume picker, keep saved position. Errors (does not silently create a record) if the target has no real progress to pause — never started, or already dropped. |
+| `tsuzuki drop <series> [--root <root>]` | Reset progress; series reappears in `start` as if new (labeled "Rewatch?" either way). Same no-record-to-act-on error as `pause`. |
 | `tsuzuki exclude [path]` | Exclude a file or directory from ordering. Bare invocation surfaces Anitomy-suggested candidates for confirmation. |
 | `tsuzuki sync login` | One-time MAL OAuth authorization. |
 | `tsuzuki sync link <series>` | Manually resolve a series-to-MAL-ID mapping when exact-title matching fails. |
 | `tsuzuki sync` | Run the two-way, non-destructive sync against MAL. |
 | `tsuzuki config get/set/list/edit` | Read or write config values, or open the config file directly. |
-| `tsuzuki doctor` | Environment health checks — mpv config flag, watch_later reachability (including a configured `watch_later_dir` override that doesn't resolve), Flatpak permissions, tracked-root validity, orphaned per-series `state.toml` records (a series deleted/moved/renamed out from under a still-tracked root), MAL auth status. |
+| `tsuzuki doctor` | Environment health checks — mpv config flag, watch_later reachability (including a configured `watch_later_dir` override that doesn't resolve), Flatpak permissions, mpv-launch resolvability (native/Flatpak/configured override), tracked-root validity, orphaned per-series `state.toml` records (a series deleted/moved/renamed out from under a still-tracked root), MAL auth status. |
 
 **CLI invocation contract.** Every command group with subcommands
 (`config`, `sync`) must have an explicit, documented behavior for being
