@@ -350,6 +350,30 @@ completed or otherwise resolving it — or whether skipping ahead should be
 required to explicitly resolve what was left behind first. Must be settled
 before Phase 5's kickoff prompt is written; not a Phase 4 concern.
 
+**An absent OS-default candidate directory stays silent — an explicit
+`watch_later_dir` override that doesn't resolve must be surfaced, not
+silent.** These are not the same situation and must not be treated
+identically. An OS-default candidate being missing (e.g. no Flatpak mpv
+installed) is normal and expected — silence is correct there. But
+`watch_later_dir` is something the user explicitly typed, asserting "look
+here instead" — if that path doesn't exist, it's almost certainly a
+mistake, and staying silent means the user has no way to discover why
+nothing is ever found, possibly indefinitely. The fix: when the override is
+set and doesn't resolve, the scan result carries a warning (the configured
+path, distinguishable from the "nothing found" case) rather than being
+indistinguishable from zero-bookmarks-anywhere — same "carry the reason
+forward, don't collapse to a bare empty result" pattern as
+`DurationOutcome::Unknown`. This still doesn't error or block any command —
+the daily one-command reflex must keep working even with a bad config value
+— but the warning must actually reach the user somewhere. Since this module
+has no command-facing output of its own (same as everything else in this
+phase), the warning is *returned as data*, not printed here; Phase 5 (the
+first phase with real command output) is responsible for actually
+displaying it once it exists. Don't let `doctor` (Phase 6) end up as the
+only place this ever surfaces — `doctor` is for catching setup problems
+proactively before they bite; a bad override should also be visible
+reactively, the moment it actually affects a real command.
+
 ### Completion threshold needs episode duration — mpv's watch_later files don't have it
 `completion_remaining_seconds` (§8) requires knowing how much of an episode is
 *left* — but mpv's `watch_later` entries only ever store the resume position

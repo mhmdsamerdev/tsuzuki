@@ -172,12 +172,52 @@ fn merge_freshest_wins(entries: Vec<WatchLaterEntry>, home: Option<&Path>) -> Ve
     by_path.into_values().collect()
 }
 
+/// A non-fatal issue surfaced by [`scan_watch_later`] alongside its
+/// entries. Never printed by this module — it has no command-facing
+/// output of its own yet (same as everything else in this phase); the
+/// warning is returned as data for a future phase to actually display.
+/// See CLAUDE.md's "An absent OS-default candidate directory stays
+/// silent — an explicit `watch_later_dir` override that doesn't resolve
+/// must be surfaced, not silent."
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanWarning {
+    /// The configured `watch_later_dir` override does not exist on disk.
+    /// Carries the value exactly as stored in `config.toml` (e.g.
+    /// `~/mywatch`), not the expanded/resolved form — consistent with
+    /// `AddError::NotFound`'s and the rest of the codebase's convention
+    /// of showing the user the path they actually typed, not a form they
+    /// may not recognize.
+    ///
+    /// Deliberately never produced for an absent OS-default candidate
+    /// directory (e.g. no Flatpak mpv installed) — that case is normal
+    /// and expected, and must stay exactly as silent as it is today.
+    WatchLaterDirNotFound(PathBuf),
+}
+
+/// The result of [`scan_watch_later`]: the merged, filtered entries, plus
+/// any non-fatal warning about the scan itself. `warning` is `None` in the
+/// overwhelmingly common case; it's `Some` only when an explicit
+/// `watch_later_dir` override was configured and didn't resolve to a real
+/// directory on disk.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanResult {
+    pub entries: Vec<WatchLaterEntry>,
+    pub warning: Option<ScanWarning>,
+}
+
 /// Scans every resolved `watch_later` directory, parses entries, filters to
 /// tracked roots, and merges duplicates freshest-file-wins (design.md §4
 /// steps 1-4, CLAUDE.md's cross-directory merge). A candidate directory
-/// that doesn't exist on disk is silently skipped, not an error.
+/// that doesn't exist on disk is silently skipped, not an error — except
+/// when it's the sole result of an explicit `watch_later_dir` override,
+/// in which case [`ScanResult::warning`] carries a
+/// [`ScanWarning::WatchLaterDirNotFound`] alongside the (still empty)
+/// entries. This function itself never errors and never prints anything;
+/// the command still runs to completion either way.
 #[allow(dead_code)]
-pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> Vec<WatchLaterEntry> {
+pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> ScanResult {
     let dirs = resolve_watch_later_dirs(&config.mpv.watch_later_dir, home);
 
     let mut raw = Vec::new();
@@ -200,7 +240,30 @@ pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> Vec<WatchLaterE
     }
 
     let filtered = filter_to_tracked_roots(raw, &config.roots.paths, home);
-    merge_freshest_wins(filtered, home)
+    let entries = merge_freshest_wins(filtered, home);
+    let warning = override_not_found_warning(&config.mpv.watch_later_dir, home);
+
+    ScanResult { entries, warning }
+}
+
+/// `Some` only when `watch_later_dir_override` is set and its expanded
+/// form doesn't exist on disk — never for the OS-default candidate list,
+/// where an absent directory is normal and expected (CLAUDE.md).
+fn override_not_found_warning(
+    watch_later_dir_override: &str,
+    home: Option<&Path>,
+) -> Option<ScanWarning> {
+    if watch_later_dir_override.is_empty() {
+        return None;
+    }
+    let expanded = expand_tilde(Path::new(watch_later_dir_override), home);
+    if expanded.exists() {
+        None
+    } else {
+        Some(ScanWarning::WatchLaterDirNotFound(PathBuf::from(
+            watch_later_dir_override,
+        )))
+    }
 }
 
 /// The single most-recently-modified entry (by its entry file's own mtime)
@@ -384,9 +447,10 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         config.mpv.watch_later_dir = watch_later.to_string_lossy().into_owned();
 
-        let entries = scan_watch_later(&config, None);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].position_seconds, 42.0);
+        let result = scan_watch_later(&config, None);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].position_seconds, 42.0);
+        assert_eq!(result.warning, None, "the override dir exists here");
     }
 
     fn touch(path: &Path) {
@@ -497,8 +561,9 @@ mod tests {
 
         // Must not panic; a tracked root with nothing on disk simply
         // yields no matching entries.
-        let entries = scan_watch_later(&config, Some(home.path()));
-        assert!(entries.is_empty());
+        let result = scan_watch_later(&config, Some(home.path()));
+        assert!(result.entries.is_empty());
+        assert_eq!(result.warning, None);
     }
 
     // --- Cross-directory merge: per-path freshest-file-wins ---
@@ -703,10 +768,14 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         config.mpv.watch_later_dir = override_dir.to_string_lossy().into_owned();
 
-        let entries = scan_watch_later(&config, Some(home.path()));
+        let result = scan_watch_later(&config, Some(home.path()));
         assert!(
-            entries.is_empty(),
+            result.entries.is_empty(),
             "the default-candidate entry must be absent once an override is set"
+        );
+        assert_eq!(
+            result.warning, None,
+            "the override dir exists here, just empty"
         );
     }
 
@@ -729,55 +798,96 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         // watch_later_dir left at its default "" value.
 
-        let entries = scan_watch_later(&config, Some(home.path()));
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].position_seconds, 42.0);
+        let result = scan_watch_later(&config, Some(home.path()));
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.entries[0].position_seconds, 42.0);
+        assert_eq!(result.warning, None);
     }
 
     #[test]
-    fn a_nonexistent_candidate_directory_is_skipped_without_erroring() {
-        let home = tempdir().unwrap();
-        let root = home.path().join("Anime");
-        std_fs::create_dir_all(&root).unwrap();
-        // Nothing created under any watch_later candidate path at all.
-
-        let mut config = Config::default();
-        config.roots.paths.push(root.to_string_lossy().into_owned());
-
-        let entries = scan_watch_later(&config, Some(home.path()));
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn a_watch_later_dir_override_pointing_at_a_nonexistent_path_yields_zero_entries_not_an_error()
+    fn os_default_mode_with_every_candidate_directory_absent_yields_zero_entries_and_zero_warnings()
     {
-        // Gap-audit / judgment call: unlike `add`/`exclude` (which
-        // validate a user-supplied CLI path argument immediately, at the
-        // moment of the command), `watch_later_dir` is a config value
-        // scanned on every invocation, and OS-default candidate
-        // directories are *required* to be silently skipped when absent
-        // (mpv may not have written anything there yet). Treating the
-        // override the same way is consistent with that — but it does
-        // mean a typo'd override path is currently indistinguishable from
-        // "no bookmarks anywhere," with no error surfaced anywhere in
-        // this phase. This test locks in and documents the current
-        // behavior; whether an override specifically deserves doctor-time
-        // (or earlier) validation is a real open design question, not
-        // something this test resolves.
+        // The asymmetry CLAUDE.md requires: an absent OS-default candidate
+        // is normal/expected and must stay exactly as silent as before —
+        // unlike the override case (see the test right below this one),
+        // this must produce NO warning no matter how many (or all) of the
+        // candidate directories are missing. Proven as its own explicit
+        // test rather than inferred from the override test, since the two
+        // cases must behave differently, not identically.
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        // Nothing created under any watch_later candidate path at all —
+        // every one of the 5 Linux candidates is absent.
+        // watch_later_dir left at its default "" value (OS-default mode).
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+
+        let result = scan_watch_later(&config, Some(home.path()));
+        assert!(result.entries.is_empty());
+        assert_eq!(
+            result.warning, None,
+            "an absent OS-default candidate directory must never produce a warning"
+        );
+    }
+
+    #[test]
+    fn a_watch_later_dir_override_pointing_at_a_nonexistent_path_surfaces_a_warning() {
+        // CLAUDE.md's "An absent OS-default candidate directory stays
+        // silent — an explicit watch_later_dir override that doesn't
+        // resolve must be surfaced, not silent." Unlike the OS-default
+        // case above, `watch_later_dir` is something the user explicitly
+        // typed — a mistake there must be discoverable. This still isn't
+        // an error: the scan completes and returns zero entries exactly
+        // as before, but now also carries a warning naming the configured
+        // (as-typed, unexpanded) path.
         let home = tempdir().unwrap();
         let root = home.path().join("Anime");
         std_fs::create_dir_all(&root).unwrap();
 
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
-        config.mpv.watch_later_dir = home
+        let configured_override = home
             .path()
             .join("this_path_was_never_created")
             .to_string_lossy()
             .into_owned();
+        config.mpv.watch_later_dir = configured_override.clone();
 
-        let entries = scan_watch_later(&config, Some(home.path()));
-        assert!(entries.is_empty());
+        let result = scan_watch_later(&config, Some(home.path()));
+        assert!(result.entries.is_empty());
+        assert_eq!(
+            result.warning,
+            Some(ScanWarning::WatchLaterDirNotFound(PathBuf::from(
+                configured_override
+            )))
+        );
+    }
+
+    #[test]
+    fn the_warning_carries_the_literal_tilde_form_not_the_expanded_path() {
+        // Matches the rest of the codebase's convention (e.g.
+        // `AddError::NotFound`, roots persisted "in the form the user
+        // typed") — the warning shows the user the value they actually
+        // put in config.toml, not an expanded form they may not
+        // recognize.
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        // Deliberately never create "~/this_never_exists" under `home`.
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.mpv.watch_later_dir = "~/this_never_exists".to_string();
+
+        let result = scan_watch_later(&config, Some(home.path()));
+        assert_eq!(
+            result.warning,
+            Some(ScanWarning::WatchLaterDirNotFound(PathBuf::from(
+                "~/this_never_exists"
+            )))
+        );
     }
 
     // --- Candidate path table ---
