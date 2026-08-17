@@ -450,6 +450,38 @@ case — the cursor simply stays at its last confirmed point. This is not a
 failure to fix; it's the tool honestly reporting the boundary of what it
 can actually know.
 
+### `pause`/`drop` never zero the stored position — reconcile's diffing depends on it
+Found by Phase 5's dogfood pass, not by design ahead of time — worth
+stating plainly so it isn't "cleaned up" by a later refactor that doesn't
+know why it's there. `drop` (and `pause`) must never zero or clear a
+record's stored position/path. Reconcile's whole mechanism is diffing
+"what's stored" against "what mpv currently says" to detect genuine new
+activity (see below) — but `drop` never touches mpv's own `watch_later`
+file, so the real bookmark is still sitting there unchanged after a drop.
+Zeroing the stored side manufactures a fake mismatch, which reconcile
+correctly (by its own logic) reads as new activity — silently undoing the
+drop on the very next invocation, with zero user action. The actual
+"start fresh" behavior for a dropped/paused-then-reactivated series is
+handled entirely separately, at playback-resolution time (index 0 for
+dropped/never-started, per the state's own rules below) — never by
+mutating what's stored. If a future change touches `pause`/`drop`, this
+must not regress; it already did once.
+
+### Forward-scan is strictly forward — a paused series doesn't reactivate from an earlier real bookmark
+A real (≥`resume_seconds`) bookmark appearing on an episode *earlier* than
+a series' current known position must never reactivate or move a `Paused`
+record — reconcile only ever scans forward from the last known position,
+never backward. This matters concretely: someone pauses a long series at
+episode 50, then months later rewatches an unrelated earlier episode (say
+episode 3) purely for nostalgia — if a backward bookmark could reactivate
+things, that unrelated rewatch would silently corrupt the paused position
+at episode 50. Forward-only prevents this by construction. `Dropped` and
+never-started records don't hit this at all — both use an index-0
+baseline (per "reappears exactly like never-started," design.md §8), so
+by definition nothing in the series counts as "behind" them; any real
+bookmark anywhere in a dropped/never-started series is forward from that
+baseline and correctly reactivates it.
+
 ### Cursor movement: noise never touches saved state, absence check is per-series, a single run chains fully
 Settles the open question left after Phase 4 about how the cursor advances
 when the user manually skips ahead. The full mechanism, worked out by
@@ -470,6 +502,31 @@ a sub-threshold reading never creates a new `state.toml` record, and —
 critically — never overwrites an existing real (≥`resume_seconds`) one
 either. Only another real observation can ever move a series' saved
 position, in either direction.
+
+**Completion has two real signals feeding the same cursor-advancement
+rule — absence AND a duration-based near-the-end reading — this was a real
+gap in earlier phrasing here, not a deliberate simplification.** Absence
+(mpv writes nothing when a file plays to a true, uninterrupted EOF) is one
+way an episode counts as done. But `classify()`'s `Completed` result
+(built in Phase 4 — a real, ≥`resume_seconds` position with
+`duration - position ≤ completion_remaining_seconds`, e.g. quitting at
+58:30 of a 60:00 episode during the credits) is the *other* real signal
+design.md §4 always specified, and it must not be dropped just because
+earlier discussion here focused on absence. Reconcile calls `classify()`
+(reusing Phase 4's `probe_duration`/`mpv::classify()` exactly as built —
+no new duration logic) on any entry that has a real position; a `Completed`
+result is treated identically to an absent entry for cursor purposes — both
+mean "this episode is done, keep scanning forward" — while `StartFromZero`/
+`Resume` results behave as an ordinary real/noise reading. This costs
+nothing extra to worry about: duration probing only ever runs on entries
+that already have a real position (an absent entry has nothing to probe,
+and stays purely an absence check), and Phase 4 already measured the actual
+cost directly — 212µs (release) to probe one file — negligible even across
+a full multi-step chain, not a caching concern. The "confirmed complete
+with nothing real found after it" case needs no new state modeling either:
+it's the exact same forward-scan/stops-at-the-first-unconfirmed-step rule
+already specified below for absence, just fed a second way for an entry to
+count as confirmed.
 
 **The absence-based-completion check is per-series, not "check the single
 globally-freshest file."** Phase 4's `most_recent_entry` only identifies

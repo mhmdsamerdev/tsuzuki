@@ -16,13 +16,19 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Resume the current series (same as bare `tsuzuki`)
-    Resume,
+    Resume {
+        /// Series name; bypasses the interactive picker entirely, TTY or
+        /// not (a tracked root's immediate child directory name)
+        series: Option<String>,
+
+        /// Tracked root to resolve `series` against, when it exists under
+        /// more than one
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 
     /// Show what's currently in progress
     Status,
-
-    /// Show which series bare `tsuzuki` would resume right now
-    Current,
 
     /// List all tracked series and their progress/status
     List,
@@ -35,18 +41,37 @@ pub enum Command {
 
     /// List series outside the automatic resume picker (never-started,
     /// dropped, paused)
-    Start,
+    Start {
+        /// Series name; bypasses the interactive picker entirely, TTY or
+        /// not (a tracked root's immediate child directory name)
+        series: Option<String>,
+
+        /// Tracked root to resolve `series` against, when it exists under
+        /// more than one
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 
     /// Remove a series from the resume picker, keeping its saved position
     Pause {
         /// Series name (a tracked root's immediate child directory name)
         series: String,
+
+        /// Tracked root to resolve `series` against, when it exists under
+        /// more than one
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 
     /// Reset a series' progress; it reappears in `start` as if new
     Drop {
         /// Series name (a tracked root's immediate child directory name)
         series: String,
+
+        /// Tracked root to resolve `series` against, when it exists under
+        /// more than one
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 
     /// Exclude a file or directory from ordering. Bare invocation surfaces

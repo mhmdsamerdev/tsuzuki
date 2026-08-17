@@ -35,6 +35,12 @@ pub struct Roots {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mpv {
     pub watch_later_dir: String,
+    /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`), skipping
+    /// native/Flatpak auto-detection entirely. Empty = auto-detect — same
+    /// empty-means-default shape as `watch_later_dir` (CLAUDE.md's "Launching
+    /// mpv" decision).
+    #[serde(default)]
+    pub command_override: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +77,7 @@ impl Default for Config {
             },
             mpv: Mpv {
                 watch_later_dir: String::new(),
+                command_override: String::new(),
             },
             mal: Mal {
                 client_id: String::new(),
@@ -241,6 +248,7 @@ mod tests {
             vec!["mkv", "mp4", "avi", "webm", "mov"]
         );
         assert_eq!(config.mpv.watch_later_dir, "");
+        assert_eq!(config.mpv.command_override, "");
         assert_eq!(config.mal.client_id, "");
         assert!(config.exclusions.is_empty());
     }
@@ -299,5 +307,36 @@ client_id = ""
 
         let config = read(&path).unwrap();
         assert!(config.exclusions.is_empty());
+    }
+
+    #[test]
+    fn missing_command_override_key_defaults_to_empty_on_read() {
+        // A config.toml written before Phase 5 has no `command_override`
+        // key under `[mpv]` at all — must still read cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[thresholds]
+resume_seconds = 120
+completion_remaining_seconds = 180
+auto_pause_days = 0
+
+[roots]
+paths = []
+video_extensions = ["mkv"]
+
+[mpv]
+watch_later_dir = ""
+
+[mal]
+client_id = ""
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert_eq!(config.mpv.command_override, "");
     }
 }
