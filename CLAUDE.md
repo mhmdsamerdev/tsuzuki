@@ -450,6 +450,49 @@ case — the cursor simply stays at its last confirmed point. This is not a
 failure to fix; it's the tool honestly reporting the boundary of what it
 can actually know.
 
+### When the CURRENT tracked episode itself completes: advance to the next one, or auto-`Dropped` if there is no next one
+**This is a real, previously-underspecified rule, not something already
+fully built — stated explicitly now because an earlier, too-brief mention
+of it (buried in the display-wording section below) was read too narrowly
+and produced a real, incorrect claim that nothing here is ever automatic.**
+It is automatic, in this one specific, narrow, evidence-based case — and
+this is not the fuzzy inference §2 rules out elsewhere, because it only
+ever fires on a direct, confirmed signal (the actual current tracked file,
+genuinely completing), never a guess.
+
+The rule, precisely: when the series' current tracked episode is confirmed
+complete — by either signal, absence or a duration-based `Completed`
+reading — reconcile does not just record that fact and stop. It also
+resolves the cursor exactly one step further:
+- **If a next episode exists** (in natural-sort order, per the series'
+  actual files on disk) — the cursor advances to it, at position 0. This
+  is not a claim that the next episode was watched; it's the same
+  forward-looking default already used for a brand-new series (`start`
+  offers episode 1 without claiming anything about history) applied one
+  step later in the sequence. It has to work this way — leaving the
+  cursor pointed at a now-finished episode would mean the next resume
+  attempt walks straight back into the exact freeze/resume-at-the-end
+  problem already fixed once. If that next episode separately turns out to
+  already have its own real bookmark (a binge already happened), the
+  existing forward-scan/furthest-real-bookmark logic still applies from
+  there — this rule only supplies the *starting point* for that scan when
+  nothing else does.
+- **If there is no next episode** (the completed one was the actual last
+  file in the series) — the series transitions to `Dropped`, automatically,
+  no manual `tsuzuki drop` required. This is the "one detectable 'finished
+  the whole series' signal" already referenced in the display-wording
+  section below — that section only described the *display* consequence
+  ("Rewatch?"); this section is the actual mechanism producing it. No new
+  state or persisted marker is needed for this either — it's the same
+  `Dropped` state manual dropping already produces, reached automatically
+  instead of by command.
+
+If this cursor-advancement/auto-`Dropped` mechanism does not yet exist in
+the codebase (only the narrower "don't lose the position near completion"
+fix does), it is a real, separate, still-missing piece of Phase 5's
+completion handling — not an optional nice-to-have, and not something to
+infer is already covered by the freeze fix.
+
 ### `pause`/`drop` never zero the stored position — reconcile's diffing depends on it
 Found by Phase 5's dogfood pass, not by design ahead of time — worth
 stating plainly so it isn't "cleaned up" by a later refactor that doesn't
@@ -727,6 +770,24 @@ this isn't a new rule, it's the same precedent `exclude`'s ambiguity case
 already set (§3): a non-interactive picker listing choices without picking
 one falls in the same bucket, so a script chaining `tsuzuki && next-thing`
 correctly sees that nothing was actually resumed.
+
+### Every phase needs at least one real-binary, real-XDG-path integration test
+Found during Phase 5's dogfood investigation, worth standing policy going
+forward: every existing test in this project, across every phase, validated
+internal functions against a redirected temp path (`tempdir().join(...)`)
+— none ever invoked the actual compiled binary against real
+`dirs::config_dir()`/`dirs::data_dir()` resolution. This is a real,
+standing blind spot: a genuine bug in real-path resolution (wrong env var,
+wrong directory, a swallowed error in the real write path) could pass every
+unit test while breaking 100% of real usage, and nothing would catch it
+short of a human running the actual binary by hand. It happened not to be
+hiding a real bug when this was investigated — but the gap itself was real,
+and it's cheap to close permanently: at least one test per phase that
+touches persistence should spawn the real binary (`env!
+("CARGO_BIN_EXE_tsuzuki")`) against a genuine temp `$HOME`/XDG environment,
+not just call internal functions with an injected path. Retrofit this for
+existing phases opportunistically; require it going forward for any new
+phase that reads or writes a real on-disk file.
 
 ## 4. Dev environment
 

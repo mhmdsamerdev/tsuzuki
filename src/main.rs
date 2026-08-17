@@ -771,6 +771,42 @@ mod tests {
         }
     }
 
+    /// Writes a real mpv-style `watch_later` entry matching `record()`'s
+    /// own stored position (200.0s) for a single-episode series. Needed
+    /// since reconcile now runs before every state-touching command and
+    /// auto-drops a single/last-episode `InProgress` record whose current
+    /// file has no matching bookmark at all (CLAUDE.md's "When the CURRENT
+    /// tracked episode itself completes" — genuinely correct behavior for
+    /// a real absence, but these fixtures fabricate a bare `InProgress`
+    /// record with no corresponding mpv state at all, which reconcile can
+    /// no longer tell apart from "mpv deleted the bookmark, it's done").
+    /// Matching the stored position exactly keeps reconcile a true no-op,
+    /// restoring these tests' original intent: exercising `--root`
+    /// disambiguation, not reconcile's completion handling.
+    fn fabricate_matching_bookmark(
+        config: &mut Config,
+        watch_later_dir: &Path,
+        root: &Path,
+        name: &str,
+    ) {
+        if config.mpv.watch_later_dir.is_empty() {
+            config.mpv.watch_later_dir = watch_later_dir.to_string_lossy().into_owned();
+        }
+        fs::create_dir_all(watch_later_dir).unwrap();
+        let entry_name = format!(
+            "entry-{}-{name}",
+            root.file_name().unwrap().to_string_lossy()
+        );
+        fs::write(
+            watch_later_dir.join(entry_name),
+            format!(
+                "# {}\nstart=200.000000\n",
+                root.join(name).join("ep01.mkv").display()
+            ),
+        )
+        .unwrap();
+    }
+
     // --- Sweep item: `pause`/`drop` --root disambiguation against a real
     // name collision (two actually identically-named series under two real
     // tracked roots), verified via the resulting state.toml mutation. ---
@@ -783,7 +819,10 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let config = tracked_config(&[&root_a, &root_b]);
+        let mut config = tracked_config(&[&root_a, &root_b]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -823,7 +862,10 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let config = tracked_config(&[&root_a, &root_b]);
+        let mut config = tracked_config(&[&root_a, &root_b]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -862,7 +904,10 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let config = tracked_config(&[&root_a, &root_b]);
+        let mut config = tracked_config(&[&root_a, &root_b]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
