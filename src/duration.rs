@@ -212,6 +212,22 @@ mod tests {
     }
 
     #[test]
+    fn avi_fallback_does_not_false_positive_on_avih_bytes_without_a_riff_avi_header() {
+        // Gap-audit: the reverse of "AVI fallback is reached via probe
+        // failure, not extension dispatch" — proves the fallback isn't
+        // just naively searching for an "avih" substring anywhere in the
+        // file. Garbage bytes that happen to contain "avih" but never
+        // start with a real "RIFF"/"AVI " header must still be rejected
+        // at the header check, before the "avih" search even runs.
+        let mut buf = b"this is not a riff file but it does contain the substring ".to_vec();
+        buf.extend_from_slice(b"avih");
+        buf.extend_from_slice(b" somewhere in the middle of otherwise unrelated junk");
+        let file = write_temp(&buf);
+
+        assert!(probe_avi_fallback(file.path()).is_none());
+    }
+
+    #[test]
     fn symphonia_reads_duration_from_a_real_mkv_fixture() {
         let path = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -297,5 +313,38 @@ mod tests {
             outcome,
             DurationOutcome::Unknown(DurationError::Io(_))
         ));
+    }
+
+    // --- Gap-audit: genuinely corrupt/non-video files, distinct from
+    // malformed watch_later *entries* (that's mpv.rs's job) — these prove
+    // `probe_duration` resolves cleanly to `Unknown` with no panic and no
+    // hang for a corrupt file sitting right under a tracked video
+    // extension. ---
+
+    #[test]
+    fn duration_unknown_for_a_zero_byte_file_no_panic() {
+        let file = write_temp(b"");
+        let outcome = probe_duration(file.path());
+        assert_eq!(outcome, DurationOutcome::Unknown(DurationError::Unreadable));
+    }
+
+    #[test]
+    fn duration_unknown_for_a_plain_text_file_renamed_with_a_video_extension() {
+        // A non-video file sitting under a tracked, video-extension name
+        // (e.g. an .nfo mistakenly renamed .mkv, or a corrupt/truncated
+        // download) — `probe_duration` never looks at the extension at
+        // all, so this exercises exactly the same content-probe path a
+        // genuinely corrupt real video file would hit, without needing to
+        // fabricate byte-for-byte broken container data.
+        let dir = tempfile::tempdir().unwrap();
+        let fake_video = dir.path().join("Not Actually A Video.mkv");
+        std::fs::write(
+            &fake_video,
+            b"Episode notes:\n1. Great episode\n2. Cliffhanger\n",
+        )
+        .unwrap();
+
+        let outcome = probe_duration(&fake_video);
+        assert_eq!(outcome, DurationOutcome::Unknown(DurationError::Unreadable));
     }
 }

@@ -318,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn a_redirect_entry_with_a_trailing_start_line_is_still_discarded() {
+        // Gap-audit: the redirect check happens unconditionally on the
+        // first line, before any `start=` scanning — so even a
+        // hand-edited (or future-mpv-version) redirect entry that also
+        // carries a `start=` line must still be discarded as a redirect,
+        // not mistaken for a real entry just because a position happens
+        // to be present.
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("redirect-with-start.mkv");
+        write_entry(&entry_path, "# redirect entry\nstart=123.0\n");
+
+        assert!(parse_entry_file(&entry_path).is_none());
+    }
+
+    #[test]
     fn a_malformed_entry_missing_start_is_skipped() {
         let dir = tempdir().unwrap();
         let entry_path = dir.path().join("no-start.mkv");
@@ -415,6 +430,75 @@ mod tests {
         let filtered =
             filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
         assert_eq!(filtered.len(), 1);
+    }
+
+    // --- Gap-audit: real-world-shaped states (root/file missing on disk) ---
+
+    #[test]
+    fn filtering_does_not_panic_when_a_tracked_root_no_longer_exists_on_disk() {
+        // A root can be removed from the filesystem after being tracked
+        // (before Phase 6's `doctor` would ever flag it) — `normalize`
+        // falls back to the tilde-expanded, uncanonicalized form when
+        // `fs::canonicalize` fails, so this must filter cleanly rather
+        // than panicking or erroring.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime"); // deliberately never created
+
+        let entries = vec![WatchLaterEntry {
+            source_path: root.join("Show").join("ep01.mkv"),
+            position_seconds: 10.0,
+            mtime: SystemTime::now(),
+        }];
+
+        let filtered =
+            filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
+        // Neither side canonicalizes (root doesn't exist, so its
+        // `normalize` also falls back to the literal expanded form) — the
+        // literal prefix relationship still holds, so the entry survives.
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filtering_does_not_panic_when_the_entrys_source_file_no_longer_exists_on_disk() {
+        // The video file a watch_later entry points at may have been
+        // deleted or moved since mpv wrote the entry. The tracked root
+        // itself still exists here (and so *does* get canonicalized by
+        // `normalize`), while the missing source file falls back to its
+        // uncanonicalized literal form — this must not panic, and in the
+        // common no-symlink case (true for a plain tempdir on this
+        // environment) the literal prefix relationship still holds.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        // The source file is never created — it's "since deleted."
+
+        let entries = vec![WatchLaterEntry {
+            source_path: root.join("Show").join("ep01.mkv"),
+            position_seconds: 10.0,
+            mtime: SystemTime::now(),
+        }];
+
+        let filtered =
+            filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "a deleted source file's entry must still filter cleanly, not panic or vanish"
+        );
+    }
+
+    #[test]
+    fn scan_watch_later_does_not_panic_when_a_tracked_root_is_missing_from_disk() {
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime"); // deliberately never created
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+
+        // Must not panic; a tracked root with nothing on disk simply
+        // yields no matching entries.
+        let entries = scan_watch_later(&config, Some(home.path()));
+        assert!(entries.is_empty());
     }
 
     // --- Cross-directory merge: per-path freshest-file-wins ---
@@ -517,6 +601,82 @@ mod tests {
         );
     }
 
+    // --- Gap-audit: merge_freshest_wins with 3+ duplicates and exact ties ---
+    //
+    // These call `merge_freshest_wins` directly with an explicit `Vec`
+    // input order, rather than going through a filesystem scan — the
+    // function's own fold-over-a-HashMap semantics are what's under test
+    // here (independent of `fs::read_dir`'s unspecified enumeration
+    // order across directories, which is a separate, filesystem-level
+    // non-guarantee, not something `merge_freshest_wins` controls).
+
+    #[test]
+    fn three_way_duplicate_the_freshest_wins_even_when_processed_first() {
+        // Ordering the freshest entry FIRST (not last, not in the middle)
+        // specifically rules out an implementation that accidentally
+        // tracks "last one seen for this key" instead of genuinely
+        // comparing every duplicate's mtime — that bug would silently
+        // pick the last-processed (stalest) entry here instead of the
+        // truly freshest one.
+        let now = SystemTime::now();
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let entries = vec![
+            WatchLaterEntry {
+                source_path: path.clone(),
+                position_seconds: 999.0,
+                mtime: now, // freshest, processed first
+            },
+            WatchLaterEntry {
+                source_path: path.clone(),
+                position_seconds: 10.0,
+                mtime: now - Duration::from_secs(100),
+            },
+            WatchLaterEntry {
+                source_path: path.clone(),
+                position_seconds: 20.0,
+                mtime: now - Duration::from_secs(50),
+            },
+        ];
+
+        let merged = merge_freshest_wins(entries, None);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].position_seconds, 999.0);
+    }
+
+    #[test]
+    fn merge_on_an_exact_mtime_tie_is_deterministic() {
+        // Two entries for the same path with an identical mtime. Given
+        // `merge_freshest_wins`'s own semantics (`existing.mtime >=
+        // entry.mtime` keeps whatever's already in the map), the first
+        // entry in input order wins a tie, deterministically — this test
+        // locks that behavior in explicitly rather than leaving it
+        // implicit. (A genuine exact-mtime tie between two *different*
+        // watch_later files for the same source is an extremely rare
+        // real-world case; either choice would be equally defensible —
+        // what matters is that the function itself isn't order-random.)
+        let now = SystemTime::now();
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let entries = vec![
+            WatchLaterEntry {
+                source_path: path.clone(),
+                position_seconds: 111.0,
+                mtime: now,
+            },
+            WatchLaterEntry {
+                source_path: path.clone(),
+                position_seconds: 222.0,
+                mtime: now,
+            },
+        ];
+
+        let merged = merge_freshest_wins(entries, None);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].position_seconds, 111.0,
+            "on an exact tie, the first entry in input order wins"
+        );
+    }
+
     // --- watch_later_dir override ---
 
     #[test]
@@ -583,6 +743,38 @@ mod tests {
 
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
+
+        let entries = scan_watch_later(&config, Some(home.path()));
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn a_watch_later_dir_override_pointing_at_a_nonexistent_path_yields_zero_entries_not_an_error()
+    {
+        // Gap-audit / judgment call: unlike `add`/`exclude` (which
+        // validate a user-supplied CLI path argument immediately, at the
+        // moment of the command), `watch_later_dir` is a config value
+        // scanned on every invocation, and OS-default candidate
+        // directories are *required* to be silently skipped when absent
+        // (mpv may not have written anything there yet). Treating the
+        // override the same way is consistent with that — but it does
+        // mean a typo'd override path is currently indistinguishable from
+        // "no bookmarks anywhere," with no error surfaced anywhere in
+        // this phase. This test locks in and documents the current
+        // behavior; whether an override specifically deserves doctor-time
+        // (or earlier) validation is a real open design question, not
+        // something this test resolves.
+        let home = tempdir().unwrap();
+        let root = home.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        config.mpv.watch_later_dir = home
+            .path()
+            .join("this_path_was_never_created")
+            .to_string_lossy()
+            .into_owned();
 
         let entries = scan_watch_later(&config, Some(home.path()));
         assert!(entries.is_empty());
@@ -695,6 +887,23 @@ mod tests {
     fn remaining_just_below_completion_threshold_is_completed() {
         let result = classify(820.1, DurationOutcome::Known(1000.0), 120, 180);
         assert_eq!(result.action, PlaybackAction::Completed);
+    }
+
+    #[test]
+    fn overlap_case_on_a_short_file_start_from_zero_wins_over_completed() {
+        // CLAUDE.md's "Threshold precedence when position + completion
+        // checks overlap (short files)": on a short enough file, a single
+        // saved position can satisfy both `resume_seconds` (small enough
+        // to count as noise) and `completion_remaining_seconds` (close
+        // enough to that file's own ending) simultaneously. Here:
+        // duration = 100s, position = 50s. position (50) < resume_seconds
+        // (120) -> satisfies the StartFromZero condition. remaining
+        // (100 - 50 = 50) <= completion_remaining_seconds (180) ->
+        // independently satisfies the Completed condition too. The
+        // documented, deliberate resolution is that the position check
+        // wins: StartFromZero, never Completed.
+        let result = classify(50.0, DurationOutcome::Known(100.0), 120, 180);
+        assert_eq!(result.action, PlaybackAction::StartFromZero);
     }
 
     #[test]
