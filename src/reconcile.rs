@@ -98,10 +98,24 @@ pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> Rec
 /// Finds which tracked root `source_path` falls under, and the series name
 /// (the root's immediate child directory) it belongs to. When more than one
 /// tracked root matches (composable roots, e.g. `~/Anime` and
-/// `~/Anime/Rewatches`), the most specific (longest/most-nested) root wins —
-/// otherwise a file under `Anime/Rewatches/Monster` would misresolve to
-/// series name `"Rewatches"` under the `Anime` root instead of series
+/// `~/Anime/Rewatches`), the most specific (longest/most-nested) match
+/// wins — otherwise a file under `Anime/Rewatches/Monster` would misresolve
+/// to series name `"Rewatches"` under the `Anime` root instead of series
 /// `"Monster"` under the `Anime/Rewatches` root.
+///
+/// Each root is checked two ways: a cheap whole-root prefix match first
+/// (the common case), falling back to canonicalizing that root's own
+/// depth-1 children individually only when the whole-root match fails. The
+/// fallback matters for a real, confirmed reason, not a hypothetical: a
+/// depth-1 series folder can itself be a symlink pointing entirely outside
+/// the root's own real location (CLAUDE.md's "Symlinks are followed
+/// everywhere... a symlinked series folder behaves exactly like a real
+/// one"). `normalize` canonicalizes the *whole* entry path, which resolves
+/// straight through such a symlink to wherever it actually points — a
+/// plain root-vs-source prefix comparison can never match that, so the
+/// series would never reconcile at all. Confirmed directly: a real tracked
+/// root with one symlinked series folder never reconciled, while an
+/// ordinary sibling series under the same root worked correctly.
 fn classify_root_and_series(
     config: &Config,
     source_path: &Path,
@@ -112,22 +126,50 @@ fn classify_root_and_series(
     let mut best: Option<(PathBuf, String, String)> = None;
     for root in &config.roots.paths {
         let real_root = normalize(Path::new(root), home);
-        let Ok(rel) = real_source.strip_prefix(&real_root) else {
+        if let Ok(rel) = real_source.strip_prefix(&real_root) {
+            if let Some(first) = rel.components().next() {
+                let name = first.as_os_str().to_string_lossy().into_owned();
+                consider_match(&mut best, real_root, root, &name);
+            }
+            // Whole-root prefix match succeeded (even if it didn't yield a
+            // usable child component) — the fallback below exists only for
+            // when this comparison fails entirely, so it's skipped here.
+            continue;
+        }
+
+        let expanded_root = expand_tilde(Path::new(root), home);
+        let Ok(children) = series::series_in_root(&expanded_root) else {
             continue;
         };
-        let Some(first) = rel.components().next() else {
-            continue;
-        };
-        let name = first.as_os_str().to_string_lossy().into_owned();
-        let is_more_specific = match &best {
-            Some((best_root, _, _)) => real_root.as_os_str().len() > best_root.as_os_str().len(),
-            None => true,
-        };
-        if is_more_specific {
-            best = Some((real_root, root.clone(), name));
+        for child in children {
+            let real_child = normalize(&child.path, home);
+            if real_source == real_child || real_source.starts_with(&real_child) {
+                consider_match(&mut best, real_child, root, &child.name);
+            }
         }
     }
     best.map(|(_, root, name)| (root, name))
+}
+
+/// Updates `best` to `(matched_prefix, root, name)` when `matched_prefix`
+/// is more specific (longer) than whatever `best` already holds — the
+/// shared "most specific match wins" tie-break used by both the whole-root
+/// and per-child-fallback matches in `classify_root_and_series`.
+fn consider_match(
+    best: &mut Option<(PathBuf, String, String)>,
+    matched_prefix: PathBuf,
+    root: &str,
+    name: &str,
+) {
+    let is_more_specific = match best {
+        Some((best_prefix, _, _)) => {
+            matched_prefix.as_os_str().len() > best_prefix.as_os_str().len()
+        }
+        None => true,
+    };
+    if is_more_specific {
+        *best = Some((matched_prefix, root.to_string(), name.to_string()));
+    }
 }
 
 /// Reconciles one (root, series name) pair. See module docs for the full
@@ -1199,6 +1241,78 @@ mod tests {
         let record = &state.series[0];
         assert_eq!(record.root, rewatches_root.to_string_lossy());
         assert_eq!(record.name, "Monster");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_series_folder_reconciles_correctly() {
+        // Regression test for a real, reported bug, reproducing the exact
+        // reported shape: a tracked root whose series folder is a symlink
+        // pointing entirely outside the root's own real location (a
+        // completely normal, expected library layout — CLAUDE.md's
+        // "Symlinks are followed everywhere... a symlinked series folder
+        // behaves exactly like a real one"). `classify_root_and_series`
+        // used to canonicalize the *whole* watch_later entry path,
+        // resolving straight through the symlink to a location that no
+        // longer shared any prefix with the root's own canonical form —
+        // silently dropping every real bookmark for that series,
+        // permanently, on every single invocation. Confirmed directly
+        // against a real (non-symlinked) sibling series continuing to
+        // work throughout.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(&root).unwrap();
+
+        let real_storage = dir.path().join("real_storage").join("Dungeon Meshi");
+        let release_dir = real_storage.join("[1080p WEBRip][EMBER]");
+        fs::create_dir_all(&release_dir).unwrap();
+        touch(&release_dir.join("Dungeon Meshi - S01E01.mkv"));
+        symlink(&real_storage, root.join("Dungeon Meshi")).unwrap();
+
+        // An ordinary, non-symlinked sibling series under the same root —
+        // must keep working throughout, isolating this as specifically a
+        // symlink-resolution bug, not a wholesale regression.
+        touch(&root.join("Shokei Shoujo").join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        write_entry(
+            &watch_later,
+            "entry-symlinked",
+            &root
+                .join("Dungeon Meshi")
+                .join("[1080p WEBRip][EMBER]")
+                .join("Dungeon Meshi - S01E01.mkv"),
+            685.852,
+        );
+        write_entry(
+            &watch_later,
+            "entry-ordinary",
+            &root.join("Shokei Shoujo").join("ep01.mkv"),
+            551.259,
+        );
+
+        let mut state = State::default();
+        reconcile(&config, &mut state, None);
+
+        let symlinked = state.find(&root.to_string_lossy(), "Dungeon Meshi");
+        assert!(
+            symlinked.is_some(),
+            "a real bookmark for a symlinked series folder must create a record, not be \
+             silently dropped"
+        );
+        let symlinked = symlinked.unwrap();
+        assert_eq!(symlinked.status, Status::InProgress);
+        assert_eq!(symlinked.position_seconds, 685.852);
+
+        let ordinary = state
+            .find(&root.to_string_lossy(), "Shokei Shoujo")
+            .expect("the ordinary, non-symlinked sibling series must still reconcile correctly");
+        assert_eq!(ordinary.status, Status::InProgress);
+        assert_eq!(ordinary.position_seconds, 551.259);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use std::time::SystemTime;
 use crate::config::Config;
 use crate::duration::DurationOutcome;
 use crate::roots::{expand_tilde, normalize};
+use crate::series;
 
 /// One candidate `watch_later` directory location, tagged with the OS it
 /// applies to (matched against `std::env::consts::OS`) — a data table, not
@@ -142,14 +143,47 @@ fn filter_to_tracked_roots(
 ) -> Vec<WatchLaterEntry> {
     entries
         .into_iter()
-        .filter(|entry| {
-            let real_source = normalize(&entry.source_path, home);
-            tracked_roots.iter().any(|root| {
-                let real_root = normalize(Path::new(root), home);
-                real_source.starts_with(&real_root)
-            })
-        })
+        .filter(|entry| is_under_a_tracked_root(&entry.source_path, tracked_roots, home))
         .collect()
+}
+
+/// True if `source_path` resolves under any tracked root. Checks a cheap
+/// whole-root prefix match first (the common case); only falls back to
+/// canonicalizing the root's own depth-1 children individually when that
+/// fails. The fallback is required, not an edge-case nicety: a depth-1
+/// series folder can itself be a symlink pointing entirely outside the
+/// root's own real location (CLAUDE.md's "Symlinks are followed
+/// everywhere... a symlinked series folder behaves exactly like a real
+/// one") — `fs::canonicalize`-ing the *whole* entry path resolves straight
+/// through such a symlink to wherever it actually points, so a plain
+/// root-vs-source prefix comparison can never match, and every
+/// `watch_later` entry for that series would be silently invisible to
+/// Tsuzuki forever. Confirmed as a real, reported bug, not a hypothetical:
+/// a real-world tracked root with one symlinked series folder never
+/// reconciled at all, while an ordinary (non-symlinked) sibling series
+/// under the same root worked correctly.
+fn is_under_a_tracked_root(
+    source_path: &Path,
+    tracked_roots: &[String],
+    home: Option<&Path>,
+) -> bool {
+    let real_source = normalize(source_path, home);
+
+    tracked_roots.iter().any(|root| {
+        let real_root = normalize(Path::new(root), home);
+        if real_source.starts_with(&real_root) {
+            return true;
+        }
+
+        let expanded_root = expand_tilde(Path::new(root), home);
+        let Ok(children) = series::series_in_root(&expanded_root) else {
+            return false;
+        };
+        children.into_iter().any(|child| {
+            let real_child = normalize(&child.path, home);
+            real_source == real_child || real_source.starts_with(&real_child)
+        })
+    })
 }
 
 /// Merges entries by `source_path`, per-path freshest-file-wins: when the
@@ -494,6 +528,49 @@ mod tests {
         let filtered =
             filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_under_a_symlinked_series_folder_survives_filtering() {
+        // Regression test for a real, reported bug: a depth-1 series
+        // folder that's itself a symlink pointing entirely outside the
+        // root's own real location (a normal, expected library shape per
+        // CLAUDE.md's "Symlinks are followed everywhere") was silently
+        // dropped by this filter. `normalize` canonicalizes the *whole*
+        // entry path, resolving straight through the symlink to
+        // `real_storage`'s location — a plain prefix comparison against
+        // the root's own (non-symlink-descended) canonical form can never
+        // match that, so every watch_later entry for that series was
+        // invisible, permanently. Uses real files/symlinks, not fabricated
+        // paths, since `normalize`'s canonicalize-with-fallback silently
+        // no-ops on paths that don't exist on disk at all — this bug is
+        // only reachable with real symlink resolution.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+
+        let real_storage = dir.path().join("real_storage").join("Dungeon Meshi");
+        std_fs::create_dir_all(&real_storage).unwrap();
+        std_fs::write(real_storage.join("ep01.mkv"), b"").unwrap();
+        symlink(&real_storage, root.join("Dungeon Meshi")).unwrap();
+
+        let entries = vec![WatchLaterEntry {
+            source_path: root.join("Dungeon Meshi").join("ep01.mkv"),
+            position_seconds: 685.852,
+            mtime: SystemTime::now(),
+        }];
+
+        let filtered =
+            filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "an entry for a file reached through a symlinked series folder must not be \
+             silently filtered out"
+        );
     }
 
     // --- Gap-audit: real-world-shaped states (root/file missing on disk) ---
