@@ -9,31 +9,110 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(default)]
     pub thresholds: Thresholds,
+    #[serde(default)]
     pub roots: Roots,
+    #[serde(default)]
     pub mpv: Mpv,
+    #[serde(default)]
     pub mal: Mal,
     #[serde(default)]
     pub exclusions: Vec<Exclusion>,
 }
 
+/// `120`, per design.md §8 — below this a saved position is noise, not a
+/// real bookmark.
+fn default_resume_seconds() -> u64 {
+    120
+}
+
+/// `180`, per design.md §8 — this close to a file's end counts as watched.
+fn default_completion_remaining_seconds() -> u64 {
+    180
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thresholds {
+    /// Two defaulting layers, both needed and both covering a genuinely
+    /// different missing-file shape: `Config.thresholds`'s own
+    /// `#[serde(default)]` (via `Thresholds: Default`, below) covers a
+    /// config.toml with no `[thresholds]` table at all; these per-field
+    /// defaults cover a `[thresholds]` table that's present but missing
+    /// this one key — e.g. an old config.toml from before
+    /// `completion_remaining_seconds` existed. A bare `#[serde(default)]`
+    /// would be silently *wrong* here (defaults to `0`, not the documented
+    /// `120`/`180`), not just imprecise — `0` for `resume_seconds` means
+    /// literally no noise filtering at all, and `0` for
+    /// `completion_remaining_seconds` means nothing is ever completed via
+    /// the duration-proximity signal. Named functions, not inline closures,
+    /// since `serde(default = "...")` requires a path, and reused by
+    /// `Thresholds::default()` below so the two layers can't drift apart.
+    #[serde(default = "default_resume_seconds")]
     pub resume_seconds: u64,
+    #[serde(default = "default_completion_remaining_seconds")]
     pub completion_remaining_seconds: u64,
+    /// `0` is both the documented default (design.md §8: "never
+    /// auto-pause") and `u64`'s own `Default::default()` — a bare
+    /// `#[serde(default)]` is correct here, unlike its two siblings above.
+    #[serde(default)]
     pub auto_pause_days: u64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Thresholds {
+            resume_seconds: default_resume_seconds(),
+            completion_remaining_seconds: default_completion_remaining_seconds(),
+            auto_pause_days: 0,
+        }
+    }
+}
+
+/// `["mkv", "mp4", "avi", "webm", "mov"]`, per design.md §8. A bare
+/// `#[serde(default)]` on `video_extensions` would silently produce an
+/// *empty* list instead — not a parse failure, but a config that now
+/// matches zero video files and excludes an entire library. This is the
+/// exact bug found during Phase 5's human dogfood pass: an old config.toml
+/// from before this field existed failed to parse at all (no default of
+/// any kind), which a bare `#[serde(default)]` would have "fixed" into a
+/// different, quieter failure instead of the documented list.
+fn default_video_extensions() -> Vec<String> {
+    ["mkv", "mp4", "avi", "webm", "mov"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Roots {
+    /// Empty is the genuinely correct default (a fresh install has no
+    /// tracked roots yet) — `Vec::default()` already matches, so a bare
+    /// `#[serde(default)]` is correct, unlike `video_extensions` below.
+    #[serde(default)]
     pub paths: Vec<String>,
+    #[serde(default = "default_video_extensions")]
     pub video_extensions: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl Default for Roots {
+    fn default() -> Self {
+        Roots {
+            paths: Vec::new(),
+            video_extensions: default_video_extensions(),
+        }
+    }
+}
+
+/// Both fields correctly default to `""` (`String::default()`), so
+/// `#[derive(Default)]` needs no field-level overrides — unlike
+/// `Thresholds`/`Roots`, nothing here would be silently wrong under a bare
+/// `#[serde(default)]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Mpv {
+    #[serde(default)]
     pub watch_later_dir: String,
     /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`), skipping
     /// native/Flatpak auto-detection entirely. Empty = auto-detect — same
@@ -43,8 +122,10 @@ pub struct Mpv {
     pub command_override: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `client_id`'s correct default is also `""` — same reasoning as `Mpv`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Mal {
+    #[serde(default)]
     pub client_id: String,
 }
 
@@ -58,33 +139,6 @@ pub struct Mal {
 pub struct Exclusion {
     pub root: String,
     pub path: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            thresholds: Thresholds {
-                resume_seconds: 120,
-                completion_remaining_seconds: 180,
-                auto_pause_days: 0,
-            },
-            roots: Roots {
-                paths: Vec::new(),
-                video_extensions: ["mkv", "mp4", "avi", "webm", "mov"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            },
-            mpv: Mpv {
-                watch_later_dir: String::new(),
-                command_override: String::new(),
-            },
-            mal: Mal {
-                client_id: String::new(),
-            },
-            exclusions: Vec::new(),
-        }
-    }
 }
 
 /// Resolves `~/.config/tsuzuki/config.toml` via the `dirs` crate's
@@ -275,6 +329,82 @@ mod tests {
         assert_eq!(reread.exclusions, config.exclusions);
         assert_eq!(reread.exclusions[0].root, "~/Anime");
         assert_eq!(reread.exclusions[0].path, "One Piece/Specials");
+    }
+
+    #[test]
+    fn missing_video_extensions_key_defaults_to_the_documented_list_not_empty() {
+        // Regression test for the real bug found during Phase 5's human
+        // dogfood pass: `tsuzuki add` against a real (if old) config.toml
+        // missing `video_extensions` failed with "missing field" — this
+        // field was added in Phase 1 with no serde default at all. Asserts
+        // on the actual resulting value, not just "doesn't error" — a bare
+        // `#[serde(default)]` would also "not error" while silently
+        // producing an empty list (which matches zero video files), so
+        // that alone wouldn't prove the fix is correct.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[roots]
+paths = ["~/Anime"]
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert_eq!(
+            config.roots.video_extensions,
+            vec!["mkv", "mp4", "avi", "webm", "mov"],
+            "must default to the documented list from design.md §8, not an empty one"
+        );
+        assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
+    }
+
+    #[test]
+    fn missing_thresholds_table_and_missing_individual_threshold_keys_both_default_correctly() {
+        // Same bug class, found during the gap-audit's field-by-field
+        // sweep: `resume_seconds`/`completion_remaining_seconds` had no
+        // serde default either, and their correct defaults (120/180) are
+        // non-zero — a bare `#[serde(default)]` would silently produce `0`
+        // for both, which is wrong in a different, quieter way (0 = no
+        // noise filtering at all / nothing ever counts as near-complete).
+        // Covers both defaulting layers: the whole `[thresholds]` table
+        // absent (config_a), and the table present but missing one key
+        // (config_b).
+        let dir = tempfile::tempdir().unwrap();
+
+        let path_a = dir.path().join("no_thresholds_table.toml");
+        fs::write(&path_a, "[roots]\npaths = []\n").unwrap();
+        let config_a = read(&path_a).unwrap();
+        assert_eq!(config_a.thresholds.resume_seconds, 120);
+        assert_eq!(config_a.thresholds.completion_remaining_seconds, 180);
+        assert_eq!(config_a.thresholds.auto_pause_days, 0);
+
+        let path_b = dir.path().join("partial_thresholds_table.toml");
+        fs::write(
+            &path_b,
+            r#"
+[thresholds]
+auto_pause_days = 7
+
+[roots]
+paths = []
+"#,
+        )
+        .unwrap();
+        let config_b = read(&path_b).unwrap();
+        assert_eq!(
+            config_b.thresholds.resume_seconds, 120,
+            "must default to 120, not 0"
+        );
+        assert_eq!(
+            config_b.thresholds.completion_remaining_seconds, 180,
+            "must default to 180, not 0"
+        );
+        // The one key that *was* present must still be read correctly, not
+        // overridden by the default-filling logic.
+        assert_eq!(config_b.thresholds.auto_pause_days, 7);
     }
 
     #[test]
