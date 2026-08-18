@@ -422,33 +422,47 @@ Deliberately no fourth `completed` state was added — see "Completion
 detection has a real, permanent blind spot" below for why one wouldn't even
 be reliably detectable most of the time.
 
-### Completion detection has a real, permanent blind spot — clean binges leave no trace at all
-mpv only ever writes a `watch_later` entry when a file is quit *mid-*
-playback. If an episode plays through naturally to its end and the next
-one auto-advances, mpv never writes anything for it — there's no bookmark
-to later find absent, because none was ever created. This means a user who
-binges several episodes in one sitting without ever quitting mid-file
-leaves **zero detectable trace** for any of them; Tsuzuki cannot see this
-happened, and no amount of clever inference fixes it, because the
-information genuinely doesn't exist on disk anywhere. This is the direct,
-accepted cost of the "never launches an IPC socket, only reads
-after-the-fact files" architecture (§4/design.md §4) — closing this gap
-completely would require real-time observation of playback, which is
-explicitly the thing this project chose not to build. **The practical
-rule this leaves:** the cursor can only advance across a hop where the user
-quit mid-file at least once (a real, ≥`resume_seconds` observation) —
-Tsuzuki scans forward from the last confirmed position through the
-series' natural-sort order and jumps to the furthest file with a currently-
-real bookmark, without needing to individually resolve or mark anything
-in between (no per-episode watched log exists in `state.toml`'s schema,
-and none should be added — see the MAL-sync precedent in design.md §7:
-reaching a later point is already treated as sufficient evidence of
-forward progress elsewhere in this design, same principle applied
-locally). If nothing past the last confirmed position currently has a
-real bookmark — including the pure clean-binge-to-the-series'-actual-end
-case — the cursor simply stays at its last confirmed point. This is not a
-failure to fix; it's the tool honestly reporting the boundary of what it
-can actually know.
+### Completion detection has a real, permanent blind spot — absence of a bookmark is never, by itself, proof of anything
+Absence of a `watch_later` entry for the series' currently-tracked episode
+must never be read as positive evidence of completion, full stop — no
+exceptions, no "but the record's old stored position was real" special
+case. This was a real, shipped bug, found by dogfooding: mpv's own
+`--resume-playback` (on by default, independent of anything Tsuzuki does
+or which program launched mpv) deletes a file's `watch_later` bookmark the
+instant that file is *loaded*, if one already exists for it — and mpv
+never rewrites a fresh one for a file left mid-playback via a playlist
+command (e.g. `playlist-next`) before it's ever quit while still loaded.
+The result: "no entry for the current episode" is produced *identically*
+by a genuine, played-to-true-EOF completion and by an ordinary abandon —
+open an already-bookmarked episode, skip ahead to a different one, quit
+having spent under `resume_seconds` there (or none at all). These two
+situations are provably indistinguishable from `watch_later` state alone.
+Treating "absence + the record's last stored position was real" as
+sufficient proof of completion (an earlier version of this rule did)
+silently discarded real progress on the abandoned episode and could even
+auto-`Drop` the whole series off a one-minute peek at its finale.
+
+**The only signals that ever justify moving the cursor or changing status:
+a real (≥`resume_seconds`) `Resume` position found anywhere forward in the
+series, or a `Completed` classification (see below) found anywhere
+forward** — both are positive readings taken from an entry that still
+exists, unaffected by the deletion-on-load problem. Absence contributes
+nothing to the decision either way; it's not weighed, corroborated, or
+treated as a tiebreaker — it simply fails to produce either signal. This
+does widen the already-accepted "clean binge leaves no trace" blind spot
+(mpv writes no entry at all for a file played straight through to a true,
+uninterrupted EOF): a series finished this way, with *nothing* else ever
+observed afterward, on any subsequent episode, no longer auto-resolves to
+`Dropped` — it stays exactly where it was until an explicit `tsuzuki drop`
+or genuine forward evidence appears. That's the honest tradeoff: the
+ordinary way people actually finish an episode — quitting on or near it,
+which mpv *does* capture as a `Completed` reading before anything gets a
+chance to delete it — is completely unaffected and keeps auto-advancing/
+auto-dropping exactly as before. Closing this gap completely (detecting a
+true, silent EOF with zero corroborating signal) would require real-time
+observation of playback, which is explicitly the thing this project chose
+not to build. This is not a failure to fix; it's the tool honestly
+reporting the boundary of what it can actually know.
 
 ### When the CURRENT tracked episode itself completes: advance to the next one, or auto-`Dropped` if there is no next one
 **This is a real, previously-underspecified rule, not something already
@@ -460,10 +474,12 @@ this is not the fuzzy inference §2 rules out elsewhere, because it only
 ever fires on a direct, confirmed signal (the actual current tracked file,
 genuinely completing), never a guess.
 
-The rule, precisely: when the series' current tracked episode is confirmed
-complete — by either signal, absence or a duration-based `Completed`
-reading — reconcile does not just record that fact and stop. It also
-resolves the cursor exactly one step further:
+The rule, precisely: when a `Completed` classification (see "Completion
+detection has a real, permanent blind spot" above and "Cursor movement"
+below) is found anywhere in the forward scan from the current tracked
+episode on — confirming it, or a later episode, genuinely done — reconcile
+does not just record that fact and stop. It also resolves the cursor
+exactly one step further:
 - **If a next episode exists** (in natural-sort order, per the series'
   actual files on disk) — the cursor advances to it, at position 0. This
   is not a claim that the next episode was watched; it's the same
@@ -525,7 +541,7 @@ by definition nothing in the series counts as "behind" them; any real
 bookmark anywhere in a dropped/never-started series is forward from that
 baseline and correctly reactivates it.
 
-### Cursor movement: noise never touches saved state, absence check is per-series, a single run chains fully
+### Cursor movement: noise never touches saved state, completion check is per-series, a single run chains fully
 Settles the open question left after Phase 4 about how the cursor advances
 when the user manually skips ahead. The full mechanism, worked out by
 stress-testing scenarios rather than asserting it from feel:
@@ -546,32 +562,31 @@ critically — never overwrites an existing real (≥`resume_seconds`) one
 either. Only another real observation can ever move a series' saved
 position, in either direction.
 
-**Completion has two real signals feeding the same cursor-advancement
-rule — absence AND a duration-based near-the-end reading — this was a real
-gap in earlier phrasing here, not a deliberate simplification.** Absence
-(mpv writes nothing when a file plays to a true, uninterrupted EOF) is one
-way an episode counts as done. But `classify()`'s `Completed` result
+**Completion has exactly one real signal — a duration-based near-the-end
+reading — and it's checked across the whole remaining forward scan, not
+just at the series' current episode.** `classify()`'s `Completed` result
 (built in Phase 4 — a real, ≥`resume_seconds` position with
 `duration - position ≤ completion_remaining_seconds`, e.g. quitting at
-58:30 of a 60:00 episode during the credits) is the *other* real signal
-design.md §4 always specified, and it must not be dropped just because
-earlier discussion here focused on absence. Reconcile calls `classify()`
-(reusing Phase 4's `probe_duration`/`mpv::classify()` exactly as built —
-no new duration logic) on any entry that has a real position; a `Completed`
-result is treated identically to an absent entry for cursor purposes — both
-mean "this episode is done, keep scanning forward" — while `StartFromZero`/
-`Resume` results behave as an ordinary real/noise reading. This costs
-nothing extra to worry about: duration probing only ever runs on entries
-that already have a real position (an absent entry has nothing to probe,
-and stays purely an absence check), and Phase 4 already measured the actual
-cost directly — 212µs (release) to probe one file — negligible even across
-a full multi-step chain, not a caching concern. The "confirmed complete
-with nothing real found after it" case needs no new state modeling either:
-it's the exact same forward-scan/stops-at-the-first-unconfirmed-step rule
-already specified below for absence, just fed a second way for an entry to
-count as confirmed.
+58:30 of a 60:00 episode during the credits) is the only thing that
+confirms an episode done for cursor-advancement purposes. Absence is
+*not* a second, equally-weighted signal alongside it — see "Completion
+detection has a real, permanent blind spot" above for why: mpv deletes a
+file's own bookmark on load regardless of what happens next, so absence
+alone can't be trusted to mean completion rather than an ordinary abandon.
+Reconcile calls `classify()` (reusing Phase 4's `probe_duration`/
+`mpv::classify()` exactly as built — no new duration logic) on every entry
+in the scan that has a real position, from the current episode through the
+rest of the series; a `Completed` result found *anywhere* in that range is
+enough to enter completion-advance, because `apply_completion_advance`
+independently re-derives completion at each step it walks through using
+the same rule. `StartFromZero`/`Resume` results behave as an ordinary
+real/noise reading, unaffected. This costs nothing extra to worry about:
+duration probing only ever runs on entries that already have a real
+position, and Phase 4 already measured the actual cost directly — 212µs
+(release) to probe one file — negligible even across a full multi-step
+chain, not a caching concern.
 
-**The absence-based-completion check is per-series, not "check the single
+**The completion check is per-series, not "check the single
 globally-freshest file."** Phase 4's `most_recent_entry` only identifies
 one thing: the single most-recently-touched file across everything scanned.
 That's not sufficient on its own for Phase 5, because `state.toml` has to
@@ -579,21 +594,25 @@ track multiple `in_progress` series simultaneously (design.md §8's resume
 picker exists specifically because more than one can be in progress at
 once) — a series watched Monday and one watched Tuesday are both still
 legitimately in progress today. So each run does two separate jobs, not
-one: (a) for every series already `in_progress`, check whether *that
-series' own last-known file* still has a bookmark at all — its absence is
-the completion signal, independent of what's newest elsewhere; (b) separately,
-check whether any real (≥`resume_seconds`) new activity happened anywhere,
-which is what can move a cursor or start a new `in_progress` record.
+one: (a) for every series already `in_progress`, forward-scan *that
+series' own* files for a `Completed` reading, independent of what's newest
+elsewhere; (b) separately, check whether any real (≥`resume_seconds`)
+`Resume` activity happened anywhere, which is what can move a cursor or
+start a new `in_progress` record.
 
 **A single invocation must resolve a full state transition, not just one
 step of one.** Binge-watching is a normal usage pattern, not an edge case:
-finish episode 1 (mpv deletes its bookmark = completion) and be several
+quit episode 1 near its end (a real `Completed` reading) and be several
 real minutes into episode 2 before `tsuzuki` is ever run again. One run
 must chain through the whole thing — recognize episode 1's completion,
 advance the cursor to episode 2, and pick up episode 2's already-real
 position — not stop after the first step and require a second invocation
-to "catch up." Don't implement this as a single comparison per run; it has
-to resolve however many steps actually happened since the last check.
+to "catch up." (If episode 2's own position is real enough to stand on its
+own — a `Resume` reading — the ordinary forward scan finds it directly,
+without ever needing to confirm episode 1's completion at all; either path
+must resolve in one call.) Don't implement this as a single comparison per
+run; it has to resolve however many steps actually happened since the last
+check.
 
 **An absent OS-default candidate directory stays silent — an explicit
 `watch_later_dir` override that doesn't resolve must be surfaced, not
@@ -654,9 +673,11 @@ as an extension-gated special case.
 **Unreadable duration is surfaced, never silently dropped.** If neither
 Symphonia's probe nor the fallback reader can determine a file's duration,
 the completion-by-remaining-time check is skipped for that file only (the
-resume threshold still works fine from position alone, and the absence-based
-completion signal — Phase 5 — still catches genuine completion eventually).
-But the *reason* duration couldn't be read is preserved in the return value,
+resume threshold still works fine from position alone — a real `Resume`
+reading is unaffected; only a `Completed` classification specifically
+needs duration, and per §3's "Completion detection has a real, permanent
+blind spot," absence is never an independent fallback for it). But the
+*reason* duration couldn't be read is preserved in the return value,
 not collapsed to a bare `None` — Phase 4 has no user-facing command of its
 own yet, so it's Phase 5 (or `doctor`, Phase 6) that decides where the user
 actually sees this, same pattern as Anitomy's parse-fallback in Phase 3:

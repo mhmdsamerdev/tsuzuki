@@ -250,22 +250,35 @@ fn reconcile_one_series(
     // have a real position, per CLAUDE.md — never for noise). Only `Resume`
     // is a landing candidate here — `Completed` never lands an episode on
     // its own raw position; per CLAUDE.md's "When the CURRENT tracked
-    // episode itself completes" rule, a confirmed-complete episode (via
-    // absence or `Completed`) instead advances the cursor to the *next*
-    // episode (or auto-`Drop`s if there is none), handled below once the
-    // scan finds nothing real anywhere. `best` is still unconditionally
-    // overwritten as the scan moves forward, so a later real `Resume`
-    // always wins over an earlier one — this is what makes ordinary
-    // multi-step binge chaining (a real position already exists further
-    // ahead) resolve in one pass, unaffected by the completion-advance
-    // logic below.
+    // episode itself completes" rule, a confirmed-complete episode instead
+    // advances the cursor to the *next* episode (or auto-`Drop`s if there
+    // is none), handled below once the scan finds nothing real anywhere.
+    // `best` is still unconditionally overwritten as the scan moves
+    // forward, so a later real `Resume` always wins over an earlier one —
+    // this is what makes ordinary multi-step binge chaining (a real
+    // position already exists further ahead) resolve in one pass,
+    // unaffected by the completion-advance logic below.
     //
-    // `start_entry_seen`/`start_completed` capture what the scan observed
-    // specifically at `start_index` (the series' own currently-tracked
-    // episode), reused below without a second duration probe.
+    // `any_completed_found` tracks whether a `Completed` classification
+    // was observed *anywhere* in this scan (at `start_index` or later) —
+    // deliberately not just at `start_index`. Absence of the current
+    // episode's own entry is never, by itself, evidence of anything: mpv's
+    // own `--resume-playback` (on by default) deletes a file's bookmark
+    // the instant it's loaded, regardless of who launched mpv or what
+    // happens afterward, so "no entry" is produced identically by a
+    // genuine completion and by an ordinary abandon-mid-file-via-skip —
+    // these are provably indistinguishable from watch_later state alone.
+    // Treating absence as positive proof (an earlier version of this scan
+    // did, via the stored record's own old position as a "baseline") was a
+    // real, shipped bug: skipping to a later episode and watching under
+    // `resume_seconds` of it silently discarded real progress on the
+    // episode being left and could even auto-`Drop` the whole series. A
+    // `Completed` classification, by contrast, is a positive reading
+    // captured from a real, still-existing entry — unaffected by the
+    // deletion-on-load problem — so it remains a valid, sufficient signal
+    // on its own, wherever in the scan it's found.
     let mut best: Option<(usize, f64)> = None;
-    let mut start_entry_seen = false;
-    let mut start_completed = false;
+    let mut any_completed_found = false;
     for (idx, file) in ordered.iter().enumerate().skip(start_index) {
         let real_file = normalize(file, home);
         let Some(entry) = entries
@@ -274,9 +287,6 @@ fn reconcile_one_series(
         else {
             continue;
         };
-        if idx == start_index {
-            start_entry_seen = true;
-        }
         if entry.position_seconds < resume_seconds as f64 {
             continue;
         }
@@ -287,8 +297,8 @@ fn reconcile_one_series(
             resume_seconds,
             completion_remaining_seconds,
         );
-        if idx == start_index && matches!(classification.action, PlaybackAction::Completed) {
-            start_completed = true;
+        if matches!(classification.action, PlaybackAction::Completed) {
+            any_completed_found = true;
         }
         if let PlaybackAction::Resume(pos) = classification.action {
             best = Some((idx, pos));
@@ -297,49 +307,29 @@ fn reconcile_one_series(
 
     let Some((found_index, position)) = best else {
         // Nothing real (Resume) exists anywhere from `start_index` on. If
-        // the series' own currently-tracked episode is itself confirmed
-        // complete, resolve the cursor one or more steps further instead
-        // of freezing (CLAUDE.md's "When the CURRENT tracked episode
-        // itself completes" rule) — but only for a real InProgress/Paused
-        // record; `Dropped`/never-started series have no "current episode"
-        // for this rule to apply to.
+        // a `Completed` reading was found anywhere in that same range,
+        // resolve the cursor one or more steps further instead of
+        // freezing (CLAUDE.md's "When the CURRENT tracked episode itself
+        // completes" rule) — but only for a real InProgress/Paused record;
+        // `Dropped`/never-started series have no "current episode" for
+        // this rule to apply to. Absence alone (no `Completed` reading
+        // anywhere) is deliberately never sufficient — see the scan loop's
+        // own comment above.
         if let Some(i) = existing_index {
             let status = state.series[i].status;
-            let stored_position = state.series[i].position_seconds;
-            if status != Status::Dropped {
-                // Absence only counts as completion when a real baseline
-                // previously existed for this exact episode (the stored
-                // record's own position being real is that baseline) —
-                // otherwise a freshly-advanced, never-yet-watched episode
-                // (position 0, no entry yet) would immediately look
-                // "complete" again on the very next reconcile call, per
-                // CLAUDE.md's "absence-based-completion... only fires when
-                // a baseline existed". A real-but-below-`resume_seconds`
-                // entry at `start_index` (noise) is neither absence nor
-                // `Completed` — it must stay fully invisible, never a
-                // signal of any kind.
-                let confirmed_complete = if start_completed {
-                    true
-                } else if !start_entry_seen {
-                    stored_position >= resume_seconds as f64
-                } else {
-                    false
-                };
-
-                if confirmed_complete {
-                    apply_completion_advance(
-                        state,
-                        i,
-                        name,
-                        &expanded_root,
-                        &ordered,
-                        entries,
-                        start_index,
-                        resume_seconds,
-                        completion_remaining_seconds,
-                        home,
-                    );
-                }
+            if status != Status::Dropped && any_completed_found {
+                apply_completion_advance(
+                    state,
+                    i,
+                    name,
+                    &expanded_root,
+                    &ordered,
+                    entries,
+                    start_index,
+                    resume_seconds,
+                    completion_remaining_seconds,
+                    home,
+                );
             }
         }
         return;
@@ -1010,12 +1000,21 @@ mod tests {
     }
 
     #[test]
-    fn current_episode_completes_via_absence_and_advances_to_a_blank_next_episode_at_zero() {
-        // CLAUDE.md's "When the CURRENT tracked episode itself completes":
-        // a next episode exists but has never been touched at all — the
-        // cursor must advance there, at position 0, staying `InProgress`.
-        // Also confirms this is stable/idempotent on a repeated call with
-        // nothing new on disk (scope item 2).
+    fn absence_alone_never_advances_or_mutates_the_record() {
+        // Regression test for a real, reported data-loss bug: mpv's own
+        // `--resume-playback` (on by default) deletes a file's watch_later
+        // bookmark the instant it's loaded, regardless of who launched mpv
+        // or what happens afterward — so "no entry for ep01" is produced
+        // identically by a genuine completion and by simply reopening
+        // ep01 and then abandoning it (e.g. skipping to ep02 mid-file via
+        // mpv's own `playlist-next`, which never rewrites ep01's entry).
+        // These are provably indistinguishable from watch_later state
+        // alone, so absence must never, by itself, justify a mutation —
+        // ep01's real stored position must survive completely untouched.
+        // Nothing on ep02 either (the reported scenario's "watched under
+        // resume_seconds" and "watched nothing at all" cases behave
+        // identically here, since both fail to produce a `Resume` or
+        // `Completed` reading).
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1026,9 +1025,8 @@ mod tests {
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
 
-        // A real, established baseline on ep01 — no entry for it now (mpv
-        // deleted the bookmark on a clean, true EOF) — and nothing at all
-        // for ep02 yet.
+        // No entry for ep01 (deleted by mpv on load — not proof of
+        // completion) and nothing at all for ep02.
         let mut state = State {
             series: vec![SeriesRecord {
                 root: root.to_string_lossy().into_owned(),
@@ -1043,22 +1041,54 @@ mod tests {
 
         reconcile(&config, &mut state, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
-        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
-        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 1100.0);
         assert_eq!(record.status, Status::InProgress);
-        let updated_at_after_advance = record.updated_at;
-        assert!(updated_at_after_advance > 1);
+        assert_eq!(record.updated_at, 1);
+    }
 
-        // Re-run with nothing new on disk: ep02 is at position 0 (never a
-        // real baseline), so its own absence must NOT look like completion
-        // again — must stay exactly where it is, not chain straight into
-        // auto-dropping ep02 too.
+    #[test]
+    fn a_sub_threshold_reading_on_the_next_episode_does_not_corroborate_the_current_ones_absence() {
+        // The exact reported scenario: resuming ep01 at a real position,
+        // skipping ahead to ep02 via mpv's `playlist-next` mid-file (which
+        // never rewrites ep01's entry), then quitting after under
+        // `resume_seconds` of ep02. ep01's entry is gone (deletion-on-load,
+        // not completion) and ep02's own reading is real but noise-level —
+        // neither is a `Resume` or `Completed` signal, so the record must
+        // stay exactly on ep01 at its last real position, not jump to ep02
+        // at position 0.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+
+        // No entry for ep01. ep02: 60s watched, below the 120s default
+        // resume_seconds threshold.
+        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 60.0);
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::InProgress,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 600.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
         reconcile(&config, &mut state, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
-        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
-        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 600.0);
         assert_eq!(record.status, Status::InProgress);
-        assert_eq!(record.updated_at, updated_at_after_advance);
+        assert_eq!(record.updated_at, 1);
     }
 
     #[test]
