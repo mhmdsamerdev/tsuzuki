@@ -148,49 +148,98 @@ already-running mpv instance — never a bare spawn-and-release. This means:
   was a real, shipped bug.
 
 ### Optional mpv companion script — per-file preferred source when present, watch_later fallback always intact
-Studied and confirmed viable (see the deferred follow-up on the absence-
-based-completion fix): a small, Tsuzuki-authored Lua script
-(`contrib/mpv/tsuzuki.lua`) placed in mpv's `scripts/` directory is exactly
-as launcher-independent as `watch_later` itself — mpv loads every
-installed script for every invocation regardless of what launched it, and
-the script only ever writes small text files to its own log directory
-(`$XDG_DATA_HOME/tsuzuki/mpv-log`, atomically, temp-file-then-rename). No
-IPC socket, no background process, nothing added to this section's own
-"never holds an ongoing connection to an already-running mpv instance"
-constraint.
+A small, Tsuzuki-authored Lua script (`contrib/mpv/tsuzuki.lua`) placed in
+mpv's `scripts/` directory is exactly as launcher-independent as
+`watch_later` itself — mpv loads every installed script for every
+invocation regardless of what launched it, and the script only ever writes
+small text files to its own log directory (`$XDG_DATA_HOME/tsuzuki/mpv-log`,
+atomically, temp-file-then-rename). No IPC socket, no background process,
+nothing added to this section's own "never holds an ongoing connection to
+an already-running mpv instance" constraint. Reading this log is
+`script_log.rs`'s job — its scan shape (parse-one-entry, skip malformed/
+`reason=="redirect"` entries without aborting, filter to tracked roots via
+the same symlink-aware helper `watch_later` parsing already uses) mirrors
+`mpv.rs`'s own `scan_watch_later` deliberately.
 
 **Strictly opt-in, never a hard requirement.** Installing it is a manual,
 documented, one-time step — the same shape as the existing
 `write-filename-in-watch-later-config=yes` prerequisite, not a new command
 surface. A user who never installs it keeps the exact behavior shipped
-today; nothing regresses, nothing new is required for the tool to keep
-working.
+before this script existed; nothing regresses, nothing new is required for
+the tool to keep working. The log directory itself is fixed
+(`$XDG_DATA_HOME/tsuzuki/mpv-log`, entirely Tsuzuki-owned) and deliberately
+**not** a `config.toml` field — unlike `watch_later_dir`, there's no
+install-method variance to work around here, so there's nothing for a user
+to need to override.
 
-**Per-file, not global, and the fallback is free.** For a given source
-file: if the script's log has an entry for it, that entry is the complete,
-sole source for duration/position/completion — a real `reason=="eof"` is a
-direct, unambiguous completion signal (no `completion_remaining_seconds`
-duration-proximity guessing needed), and `duration` comes straight from
-mpv's own demuxer (skips `symphonia`/the AVI fallback entirely for that
-file). If no entry exists for a path — script never installed, this mpv
-build predates it being added, or this particular file was played before
-the script existed — that file falls all the way back to today's pipeline
-(`watch_later` + `symphonia`/AVI probing + the `any_completed_found`
-forward-scan rule), completely unchanged. A script that errors or simply
-never writes an entry for a file is indistinguishable from "not
-installed" — no special error state, matching the existing "one bad entry
-doesn't abort the whole scan" precedent used everywhere else in this
-project.
+**An independent candidate source, unioned with `watch_later` — not mere
+enrichment.** `reconcile.rs`'s candidate discovery scans both sources and
+merges them per source path (`merge_candidates`), so a file with a
+script-log entry but no `watch_later` entry at all (a clean binge, watched
+straight through with the script installed — mpv writes no `watch_later`
+entry for a file that reaches a true, uninterrupted EOF) still surfaces as
+real activity. This is what actually closes the "clean binge leaves no
+trace" blind spot below for anyone who has the script installed — union,
+not fallback-only, is what makes that true.
 
-**Why this instead of replacing `watch_later` reading outright:** a full
-replacement would mean a user without the script gets *zero* tracking
-instead of today's full, correct tracking — a materially worse
-out-of-box floor than the one-line `write-filename-in-watch-later-config`
-ask ever was. Per-file preference-with-fallback gets the accuracy win
-(closes the "clean binge leaves no trace" blind spot entirely for anyone
-who installs it, eliminates the absence-vs-abandon ambiguity at the root
-rather than just making it safe) without raising the floor for anyone who
-doesn't.
+**Per-path source selection is mtime-based, not "script always wins."**
+When a path has entries from both sources, the fresher one wins by the
+underlying entry file's own mtime; an exact tie goes to the script entry,
+deterministically (same precedent as the OS-candidate merge's own
+exact-mtime-tie rule). This matters because `watch_later` entries can
+legitimately be fresher — e.g. a `resume`d file quit again after the
+script-log entry was last written.
+
+**Classification is per source, once a winner is picked.** A
+`watch_later`-sourced winner classifies exactly as before, unchanged
+(`resume_seconds`/`completion_remaining_seconds`, Symphonia/AVI duration
+probing). A script-sourced winner with `reason=="eof"` is treated as
+`Completed` unconditionally — a direct, unambiguous signal, never run
+through the `completion_remaining_seconds` proximity check at all. A
+script-sourced winner with any other reason (`stop`/`quit`/`error`/
+`unknown`) and a real position is classified exactly like a `watch_later`
+reading (the same `resume_seconds` noise threshold, the same
+`completion_remaining_seconds` proximity check) — just fed the script's
+own `duration` directly when it has one, skipping the Symphonia/AVI probe
+entirely for that file, per this same section's original design. **When
+the script's own `duration` field is empty** (mpv's `duration` property
+observer never fired for that session, e.g. quit almost immediately) —
+**falls back to `duration::probe_duration` on the file itself, exactly as
+a `watch_later`-sourced reading always has**, rather than leaving duration
+`Unknown` and skipping the completion check. The file is real and on disk
+regardless of which source won; probing it costs the same
+low-hundreds-of-microseconds it always has (§3's "Completion threshold
+needs episode duration" already established this is cheap, not a caching
+concern), and there's no reason a script-sourced reading should know
+*less* about a file's completion state than a `watch_later`-sourced one
+would for the exact same file. A `reason=="redirect"` entry is discarded
+at parse time, never a candidate at
+all — the script-log equivalent of `watch_later`'s own redirect-entry
+filtering. A script entry that errors, or simply never gets written for a
+file, is indistinguishable from "script not installed" for that file — no
+special error state, matching the existing "one bad entry doesn't abort
+the whole scan" precedent used everywhere else in this project.
+
+**Script-log entries persist forever on disk — mpv never deletes them.**
+Unlike `watch_later`, which mpv's own `--resume-playback` clears on load,
+a script-log entry just sits there unchanged indefinitely once written.
+This means the existing "only write to `state.toml` on a genuine content
+change vs. what's currently stored" diffing rule has to hold for
+script-sourced readings too, or an unchanged entry seen on every
+subsequent invocation would look like fresh activity forever — most
+concretely, it must never silently undo a prior `pause`/`drop` the way an
+un-zeroed `watch_later` bookmark could before that bug was fixed (see
+"`pause`/`drop` never zero the stored position" above).
+
+**Why union-with-fallback instead of replacing `watch_later` reading
+outright:** a full replacement would mean a user without the script gets
+*zero* tracking instead of full, correct `watch_later`-only tracking — a
+materially worse out-of-box floor than the one-line
+`write-filename-in-watch-later-config` ask ever was. Union-with-fallback
+gets the accuracy win (closes the "clean binge leaves no trace" blind spot
+entirely for anyone who installs it, eliminates the absence-vs-abandon
+ambiguity at the root rather than just making it safe) without raising the
+floor for anyone who doesn't.
 
 ### Thresholds are fixed seconds, both configurable, defaults 120s / 180s
 `resume_seconds = 120` (below this: start from 0, not a real bookmark),
@@ -471,7 +520,7 @@ Deliberately no fourth `completed` state was added — see "Completion
 detection has a real, permanent blind spot" below for why one wouldn't even
 be reliably detectable most of the time.
 
-### Completion detection has a real, permanent blind spot — absence of a bookmark is never, by itself, proof of anything
+### Completion detection has a real blind spot for `watch_later` alone — absence of a bookmark is never, by itself, proof of anything
 Absence of a `watch_later` entry for the series' currently-tracked episode
 must never be read as positive evidence of completion, full stop — no
 exceptions, no "but the record's old stored position was real" special
@@ -507,11 +556,27 @@ or genuine forward evidence appears. That's the honest tradeoff: the
 ordinary way people actually finish an episode — quitting on or near it,
 which mpv *does* capture as a `Completed` reading before anything gets a
 chance to delete it — is completely unaffected and keeps auto-advancing/
-auto-dropping exactly as before. Closing this gap completely (detecting a
-true, silent EOF with zero corroborating signal) would require real-time
-observation of playback, which is explicitly the thing this project chose
-not to build. This is not a failure to fix; it's the tool honestly
-reporting the boundary of what it can actually know.
+auto-dropping exactly as before. Closing this gap completely from
+`watch_later` state alone (detecting a true, silent EOF with zero
+corroborating signal) would require real-time observation of playback,
+which is explicitly the thing this project chose not to build. This is not
+a failure to fix; it's the tool honestly reporting the boundary of what it
+can know from `watch_later` alone.
+
+**The gap is closable, not from `watch_later`, but from the optional
+companion script.** `contrib/mpv/tsuzuki.lua` observes the same `end-file`
+event `watch_later` never gets to write anything meaningful for on a clean
+EOF, and records a direct `reason=="eof"` signal instead of leaving
+absence to be interpreted. For anyone with the script installed, that
+signal is unioned into `reconcile.rs`'s candidate discovery (see "Optional
+mpv companion script" above) and treated as an unconditional `Completed` —
+so a clean binge genuinely does now auto-advance/auto-`Drop` correctly,
+closing exactly the blind spot this section describes. This doesn't
+weaken the rule above in any way: for a file with no script-log entry
+(script never installed, or played before the script existed), absence of
+a `watch_later` entry is still never, by itself, proof of anything — the
+script only ever adds a positive signal where one previously didn't
+exist; it never makes absence itself meaningful.
 
 ### When the CURRENT tracked episode itself completes: advance to the next one, or auto-`Dropped` if there is no next one
 **This is a real, previously-underspecified rule, not something already

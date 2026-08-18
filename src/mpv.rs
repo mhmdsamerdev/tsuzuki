@@ -162,7 +162,7 @@ fn filter_to_tracked_roots(
 /// a real-world tracked root with one symlinked series folder never
 /// reconciled at all, while an ordinary (non-symlinked) sibling series
 /// under the same root worked correctly.
-fn is_under_a_tracked_root(
+pub(crate) fn is_under_a_tracked_root(
     source_path: &Path,
     tracked_roots: &[String],
     home: Option<&Path>,

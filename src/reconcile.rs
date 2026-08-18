@@ -36,16 +36,39 @@
 //!   back to `in_progress` — this is the *only* mechanism by which a
 //!   `dropped` series ever returns to `in_progress` (CLAUDE.md: no
 //!   `dropped -> paused` transition exists).
+//!
+//! Phase 6 adds a second, independent candidate source: the optional mpv
+//! companion script's log (`script_log.rs`, CLAUDE.md's "Optional mpv
+//! companion script"). Candidate discovery is now a per-path union of both
+//! sources ([`merge_candidates`]) — a script-log entry with no corresponding
+//! `watch_later` entry at all (a clean binge, watched straight through with
+//! the script installed) still surfaces as real activity, closing the
+//! "clean binge leaves no trace" blind spot documented above for anyone who
+//! has the script installed. When a path has entries from both sources, the
+//! fresher one wins by the underlying entry file's own mtime (an exact tie
+//! goes to the script entry, deterministically). Everything downstream of
+//! source selection — the forward scan, `any_completed_found`, cursor
+//! advancement, and auto-`Dropped`-on-no-next-episode — is unchanged; it
+//! only now classifies through [`classify_candidate`], which fans out to
+//! `mpv::classify()` unchanged for a `watch_later`-sourced reading, treats a
+//! script-sourced `reason == "eof"` reading as an unconditional `Completed`
+//! (a direct signal — no proximity-to-duration guessing needed), and treats
+//! any other script-sourced reason with a real position exactly like a
+//! `watch_later` reading (through the same `mpv::classify()` call), just fed
+//! the script's own duration when it has one instead of a Symphonia/AVI
+//! probe.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::anitomy;
 use crate::config::Config;
-use crate::duration;
+use crate::duration::{self, DurationOutcome};
 use crate::exclude;
 use crate::mpv::{self, PlaybackAction, ScanWarning, WatchLaterEntry};
 use crate::roots::{expand_tilde, normalize};
+use crate::script_log::{self, ScriptLogEntry};
 use crate::series;
 use crate::state::{SeriesRecord, State, Status, now_unix};
 
@@ -54,25 +77,166 @@ pub struct ReconcileOutcome {
     pub warning: Option<ScanWarning>,
 }
 
+/// One merged, per-path candidate reading, tagged with which source it came
+/// from — the winner of [`merge_candidates`]'s per-path source selection.
+#[derive(Debug, Clone, PartialEq)]
+enum Candidate {
+    WatchLater(WatchLaterEntry),
+    ScriptLog(ScriptLogEntry),
+}
+
+impl Candidate {
+    fn source_path(&self) -> &Path {
+        match self {
+            Candidate::WatchLater(e) => &e.source_path,
+            Candidate::ScriptLog(e) => &e.source_path,
+        }
+    }
+
+    fn mtime(&self) -> SystemTime {
+        match self {
+            Candidate::WatchLater(e) => e.mtime,
+            Candidate::ScriptLog(e) => e.mtime,
+        }
+    }
+
+    /// Whether this candidate is real enough to mark its (root, series) pair
+    /// as needing reconciliation at all (the top-level `pairs` collection in
+    /// [`reconcile`], extending the existing sub-`resume_seconds`-is-noise
+    /// rule to script-sourced entries). A script `eof` reading is always
+    /// real activity regardless of its raw position — it's a direct
+    /// completion signal, not a position to threshold-check; any other
+    /// script reason still needs a real (>= `resume_seconds`) position, same
+    /// as a `watch_later` reading.
+    fn is_real_activity(&self, resume_seconds: u64) -> bool {
+        match self {
+            Candidate::WatchLater(e) => e.position_seconds >= resume_seconds as f64,
+            Candidate::ScriptLog(e) if e.reason == "eof" => true,
+            Candidate::ScriptLog(e) => e.position.is_some_and(|p| p >= resume_seconds as f64),
+        }
+    }
+}
+
+/// Merges `watch_later` and script-log entries into one per-path candidate
+/// map, keyed by each path's normalized (canonicalized-with-fallback) form.
+/// When a path has an entry from only one source, that entry wins
+/// unconditionally. When both are present, the underlying entry files'
+/// mtimes decide: strictly fresher wins, and an exact tie goes to the script
+/// entry (CLAUDE.md's decision, deterministic like the OS-candidate merge's
+/// own exact-mtime-tie precedent).
+fn merge_candidates(
+    watch_later: Vec<WatchLaterEntry>,
+    script_log: Vec<ScriptLogEntry>,
+    home: Option<&Path>,
+) -> HashMap<PathBuf, Candidate> {
+    let mut map: HashMap<PathBuf, Candidate> = HashMap::new();
+    for entry in watch_later {
+        let key = normalize(&entry.source_path, home);
+        map.insert(key, Candidate::WatchLater(entry));
+    }
+    for entry in script_log {
+        let key = normalize(&entry.source_path, home);
+        let script_wins = match map.get(&key) {
+            Some(existing) => entry.mtime >= existing.mtime(),
+            None => true,
+        };
+        if script_wins {
+            map.insert(key, Candidate::ScriptLog(entry));
+        }
+    }
+    map
+}
+
+/// Classifies one merged candidate's reading against `file`'s thresholds,
+/// per source (CLAUDE.md's per-source classification rules). Returns `None`
+/// when the candidate carries no usable signal for this file — a
+/// below-`resume_seconds` reading (either source), or a script entry with a
+/// non-`eof` reason and no position at all — which the forward scan then
+/// treats exactly like "no entry for this file."
+fn classify_candidate(
+    candidate: &Candidate,
+    file: &Path,
+    resume_seconds: u64,
+    completion_remaining_seconds: u64,
+) -> Option<PlaybackAction> {
+    match candidate {
+        Candidate::WatchLater(entry) => {
+            if entry.position_seconds < resume_seconds as f64 {
+                return None;
+            }
+            let duration_outcome = duration::probe_duration(file);
+            let classification = mpv::classify(
+                entry.position_seconds,
+                duration_outcome,
+                resume_seconds,
+                completion_remaining_seconds,
+            );
+            Some(classification.action)
+        }
+        Candidate::ScriptLog(entry) if entry.reason == "eof" => Some(PlaybackAction::Completed),
+        Candidate::ScriptLog(entry) => {
+            let position = entry.position?;
+            if position < resume_seconds as f64 {
+                return None;
+            }
+            let duration_outcome = match entry.duration {
+                Some(d) => DurationOutcome::Known(d),
+                None => duration::probe_duration(file),
+            };
+            let classification = mpv::classify(
+                position,
+                duration_outcome,
+                resume_seconds,
+                completion_remaining_seconds,
+            );
+            Some(classification.action)
+        }
+    }
+}
+
 /// Runs the full reconcile pass over every series that either already has a
-/// `state.toml` record or has fresh real `watch_later` activity under a
-/// tracked root. Mutates `state` in place; the caller decides whether/how to
-/// persist it (comparing before/after, same pattern every other module in
-/// this codebase uses of leaving I/O to the caller).
+/// `state.toml` record or has fresh real activity (from either candidate
+/// source) under a tracked root. Mutates `state` in place; the caller
+/// decides whether/how to persist it (comparing before/after, same pattern
+/// every other module in this codebase uses of leaving I/O to the caller).
 pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
+    let script_log_dir = script_log::mpv_log_dir().ok();
+    reconcile_with_script_log_dir(config, state, home, script_log_dir.as_deref())
+}
+
+/// The actual reconcile implementation, parameterized on the script-log
+/// directory to scan — split out from [`reconcile`] purely for testability:
+/// unlike `watch_later_dir`, the script-log directory is deliberately not a
+/// `config.toml` field (CLAUDE.md: "No new config field for the script-log
+/// directory"), so tests can't redirect it the way `mpv.rs`'s tests redirect
+/// `watch_later_dir`. This function stays private; `reconcile` is the only
+/// public entry point, always resolving the real
+/// `$XDG_DATA_HOME/tsuzuki/mpv-log` via [`script_log::mpv_log_dir`].
+fn reconcile_with_script_log_dir(
+    config: &Config,
+    state: &mut State,
+    home: Option<&Path>,
+    script_log_dir: Option<&Path>,
+) -> ReconcileOutcome {
     let scan = mpv::scan_watch_later(config, home);
+    let script_entries = match script_log_dir {
+        Some(dir) => script_log::scan_script_log(dir, &config.roots.paths, home),
+        None => Vec::new(),
+    };
     let resume_seconds = config.thresholds.resume_seconds;
     let completion_remaining_seconds = config.thresholds.completion_remaining_seconds;
+
+    let candidates = merge_candidates(scan.entries, script_entries, home);
 
     let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
     for record in &state.series {
         pairs.insert((record.root.clone(), record.name.clone()));
     }
-    for entry in &scan.entries {
-        if entry.position_seconds < resume_seconds as f64 {
+    for candidate in candidates.values() {
+        if !candidate.is_real_activity(resume_seconds) {
             continue;
         }
-        if let Some(pair) = classify_root_and_series(config, &entry.source_path, home) {
+        if let Some(pair) = classify_root_and_series(config, candidate.source_path(), home) {
             pairs.insert(pair);
         }
     }
@@ -83,7 +247,7 @@ pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> Rec
             state,
             &root,
             &name,
-            &scan.entries,
+            &candidates,
             resume_seconds,
             completion_remaining_seconds,
             home,
@@ -187,7 +351,7 @@ fn reconcile_one_series(
     state: &mut State,
     root: &str,
     name: &str,
-    entries: &[WatchLaterEntry],
+    candidates: &HashMap<PathBuf, Candidate>,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
     home: Option<&Path>,
@@ -281,26 +445,21 @@ fn reconcile_one_series(
     let mut any_completed_found = false;
     for (idx, file) in ordered.iter().enumerate().skip(start_index) {
         let real_file = normalize(file, home);
-        let Some(entry) = entries
-            .iter()
-            .find(|e| normalize(&e.source_path, home) == real_file)
-        else {
+        let Some(candidate) = candidates.get(&real_file) else {
             continue;
         };
-        if entry.position_seconds < resume_seconds as f64 {
-            continue;
-        }
-        let duration_outcome = duration::probe_duration(file);
-        let classification = mpv::classify(
-            entry.position_seconds,
-            duration_outcome,
+        let Some(action) = classify_candidate(
+            candidate,
+            file,
             resume_seconds,
             completion_remaining_seconds,
-        );
-        if matches!(classification.action, PlaybackAction::Completed) {
+        ) else {
+            continue;
+        };
+        if matches!(action, PlaybackAction::Completed) {
             any_completed_found = true;
         }
-        if let PlaybackAction::Resume(pos) = classification.action {
+        if let PlaybackAction::Resume(pos) = action {
             best = Some((idx, pos));
         }
     }
@@ -324,7 +483,7 @@ fn reconcile_one_series(
                     name,
                     &expanded_root,
                     &ordered,
-                    entries,
+                    candidates,
                     start_index,
                     resume_seconds,
                     completion_remaining_seconds,
@@ -404,7 +563,7 @@ fn apply_completion_advance(
     name: &str,
     expanded_root: &Path,
     ordered: &[PathBuf],
-    entries: &[WatchLaterEntry],
+    candidates: &HashMap<PathBuf, Candidate>,
     start_index: usize,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
@@ -421,24 +580,23 @@ fn apply_completion_advance(
         cursor += 1;
 
         let real_file = normalize(&ordered[cursor], home);
-        let entry = entries
-            .iter()
-            .find(|e| normalize(&e.source_path, home) == real_file);
-        let still_completed = match entry {
-            Some(e) if e.position_seconds >= resume_seconds as f64 => {
-                let duration_outcome = duration::probe_duration(&ordered[cursor]);
-                let classification = mpv::classify(
-                    e.position_seconds,
-                    duration_outcome,
+        let still_completed = match candidates.get(&real_file) {
+            Some(candidate) => matches!(
+                classify_candidate(
+                    candidate,
+                    &ordered[cursor],
                     resume_seconds,
-                    completion_remaining_seconds,
-                );
-                matches!(classification.action, PlaybackAction::Completed)
-            }
-            // No entry at all, or a below-threshold (noise) one — neither
-            // is completion evidence for this episode, so the walk stops
-            // here rather than treating a stray noise reading as a signal.
-            _ => false,
+                    completion_remaining_seconds
+                ),
+                Some(PlaybackAction::Completed)
+            ),
+            // No entry at all — not completion evidence for this episode,
+            // so the walk stops here rather than treating absence as a
+            // signal. (`classify_candidate` itself already collapses a
+            // below-threshold/no-position reading to `None`, so a present
+            // but non-completing candidate falls through to `false` here
+            // too, via the outer `matches!` on `Some(Completed)`.)
+            None => false,
         };
 
         if !still_completed {
@@ -466,6 +624,7 @@ mod tests {
     use crate::config::Config;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn default_config(root: &Path) -> Config {
@@ -500,6 +659,36 @@ mod tests {
         config.mpv.watch_later_dir = dir.to_string_lossy().into_owned();
     }
 
+    /// Writes a `tsuzuki.lua`-style script-log entry file for `source`
+    /// inside `log_dir`, named distinctly from any other entry written in
+    /// the same test (mpv itself names these by an 8-hex-char djb2 hash;
+    /// the name doesn't matter to the reader, only its contents).
+    fn write_script_entry(
+        log_dir: &Path,
+        entry_name: &str,
+        source: &Path,
+        duration: Option<f64>,
+        position: Option<f64>,
+        reason: &str,
+    ) {
+        fs::create_dir_all(log_dir).unwrap();
+        fs::write(
+            log_dir.join(entry_name),
+            format!(
+                "# {}\nduration={}\nposition={}\nreason={reason}\n",
+                source.display(),
+                duration.map(|d| d.to_string()).unwrap_or_default(),
+                position.map(|p| p.to_string()).unwrap_or_default(),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn set_mtime(path: &Path, when: SystemTime) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
     #[test]
     fn a_noise_reading_creates_no_record() {
         let dir = tempdir().unwrap();
@@ -515,7 +704,7 @@ mod tests {
         with_watch_later_override(&mut config, &watch_later);
         let mut state = State::default();
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         assert!(
             state.series.is_empty(),
@@ -551,7 +740,7 @@ mod tests {
         // reopen — which would clobber the real 900s if propagated blindly.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -578,7 +767,7 @@ mod tests {
         // No entries at all for ep02 (absent) and nothing real for ep01.
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         assert!(state.series.is_empty());
     }
@@ -614,7 +803,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep03.mkv");
@@ -648,7 +837,7 @@ mod tests {
             series: vec![original.clone()],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         assert_eq!(
             state.series,
@@ -671,7 +860,7 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep02.mkv"), 500.0);
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -699,13 +888,13 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let updated_at_after_first_call = state
             .find(&root.to_string_lossy(), "Monster")
             .unwrap()
             .updated_at;
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.updated_at, updated_at_after_first_call,
@@ -751,8 +940,8 @@ mod tests {
         };
 
         // Two reconcile calls in a row, mpv's own file never touched again.
-        reconcile(&config, &mut state, None);
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "One Piece").unwrap();
         assert_eq!(record.status, Status::Dropped);
@@ -785,7 +974,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -822,7 +1011,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Paused);
@@ -868,7 +1057,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -910,7 +1099,7 @@ mod tests {
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 1.5);
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -955,7 +1144,7 @@ mod tests {
         // Ordinary update, establishes the real baseline this episode
         // needs before absence/Completed can ever mean anything.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 1.5);
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.status, Status::InProgress);
@@ -965,7 +1154,7 @@ mod tests {
         // so the record must auto-Drop, not freeze and not just update its
         // own position in place.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
@@ -993,7 +1182,7 @@ mod tests {
         // already-tested reconcile path (start_index = 0, whole-series
         // scan for genuinely new activity) — this confirms the auto-drop
         // transition doesn't leave anything that path would misinterpret.
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Dropped);
         assert_eq!(record.position_seconds, 1.5);
@@ -1039,7 +1228,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 1100.0);
@@ -1083,7 +1272,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 600.0);
@@ -1125,7 +1314,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(
@@ -1176,7 +1365,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.current_relative_path, "Monster/ep03.mkv",
@@ -1237,7 +1426,7 @@ mod tests {
             }],
         };
 
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1271,7 +1460,7 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         assert_eq!(state.series.len(), 1);
         let record = &state.series[0];
@@ -1332,7 +1521,7 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile(&config, &mut state, None);
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         let symlinked = state.find(&root.to_string_lossy(), "Dungeon Meshi");
         assert!(
@@ -1366,11 +1555,509 @@ mod tests {
             .into_owned();
 
         let mut state = State::default();
-        let outcome = reconcile(&config, &mut state, None);
+        let outcome = reconcile_with_script_log_dir(&config, &mut state, None, None);
 
         assert!(matches!(
             outcome.warning,
             Some(ScanWarning::WatchLaterDirNotFound(_))
         ));
+    }
+
+    // --- Phase 6: script-log candidate source ---
+    //
+    // `classify_candidate`/`merge_candidates` are exercised directly first
+    // (mirroring `mpv.rs`'s own precedent of testing `merge_freshest_wins`
+    // below the `scan_*` layer) before the full end-to-end `reconcile()`
+    // behavior tests.
+
+    #[test]
+    fn classify_candidate_script_eof_is_completed_regardless_of_position_or_duration() {
+        // Decision 3's central claim: an `eof` reading never goes through
+        // the completion_remaining_seconds proximity check at all — not
+        // even when the raw position/duration values would clearly say
+        // otherwise (here: barely any time watched, duration unknown).
+        let candidate = Candidate::ScriptLog(ScriptLogEntry {
+            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
+            duration: None,
+            position: Some(3.0),
+            reason: "eof".to_string(),
+            mtime: SystemTime::now(),
+        });
+
+        let action = classify_candidate(&candidate, Path::new("/Anime/Show/ep01.mkv"), 120, 180);
+        assert_eq!(action, Some(PlaybackAction::Completed));
+    }
+
+    #[test]
+    fn classify_candidate_script_non_eof_below_resume_threshold_is_no_signal() {
+        let candidate = Candidate::ScriptLog(ScriptLogEntry {
+            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
+            duration: None,
+            position: Some(45.0),
+            reason: "stop".to_string(),
+            mtime: SystemTime::now(),
+        });
+
+        let action = classify_candidate(
+            &candidate,
+            Path::new("/definitely/does/not/exist/ep01.mkv"),
+            120,
+            180,
+        );
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn classify_candidate_script_non_eof_with_no_position_is_no_signal() {
+        let candidate = Candidate::ScriptLog(ScriptLogEntry {
+            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
+            duration: None,
+            position: None,
+            reason: "error".to_string(),
+            mtime: SystemTime::now(),
+        });
+
+        let action = classify_candidate(
+            &candidate,
+            Path::new("/definitely/does/not/exist/ep01.mkv"),
+            120,
+            180,
+        );
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn classify_candidate_script_non_eof_uses_its_own_duration_not_a_probe() {
+        // duration=1000, position=900 -> remaining=100, under the 180s
+        // completion threshold -> Completed. The file path given doesn't
+        // exist on disk at all, proving the script's own `duration` field
+        // was used directly rather than falling through to
+        // `duration::probe_duration`, which would fail (Unknown) on a
+        // nonexistent file and force a `Resume` classification instead.
+        let candidate = Candidate::ScriptLog(ScriptLogEntry {
+            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
+            duration: Some(1000.0),
+            position: Some(900.0),
+            reason: "stop".to_string(),
+            mtime: SystemTime::now(),
+        });
+
+        let action = classify_candidate(
+            &candidate,
+            Path::new("/definitely/does/not/exist/ep01.mkv"),
+            120,
+            180,
+        );
+        assert_eq!(action, Some(PlaybackAction::Completed));
+    }
+
+    #[test]
+    fn merge_candidates_watch_later_only_is_selected() {
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let watch_later = vec![WatchLaterEntry {
+            source_path: path.clone(),
+            position_seconds: 500.0,
+            mtime: SystemTime::now(),
+        }];
+
+        let merged = merge_candidates(watch_later, Vec::new(), None);
+        assert!(matches!(
+            merged.get(&normalize(&path, None)),
+            Some(Candidate::WatchLater(_))
+        ));
+    }
+
+    #[test]
+    fn merge_candidates_script_only_is_selected() {
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let script_log = vec![ScriptLogEntry {
+            source_path: path.clone(),
+            duration: None,
+            position: Some(500.0),
+            reason: "stop".to_string(),
+            mtime: SystemTime::now(),
+        }];
+
+        let merged = merge_candidates(Vec::new(), script_log, None);
+        assert!(matches!(
+            merged.get(&normalize(&path, None)),
+            Some(Candidate::ScriptLog(_))
+        ));
+    }
+
+    #[test]
+    fn merge_candidates_watch_later_strictly_fresher_wins() {
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let now = SystemTime::now();
+
+        let watch_later = vec![WatchLaterEntry {
+            source_path: path.clone(),
+            position_seconds: 111.0,
+            mtime: now,
+        }];
+        let script_log = vec![ScriptLogEntry {
+            source_path: path.clone(),
+            duration: None,
+            position: Some(222.0),
+            reason: "stop".to_string(),
+            mtime: now - Duration::from_secs(60),
+        }];
+
+        let merged = merge_candidates(watch_later, script_log, None);
+        match merged.get(&normalize(&path, None)) {
+            Some(Candidate::WatchLater(e)) => assert_eq!(e.position_seconds, 111.0),
+            other => {
+                panic!("expected the strictly fresher watch_later entry to win, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn merge_candidates_script_strictly_fresher_wins() {
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let now = SystemTime::now();
+
+        let watch_later = vec![WatchLaterEntry {
+            source_path: path.clone(),
+            position_seconds: 111.0,
+            mtime: now - Duration::from_secs(60),
+        }];
+        let script_log = vec![ScriptLogEntry {
+            source_path: path.clone(),
+            duration: None,
+            position: Some(222.0),
+            reason: "stop".to_string(),
+            mtime: now,
+        }];
+
+        let merged = merge_candidates(watch_later, script_log, None);
+        match merged.get(&normalize(&path, None)) {
+            Some(Candidate::ScriptLog(e)) => assert_eq!(e.position, Some(222.0)),
+            other => panic!("expected the strictly fresher script entry to win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_candidates_on_an_exact_mtime_tie_the_script_entry_wins() {
+        let path = PathBuf::from("/Anime/Show/ep01.mkv");
+        let now = SystemTime::now();
+
+        let watch_later = vec![WatchLaterEntry {
+            source_path: path.clone(),
+            position_seconds: 111.0,
+            mtime: now,
+        }];
+        let script_log = vec![ScriptLogEntry {
+            source_path: path.clone(),
+            duration: None,
+            position: Some(222.0),
+            reason: "stop".to_string(),
+            mtime: now,
+        }];
+
+        let merged = merge_candidates(watch_later, script_log, None);
+        match merged.get(&normalize(&path, None)) {
+            Some(Candidate::ScriptLog(e)) => assert_eq!(e.position, Some(222.0)),
+            other => panic!("expected the script entry to win an exact mtime tie, got {other:?}"),
+        }
+    }
+
+    // --- End-to-end `reconcile()` behavior, both candidate sources ---
+
+    #[test]
+    fn script_only_eof_on_the_last_episode_auto_drops_flagship() {
+        // The flagship test: a script-log-only `eof` reading, with zero
+        // watch_later trace at all (mpv's own resume-playback deleted the
+        // bookmark on load, exactly as it always does — CLAUDE.md's
+        // documented blind spot), on a series' actual LAST episode. Before
+        // Phase 6, this scenario was permanently unrecoverable: absence
+        // alone is never proof of anything, so the record would freeze at
+        // its old position forever with no way to ever confirm completion.
+        // With the script installed, the direct `eof` signal now closes
+        // that gap completely — auto-Drop fires exactly as it would have
+        // for an ordinary duration-proximity `Completed` reading.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry-ep02",
+            &series_path.join("ep02.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+        );
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::InProgress,
+                current_relative_path: "Monster/ep02.mkv".to_string(),
+                position_seconds: 900.0,
+                episode_number: Some(2),
+                updated_at: 1,
+            }],
+        };
+
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.status,
+            Status::Dropped,
+            "a script-only eof reading on the series' last episode must auto-Drop it"
+        );
+        // Per the pause/drop-never-zeroes-position rule (CLAUDE.md),
+        // extended to auto-drop: the stored position/path are untouched.
+        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
+        assert_eq!(record.position_seconds, 900.0);
+    }
+
+    #[test]
+    fn script_only_eof_on_a_non_last_episode_advances_the_cursor() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+        touch(&series_path.join("ep03.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // ep01: script-only eof, zero watch_later trace. ep02/ep03: nothing
+        // at all from either source (genuinely blank).
+        write_script_entry(
+            &script_log_dir,
+            "entry-ep01",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1418.0),
+            "eof",
+        );
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::InProgress,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 1100.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
+        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.status, Status::InProgress);
+    }
+
+    #[test]
+    fn script_reason_stop_with_a_real_position_is_treated_as_an_ordinary_resume() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            None,
+            Some(400.0),
+            "stop",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 400.0);
+    }
+
+    #[test]
+    fn script_reason_stop_below_resume_threshold_creates_no_record() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // 45s is below the default 120s resume_seconds threshold.
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            None,
+            Some(45.0),
+            "stop",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        assert!(
+            state.series.is_empty(),
+            "a sub-resume_seconds script reading must never create a record"
+        );
+    }
+
+    #[test]
+    fn script_reason_redirect_is_discarded_and_never_becomes_a_candidate() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // A large, real-looking position on a `redirect` entry must still
+        // never surface as activity.
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1000.0),
+            Some(950.0),
+            "redirect",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        assert!(
+            state.series.is_empty(),
+            "a redirect entry must never become a candidate, regardless of its position"
+        );
+    }
+
+    #[test]
+    fn a_malformed_script_log_file_alongside_a_valid_one_does_not_abort_the_scan() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&script_log_dir).unwrap();
+        fs::write(
+            script_log_dir.join("malformed"),
+            "garbage, not an entry at all\n",
+        )
+        .unwrap();
+        write_script_entry(
+            &script_log_dir,
+            "valid",
+            &series_path.join("ep01.mkv"),
+            None,
+            Some(400.0),
+            "quit",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.position_seconds, 400.0,
+            "the valid entry must still be picked up despite a malformed sibling file"
+        );
+    }
+
+    #[test]
+    fn reconcile_twice_against_an_unchanged_script_log_entry_reflecting_a_prior_drop_is_a_no_op() {
+        // Mirrors the existing watch_later regression test for the same
+        // real bug class (drop never zeroing stored position, so a later
+        // reconcile mustn't manufacture a false diff against its own
+        // baseline) — but for a script-log-sourced reading. Script-log
+        // entries persist forever on disk (mpv never deletes them, unlike
+        // watch_later's deletion-on-load), so this is the more likely real
+        // shape of the bug going forward: the same eof entry sitting there,
+        // completely unchanged, on every single future invocation.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("One Piece");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1418.0),
+            "eof",
+        );
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "One Piece".to_string(),
+                status: Status::Dropped,
+                current_relative_path: "One Piece/ep01.mkv".to_string(),
+                position_seconds: 300.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
+        // Two reconcile calls in a row, the script-log entry never touched
+        // again in between.
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "One Piece").unwrap();
+        assert_eq!(
+            record.status,
+            Status::Dropped,
+            "the prior drop must not be undone"
+        );
+        assert_eq!(record.updated_at, 1, "no genuine change occurred");
+        assert_eq!(record.position_seconds, 300.0);
+    }
+
+    #[test]
+    fn set_mtime_helper_actually_changes_mtime() {
+        // Sanity check for the `set_mtime` helper itself (used above by the
+        // merge_candidates tie/freshness tests) — not a behavioral test of
+        // reconcile.rs, just a guard against the helper silently no-oping.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f");
+        fs::write(&path, b"x").unwrap();
+        let when = SystemTime::now() - Duration::from_secs(3600);
+        set_mtime(&path, when);
+        let got = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(got <= SystemTime::now() - Duration::from_secs(3000));
     }
 }

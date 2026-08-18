@@ -15,6 +15,7 @@
 local last_time_pos = nil
 local current_duration = nil
 local current_path = nil
+local log_dir_created = false
 
 -- djb2, pure integer arithmetic only (+, *, %) -- deliberately avoids
 -- Lua 5.3+-only bitwise operators and the 5.1/5.2 bit/bit32 libraries,
@@ -49,7 +50,10 @@ local function write_entry(path, duration, position, reason)
     if dir == nil then
         return
     end
-    os.execute("mkdir -p " .. shell_quote(dir))
+    if not log_dir_created then
+        os.execute("mkdir -p " .. shell_quote(dir))
+        log_dir_created = true
+    end
 
     local name = hash_path(path)
     local tmp_path = dir .. "/." .. name .. ".tmp"

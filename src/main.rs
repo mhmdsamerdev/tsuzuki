@@ -10,6 +10,7 @@ mod pause_drop;
 mod picker;
 mod reconcile;
 mod roots;
+mod script_log;
 mod series;
 mod state;
 mod target;
