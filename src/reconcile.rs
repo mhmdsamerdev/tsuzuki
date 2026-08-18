@@ -200,29 +200,26 @@ fn classify_candidate(
 /// decides whether/how to persist it (comparing before/after, same pattern
 /// every other module in this codebase uses of leaving I/O to the caller).
 pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
-    let script_log_dir = script_log::mpv_log_dir().ok();
-    reconcile_with_script_log_dir(config, state, home, script_log_dir.as_deref())
+    let script_log_dirs = script_log::mpv_log_dirs(home);
+    reconcile_with_script_log_dirs(config, state, home, &script_log_dirs)
 }
 
 /// The actual reconcile implementation, parameterized on the script-log
-/// directory to scan — split out from [`reconcile`] purely for testability:
-/// unlike `watch_later_dir`, the script-log directory is deliberately not a
-/// `config.toml` field (CLAUDE.md: "No new config field for the script-log
-/// directory"), so tests can't redirect it the way `mpv.rs`'s tests redirect
-/// `watch_later_dir`. This function stays private; `reconcile` is the only
-/// public entry point, always resolving the real
-/// `$XDG_DATA_HOME/tsuzuki/mpv-log` via [`script_log::mpv_log_dir`].
-fn reconcile_with_script_log_dir(
+/// directories to scan — split out from [`reconcile`] purely for
+/// testability: unlike `watch_later_dir`, the script-log directory is
+/// deliberately not a `config.toml` field (CLAUDE.md: "No new config field
+/// for the script-log directory"), so tests can't redirect it the way
+/// `mpv.rs`'s tests redirect `watch_later_dir`. This function stays
+/// private; `reconcile` is the only public entry point, always resolving
+/// the real candidate directories via [`script_log::mpv_log_dirs`].
+fn reconcile_with_script_log_dirs(
     config: &Config,
     state: &mut State,
     home: Option<&Path>,
-    script_log_dir: Option<&Path>,
+    script_log_dirs: &[PathBuf],
 ) -> ReconcileOutcome {
     let scan = mpv::scan_watch_later(config, home);
-    let script_entries = match script_log_dir {
-        Some(dir) => script_log::scan_script_log(dir, &config.roots.paths, home),
-        None => Vec::new(),
-    };
+    let script_entries = script_log::scan_script_log(script_log_dirs, &config.roots.paths, home);
     let resume_seconds = config.thresholds.resume_seconds;
     let completion_remaining_seconds = config.thresholds.completion_remaining_seconds;
 
@@ -740,7 +737,7 @@ mod tests {
         with_watch_later_override(&mut config, &watch_later);
         let mut state = State::default();
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         assert!(
             state.series.is_empty(),
@@ -776,7 +773,7 @@ mod tests {
         // reopen — which would clobber the real 900s if propagated blindly.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -803,7 +800,7 @@ mod tests {
         // No entries at all for ep02 (absent) and nothing real for ep01.
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         assert!(state.series.is_empty());
     }
@@ -839,7 +836,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep03.mkv");
@@ -873,7 +870,7 @@ mod tests {
             series: vec![original.clone()],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         assert_eq!(
             state.series,
@@ -896,7 +893,7 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep02.mkv"), 500.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -924,13 +921,13 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let updated_at_after_first_call = state
             .find(&root.to_string_lossy(), "Monster")
             .unwrap()
             .updated_at;
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.updated_at, updated_at_after_first_call,
@@ -976,8 +973,8 @@ mod tests {
         };
 
         // Two reconcile calls in a row, mpv's own file never touched again.
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "One Piece").unwrap();
         assert_eq!(record.status, Status::Dropped);
@@ -1010,7 +1007,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -1047,7 +1044,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Paused);
@@ -1093,7 +1090,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1135,7 +1132,7 @@ mod tests {
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 1.5);
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1180,7 +1177,7 @@ mod tests {
         // Ordinary update, establishes the real baseline this episode
         // needs before absence/Completed can ever mean anything.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 1.5);
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.status, Status::InProgress);
@@ -1190,7 +1187,7 @@ mod tests {
         // so the record must auto-Drop, not freeze and not just update its
         // own position in place.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
@@ -1218,7 +1215,7 @@ mod tests {
         // already-tested reconcile path (start_index = 0, whole-series
         // scan for genuinely new activity) — this confirms the auto-drop
         // transition doesn't leave anything that path would misinterpret.
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Dropped);
         assert_eq!(record.position_seconds, 1.5);
@@ -1264,7 +1261,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 1100.0);
@@ -1308,7 +1305,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 600.0);
@@ -1350,7 +1347,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(
@@ -1401,7 +1398,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.current_relative_path, "Monster/ep03.mkv",
@@ -1462,7 +1459,7 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1496,7 +1493,7 @@ mod tests {
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         assert_eq!(state.series.len(), 1);
         let record = &state.series[0];
@@ -1557,7 +1554,7 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let symlinked = state.find(&root.to_string_lossy(), "Dungeon Meshi");
         assert!(
@@ -1591,7 +1588,7 @@ mod tests {
             .into_owned();
 
         let mut state = State::default();
-        let outcome = reconcile_with_script_log_dir(&config, &mut state, None, None);
+        let outcome = reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         assert!(matches!(
             outcome.warning,
@@ -1836,7 +1833,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state
             .find(&root.to_string_lossy(), "Monster")
@@ -1878,7 +1880,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state
             .find(&root.to_string_lossy(), "Monster")
@@ -1912,7 +1919,7 @@ mod tests {
         with_watch_later_override(&mut config, &watch_later);
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, None);
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
         let record = state
             .find(&root.to_string_lossy(), "Monster")
@@ -1960,7 +1967,12 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -2014,7 +2026,12 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -2064,7 +2081,12 @@ mod tests {
             }],
         };
 
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
@@ -2093,7 +2115,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -2123,7 +2150,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         assert!(
             state.series.is_empty(),
@@ -2154,7 +2186,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         assert!(
             state.series.is_empty(),
@@ -2189,7 +2226,12 @@ mod tests {
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -2241,8 +2283,18 @@ mod tests {
 
         // Two reconcile calls in a row, the script-log entry never touched
         // again in between.
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
-        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
 
         let record = state.find(&root.to_string_lossy(), "One Piece").unwrap();
         assert_eq!(

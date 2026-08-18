@@ -153,24 +153,48 @@ mpv's `scripts/` directory is exactly as launcher-independent as
 `watch_later` itself — mpv loads every installed script for every
 invocation regardless of what launched it, and the script only ever writes
 small text files to its own log directory (`$XDG_DATA_HOME/tsuzuki/mpv-log`,
-atomically, temp-file-then-rename). No IPC socket, no background process,
-nothing added to this section's own "never holds an ongoing connection to
-an already-running mpv instance" constraint. Reading this log is
-`script_log.rs`'s job — its scan shape (parse-one-entry, skip malformed/
-`reason=="redirect"` entries without aborting, filter to tracked roots via
-the same symlink-aware helper `watch_later` parsing already uses) mirrors
-`mpv.rs`'s own `scan_watch_later` deliberately.
+as *mpv's own process* resolves it, atomically, temp-file-then-rename). No
+IPC socket, no background process, nothing added to this section's own
+"never holds an ongoing connection to an already-running mpv instance"
+constraint. Reading this log is `script_log.rs`'s job — its scan shape
+(parse-one-entry, skip malformed/`reason=="redirect"` entries without
+aborting, filter to tracked roots via the same symlink-aware helper
+`watch_later` parsing already uses) mirrors `mpv.rs`'s own
+`scan_watch_later` deliberately.
 
 **Strictly opt-in, never a hard requirement.** Installing it is a manual,
 documented, one-time step — the same shape as the existing
 `write-filename-in-watch-later-config=yes` prerequisite, not a new command
 surface. A user who never installs it keeps the exact behavior shipped
 before this script existed; nothing regresses, nothing new is required for
-the tool to keep working. The log directory itself is fixed
-(`$XDG_DATA_HOME/tsuzuki/mpv-log`, entirely Tsuzuki-owned) and deliberately
-**not** a `config.toml` field — unlike `watch_later_dir`, there's no
-install-method variance to work around here, so there's nothing for a user
-to need to override.
+the tool to keep working.
+
+**The directory name is fixed and Tsuzuki-owned — never a `config.toml`
+field — but which real directory it resolves to does have install-method
+variance after all, exactly like `watch_later`.** This was gotten wrong
+once, at Phase 6's original decision ("unlike `watch_later`, there's no
+install-method variance to work around here"), and corrected only after a
+live report of "no logs ever appear" against a genuine Flatpak `io.mpv.Mpv`
+install. Verified directly (`flatpak run --command=sh io.mpv.Mpv -c 'echo
+$XDG_DATA_HOME'`): Flatpak overrides `XDG_DATA_HOME` for every sandboxed
+app to point into that app's own private per-app data directory
+(`~/.var/app/io.mpv.Mpv/data`), never the real `~/.local/share`. The
+script reading `os.getenv("XDG_DATA_HOME")` is exactly correct from inside
+the sandbox — the bug was on Tsuzuki's side, assuming its own
+unsandboxed `dirs::data_dir()` resolution and mpv's sandboxed one always
+agree. (The Flatpak `host:ro` permission also rules out "have the script
+use `$HOME` instead" as a fix: that mount is read-only inside the
+sandbox, confirmed directly.) Fixed the same way `watch_later`'s own
+install-method variance already is: `script_log::mpv_log_dirs()` returns a
+small candidate list (native + the verified Flatpak remap,
+`~/.var/app/io.mpv.Mpv/data/tsuzuki/mpv-log`), merged freshest-file-wins
+across directories exactly like `watch_later`'s own cross-directory merge.
+Still **not** a `config.toml` field — a fixed candidate table matched
+against install method, same as `watch_later`'s own table, not a
+user-configured override. No Snap candidate was added: Snap's own
+`XDG_DATA_HOME` remapping behavior for a confined mpv hasn't been verified
+against a real install, and candidate paths don't get added on a guess
+(§2) — revisit if a Snap report ever surfaces the same way this one did.
 
 **An independent candidate source, unioned with `watch_later` — not mere
 enrichment.** `reconcile.rs`'s candidate discovery scans both sources and

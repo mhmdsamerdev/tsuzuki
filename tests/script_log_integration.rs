@@ -5,15 +5,25 @@
 //! reading, with zero `watch_later` trace at all, closes the documented
 //! "clean binge leaves no trace" blind spot end-to-end, not just at the
 //! unit-test level. `reconcile.rs`'s own unit tests exercise the same claim
-//! via `reconcile_with_script_log_dir` against a fabricated directory
-//! (the script-log directory is deliberately not a `config.toml` field, so
-//! it can't be redirected the way `watch_later_dir` can be) — this test is
-//! what proves the *real* `$XDG_DATA_HOME/tsuzuki/mpv-log` resolution
-//! (`script_log::mpv_log_dir()`, via `dirs::data_dir()`) is wired correctly
+//! via `reconcile_with_script_log_dirs` against fabricated directories (the
+//! script-log directory is deliberately not a `config.toml` field, so it
+//! can't be redirected the way `watch_later_dir` can be) — this test is
+//! what proves the *real* candidate-directory resolution
+//! (`script_log::mpv_log_dirs()`, via `dirs::data_dir()`) is wired correctly
 //! end to end, spawning the real binary with an explicit `HOME` and both
 //! `XDG_*` overrides cleared, matching a normal user's shell — mirroring
 //! `tests/state_persistence.rs`'s own established pattern for this same
 //! reason.
+//!
+//! The second test below is the regression proof for a real, reported bug:
+//! a genuine Flatpak `io.mpv.Mpv` install has its own `XDG_DATA_HOME`
+//! remapped by the Flatpak sandbox to `~/.var/app/io.mpv.Mpv/data` (verified
+//! directly, not assumed), so `tsuzuki.lua` running under it writes entries
+//! to a completely different real directory than the one Tsuzuki itself
+//! (running unsandboxed, seeing the real `$HOME`) ever looked at. Before the
+//! fix, an entry sitting *only* at that Flatpak-remapped path was
+//! permanently invisible — this test fabricates an entry there and nowhere
+//! else, and confirms Tsuzuki still finds it.
 
 use std::fs;
 use std::path::Path;
@@ -114,5 +124,62 @@ updated_at = 1700000000
     assert!(
         state_contents.contains("900"),
         "the stored position must survive an auto-drop untouched:\n{state_contents}"
+    );
+}
+
+#[test]
+fn an_entry_only_at_the_flatpak_remapped_path_is_still_found() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let series_dir = home.join("Anime").join("Monster");
+    fs::create_dir_all(&series_dir).unwrap();
+    fs::File::create(series_dir.join("ep01.mkv")).unwrap();
+    fs::File::create(series_dir.join("ep02.mkv")).unwrap();
+
+    let add = run(home, &["add", "~/Anime"]);
+    assert!(add.status.success());
+
+    // The entry lands ONLY at the Flatpak-remapped path
+    // (~/.var/app/io.mpv.Mpv/data/tsuzuki/mpv-log) — nothing at the plain
+    // native ~/.local/share/tsuzuki/mpv-log path at all, reproducing the
+    // exact reported shape: a real Flatpak mpv install, script correctly
+    // writing, Tsuzuki's old single-fixed-path scan never looking in the
+    // right place.
+    let flatpak_log_dir = home.join(".var/app/io.mpv.Mpv/data/tsuzuki/mpv-log");
+    fs::create_dir_all(&flatpak_log_dir).unwrap();
+    fs::write(
+        flatpak_log_dir.join("deadbeef"),
+        format!(
+            "# {}\nduration=\nposition=400.000000\nreason=quit\n",
+            series_dir.join("ep01.mkv").display()
+        ),
+    )
+    .unwrap();
+
+    assert!(
+        !home.join(".local/share/tsuzuki/mpv-log").exists(),
+        "sanity check: the native mpv-log directory must not exist for this test to be valid"
+    );
+
+    let list = run(home, &["list"]);
+    assert!(
+        list.status.success(),
+        "list failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&list.stdout),
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_stdout.contains("in progress"),
+        "an entry only reachable via the Flatpak-remapped candidate must still be found, \
+         got: {list_stdout}"
+    );
+
+    let state_path = home.join(".local/share/tsuzuki/state.toml");
+    let state_contents = fs::read_to_string(&state_path).unwrap();
+    assert!(
+        state_contents.contains("400"),
+        "persisted state.toml contents:\n{state_contents}"
     );
 }
