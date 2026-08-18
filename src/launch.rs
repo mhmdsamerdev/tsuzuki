@@ -128,18 +128,31 @@ fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
     false
 }
 
-/// Spawns `resolved`'s program with `file` and `--start=<start_seconds>`
-/// appended, and immediately lets go — no `wait()`, no re-scan. A `Child`
-/// handle dropped without `wait()` does not terminate the process; this is
-/// exactly the fire-and-forget behavior CLAUDE.md specifies. `stdout`/
-/// `stderr`/`stdin` are set to `null` so mpv's own console UI doesn't
-/// interleave with Tsuzuki's, since Tsuzuki has already returned control to
-/// the shell by the time mpv would print anything.
+/// Spawns `resolved`'s program with `--start=<start_seconds>` scoped to
+/// `file` via mpv's per-file option braces (`--{ --start=… file --}`), and
+/// immediately lets go — no `wait()`, no re-scan. A `Child` handle dropped
+/// without `wait()` does not terminate the process; this is exactly the
+/// fire-and-forget behavior CLAUDE.md specifies. `stdout`/`stderr`/`stdin`
+/// are set to `null` so mpv's own console UI doesn't interleave with
+/// Tsuzuki's, since Tsuzuki has already returned control to the shell by the
+/// time mpv would print anything.
+///
+/// The braces matter: a bare trailing `--start=` is a command-line option,
+/// which mpv treats as a session-wide default rather than a property of
+/// just this file — so once mpv advances past `file` on its own (EOF
+/// auto-advance, an autoload script, `playlist-next`), the *next* file
+/// would silently inherit the same start offset. Scoping `--start` inside
+/// `--{ --}` attaches it only to the enclosed playlist entry; anything
+/// loaded afterward falls back to mpv's normal default (0). No shell sits
+/// between this and `execve`, so `--{`/`--}` need no escaping here despite
+/// the mpv manual's warning about that for interactive shell use.
 fn spawn(resolved: &ResolvedMpv, file: &Path, start_seconds: f64) -> io::Result<()> {
     Command::new(&resolved.program)
         .args(&resolved.base_args)
-        .arg(file)
+        .arg("--{")
         .arg(format!("--start={start_seconds}"))
+        .arg(file)
+        .arg("--}")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -289,5 +302,50 @@ mod tests {
         };
         let result = spawn(&resolved, Path::new("/x.mkv"), 0.0);
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_is_scoped_to_the_file_with_per_file_option_braces() {
+        // Regression test for the dogfood-found bug: a bare trailing
+        // `--start=` is a session-wide default in mpv, so it silently
+        // leaked onto whatever file mpv played next (autoload, EOF
+        // auto-advance, playlist-next). Wrapping it in `--{ --}` scopes it
+        // to just the one file passed here. Uses a fake "mpv" shell script
+        // that dumps its own argv, since this is the one property that
+        // can't be checked by inspecting `Command` without actually
+        // spawning something.
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let argv_out = dir.path().join("argv.txt");
+        let fake_mpv = dir.path().join("mpv");
+        fs::write(
+            &fake_mpv,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", argv_out.display()),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&fake_mpv).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_mpv, perms).unwrap();
+
+        let resolved = ResolvedMpv {
+            program: fake_mpv.to_string_lossy().to_string(),
+            base_args: Vec::new(),
+        };
+        spawn(&resolved, Path::new("/x.mkv"), 42.5).unwrap();
+
+        // Give the fake script a moment to run and write its output.
+        for _ in 0..100 {
+            if argv_out.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let captured = fs::read_to_string(&argv_out).unwrap();
+        let args: Vec<&str> = captured.lines().collect();
+        assert_eq!(args, vec!["--{", "--start=42.5", "/x.mkv", "--}"]);
     }
 }
