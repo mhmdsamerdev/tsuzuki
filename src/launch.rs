@@ -85,23 +85,33 @@ pub fn resolve_mpv_command(
 }
 
 /// True if an executable named `mpv` exists somewhere on `$PATH` — a plain
-/// filesystem check, not a spawn. Checks the executable permission bit, not
-/// just file presence: `is_file()` alone would report success for a
-/// non-executable file that merely happens to be named `mpv`, which would
-/// then only fail — still cleanly, as a typed `Spawn` error, never a panic —
-/// at actual launch time instead of being correctly rejected during
-/// resolution. The permission check is still a single `stat` call, not a
-/// spawn, so it stays exactly as cheap as CLAUDE.md's "cheap existence
-/// check" requires.
-fn native_mpv_on_path() -> bool {
+/// filesystem check, not a spawn. `pub(crate)` so `doctor.rs` can reuse the
+/// exact same cheap-existence-check mechanism for its own mpv-availability
+/// check, rather than a second detection path.
+pub(crate) fn native_mpv_on_path() -> bool {
+    program_on_path("mpv")
+}
+
+/// True if an executable named `name` exists somewhere on `$PATH` — the
+/// general form `native_mpv_on_path` (fixed to `"mpv"`) and `doctor.rs`'s own
+/// `flatpak` / configured-`command_override` checks both build on.
+pub(crate) fn program_on_path(name: &str) -> bool {
     let Some(path_var) = std::env::var_os("PATH") else {
         return false;
     };
-    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join("mpv")))
+    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(name)))
 }
 
+/// Checks the executable permission bit, not just file presence: `is_file()`
+/// alone would report success for a non-executable file that merely happens
+/// to share the target name, which would then only fail — still cleanly, as
+/// a typed `Spawn` error, never a panic — at actual launch time instead of
+/// being correctly rejected during resolution. Still a single `stat` call,
+/// not a spawn, so it stays exactly as cheap as CLAUDE.md's "cheap existence
+/// check" requires. `pub(crate)` for the same reuse reason as
+/// `native_mpv_on_path`/`program_on_path`.
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -109,13 +119,14 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
 /// Known Flatpak app-install locations for `io.mpv.Mpv` — a plain directory
-/// existence check, not a `flatpak` invocation.
-fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
+/// existence check, not a `flatpak` invocation. `pub(crate)` so `doctor.rs`
+/// reuses this exact detection rather than a second one.
+pub(crate) fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
     const SYSTEM_INSTALL: &str = "/var/lib/flatpak/app/io.mpv.Mpv";
     if Path::new(SYSTEM_INSTALL).is_dir() {
         return true;
@@ -323,7 +334,10 @@ mod tests {
         let fake_mpv = dir.path().join("mpv");
         fs::write(
             &fake_mpv,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n", argv_out.display()),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+                argv_out.display()
+            ),
         )
         .unwrap();
         let mut perms = fs::metadata(&fake_mpv).unwrap().permissions();

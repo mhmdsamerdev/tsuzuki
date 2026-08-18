@@ -59,8 +59,9 @@ const CANDIDATES: &[WatchLaterCandidate] = &[
 /// The OS-default candidate `watch_later` directories, joined onto `home`.
 /// Selecting by `std::env::consts::OS` keeps this one call site as the only
 /// platform check — no per-call `cfg!(target_os = ...)` branching.
-#[allow(dead_code)]
-fn candidate_watch_later_dirs(home: &Path) -> Vec<PathBuf> {
+/// `pub(crate)` so `doctor.rs` can report per-candidate reachability without
+/// duplicating this table.
+pub(crate) fn candidate_watch_later_dirs(home: &Path) -> Vec<PathBuf> {
     CANDIDATES
         .iter()
         .filter(|c| c.os == std::env::consts::OS)

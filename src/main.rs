@@ -1,6 +1,7 @@
 mod anitomy;
 mod cli;
 mod config;
+mod doctor;
 mod duration;
 mod exclude;
 mod launch;
@@ -118,10 +119,10 @@ fn dispatch(
             }
             ExitCode::SUCCESS
         }
-        Command::Doctor => {
-            stub("doctor");
-            ExitCode::SUCCESS
-        }
+        Command::Doctor {
+            fix,
+            forget_orphans,
+        } => doctor_command(fix, forget_orphans, config, state_path, home),
     }
 }
 
@@ -730,6 +731,153 @@ fn drop_command(
     }
 }
 
+// --- Phase 7: doctor ---
+
+/// `tsuzuki doctor [--fix] [--forget-orphans]` — CLAUDE.md's Phase 7 full
+/// check list (1a-1i). Reconciles against mpv reality first, per the same
+/// "every state-touching command reconciles first" rule every other
+/// state-touching command already follows — `--fix --forget-orphans` is a
+/// real mutation of `state.toml`, so this counts. Prints every check's
+/// result to stdout (this report *is* the command's real output, not an
+/// incidental warning about something else — CLAUDE.md's stderr convention
+/// is for warnings a command surfaces about achieving some other goal, and
+/// doctor's entire goal is exactly this report). Exits non-zero only if at
+/// least one check is FAIL after any `--fix`/`--forget-orphans` mutation is
+/// applied — never on WARN alone.
+fn doctor_command(
+    fix: bool,
+    forget_orphans: bool,
+    config: &Config,
+    state_path: &Path,
+    home: Option<&Path>,
+) -> ExitCode {
+    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    if let Some(w) = &warning {
+        print_scan_warning(w);
+    }
+
+    let mut results = Vec::new();
+
+    let presence = doctor::MpvPresence {
+        native: launch::native_mpv_on_path(),
+        flatpak: launch::flatpak_mpv_installed(home),
+    };
+    let override_resolves = doctor::command_override_resolves(&config.mpv.command_override);
+    results.push(doctor::check_mpv_availability(
+        &config.mpv.command_override,
+        presence,
+        override_resolves,
+    ));
+
+    let installs = doctor::detected_mpv_installs(presence, home);
+    if installs.is_empty() {
+        results.push(doctor::CheckResult::warn(
+            "mpv.conf",
+            "skipped — no mpv install detected",
+        ));
+    } else {
+        for install in &installs {
+            results.push(doctor::check_mpv_conf(install));
+        }
+    }
+
+    results.push(doctor::check_watch_later(config, home));
+
+    let flatpak_cli_present = launch::program_on_path("flatpak");
+    let permissions_output = if presence.flatpak && flatpak_cli_present {
+        std::process::Command::new("flatpak")
+            .args(["info", "--show-permissions", "io.mpv.Mpv"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    } else {
+        None
+    };
+    results.push(doctor::check_flatpak_permissions(
+        presence.flatpak,
+        flatpak_cli_present,
+        permissions_output.as_deref(),
+    ));
+
+    if installs.is_empty() {
+        results.push(doctor::CheckResult::warn(
+            "tsuzuki.lua",
+            "skipped — no mpv install detected",
+        ));
+    } else {
+        for install in &installs {
+            let scripts_dir = install.config_dir.join("scripts");
+            let mut outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
+            if fix && outcome.needs_fix.is_some() {
+                match doctor::install_script(&scripts_dir) {
+                    Ok(()) => {
+                        println!(
+                            "fixed: installed/updated tsuzuki.lua for {} at {}",
+                            install.label,
+                            scripts_dir.join("tsuzuki.lua").display()
+                        );
+                        outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to install tsuzuki.lua for {}: {e}",
+                            install.label
+                        );
+                    }
+                }
+            }
+            results.push(outcome.result);
+        }
+    }
+
+    for r in doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)) {
+        results.push(r);
+    }
+
+    let root_checks = doctor::check_tracked_roots(config, home);
+    let valid_roots: Vec<String> = root_checks
+        .iter()
+        .filter(|c| c.valid)
+        .map(|c| c.root.clone())
+        .collect();
+    for c in root_checks {
+        results.push(c.result);
+    }
+
+    let orphans = doctor::find_orphans(config, &state, &valid_roots, home);
+    results.push(doctor::orphan_check_result(&orphans));
+
+    if forget_orphans && !orphans.is_empty() {
+        println!("forgetting {} orphaned record(s):", orphans.len());
+        for o in &orphans {
+            println!("  \"{}\" (under {})", o.name, o.root);
+        }
+        doctor::forget_orphans(&mut state, &orphans);
+        if let Err(e) = state::write(state_path, &state) {
+            return fail(&format!(
+                "could not write state at {}: {e}",
+                state_path.display()
+            ));
+        }
+    }
+
+    for r in &results {
+        println!("{}", r.render());
+    }
+    println!();
+    println!("MAL auth status: not checked — Phase 8 (MAL sync) doesn't exist yet.");
+
+    if results.iter().any(|r| r.level == doctor::Level::Fail) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,5 +1189,137 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    // --- Phase 7: doctor_command wiring ---
+    //
+    // These exercise the glue in `doctor_command` itself (orphan
+    // detection/clearing, the `--fix`/`--forget-orphans` flow) — the
+    // individual checks' own logic is already exhaustively unit-tested in
+    // `doctor.rs`. `command_override = "true"` (via `tracked_config`) keeps
+    // the mpv-availability check deterministic; the mpv.conf/tsuzuki.lua
+    // checks still depend on this development machine's real, standing
+    // Flatpak `io.mpv.Mpv` install being detected (same accepted dependency
+    // `tracked_config`'s own doc comment and `launch.rs`'s tests already
+    // rely on) — since the Flatpak candidate path is `home`-relative, this
+    // is still fully contained within each test's own fabricated tempdir
+    // home, never the real system's mpv config.
+
+    fn state_with_orphan(root: &Path) -> State {
+        State {
+            series: vec![record(root, "GoneSeries", Status::InProgress)],
+        }
+    }
+
+    #[test]
+    fn doctor_without_flags_reports_an_orphan_but_leaves_state_untouched() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let root = home.join("Anime");
+        fs::create_dir_all(&root).unwrap(); // root exists, "GoneSeries" under it does not
+
+        let config = tracked_config(&[&root]);
+        let state_path = dir.path().join("state.toml");
+        let before = state_with_orphan(&root);
+        state::write(&state_path, &before).unwrap();
+
+        let exit = doctor_command(false, false, &config, &state_path, Some(&home));
+        assert_eq!(exit, ExitCode::FAILURE, "an orphaned record must be a FAIL");
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after, before,
+            "doctor without --forget-orphans must never mutate state.toml"
+        );
+    }
+
+    #[test]
+    fn doctor_fix_alone_does_not_clear_orphans() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let root = home.join("Anime");
+        fs::create_dir_all(&root).unwrap();
+
+        let config = tracked_config(&[&root]);
+        let state_path = dir.path().join("state.toml");
+        let before = state_with_orphan(&root);
+        state::write(&state_path, &before).unwrap();
+
+        let exit = doctor_command(true, false, &config, &state_path, Some(&home));
+        assert_eq!(exit, ExitCode::FAILURE, "the orphan is still unresolved");
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after.series.len(),
+            1,
+            "--fix alone must not clear orphaned records — that needs --forget-orphans too"
+        );
+    }
+
+    #[test]
+    fn doctor_fix_forget_orphans_clears_confirmed_orphans_and_leaves_the_rest_untouched() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let root = home.join("Anime");
+        touch(&root.join("StillHere").join("ep01.mkv"));
+        // "GoneSeries" is tracked in state but has no folder on disk.
+
+        let mut config = tracked_config(&[&root]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root, "StillHere");
+        let state_path = dir.path().join("state.toml");
+        let before = State {
+            series: vec![
+                record(&root, "GoneSeries", Status::InProgress),
+                record(&root, "StillHere", Status::InProgress),
+            ],
+        };
+        state::write(&state_path, &before).unwrap();
+
+        let exit = doctor_command(true, true, &config, &state_path, Some(&home));
+        assert_eq!(
+            exit,
+            ExitCode::FAILURE,
+            "unrelated FAILs (e.g. mpv.conf) may still be present on this machine — only the \
+             orphan-clearing side effect is under test here"
+        );
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after.series.len(),
+            1,
+            "exactly the orphaned record must be gone"
+        );
+        assert_eq!(after.series[0].name, "StillHere");
+    }
+
+    #[test]
+    fn doctor_with_no_orphans_reports_the_orphan_check_as_ok() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        touch(&home.join("Anime").join("Monster").join("ep01.mkv"));
+        let root = home.join("Anime");
+
+        let mut config = tracked_config(&[&root]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root, "Monster");
+        let state_path = dir.path().join("state.toml");
+        let before = State {
+            series: vec![record(&root, "Monster", Status::InProgress)],
+        };
+        state::write(&state_path, &before).unwrap();
+
+        // Not asserting the overall exit code here (this machine's real
+        // Flatpak mpv install may independently FAIL the mpv.conf/
+        // tsuzuki.lua checks against this fabricated, script-free home) —
+        // only that state.toml is byte-for-byte unchanged, since nothing
+        // here is actually orphaned or otherwise reconcilable.
+        doctor_command(false, false, &config, &state_path, Some(&home));
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(after, before);
     }
 }

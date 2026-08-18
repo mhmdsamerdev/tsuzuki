@@ -105,15 +105,26 @@ precedent used everywhere else in this project. But the stale record
 itself must NOT be silently deleted the moment its path fails to resolve —
 that would be inference (assuming a missing path means the user wants the
 record forgotten) in a project that avoids exactly that everywhere else.
-Cleanup is `doctor`'s job (Phase 6): it must detect an orphaned
-`state.toml` record (tracked once, no longer resolvable on disk) and hand
-back the exact command to clear it — same list-and-hand-back-the-command
-pattern §3 already uses for exclude ambiguity and Anitomy suggestions —
-never automatic. The exact cleanup command's shape isn't decided yet; that's
-Phase 6 scope, not now. Don't let this silently vanish into "tracked-root
-validity" being read as root-level only — it must include per-series
-validity within a still-tracked root, not just whether the root itself
-still exists.
+Cleanup is `doctor`'s job (Phase 7): it detects an orphaned `state.toml`
+record — a series tracked under a root that's *itself* still valid, but
+whose own folder no longer resolves on disk — and hands back the exact
+command to clear it, same list-and-hand-back-the-command pattern §3 already
+uses for exclude ambiguity and Anitomy suggestions — never automatic. A
+root that's currently unreachable at all (unmounted drive, permission
+denied) is excluded from per-series orphan detection entirely, not treated
+as "every series under it is gone" — that would be a false-positive orphan
+flood from a simple unplugged drive, not a real per-series problem; doctor
+checks root-level validity first and only runs per-series orphan detection
+under a root that passes it. The exact command doctor hands back is
+`tsuzuki doctor --fix --forget-orphans` — not a new, separate top-level
+command, and not scoped to one series at a time: since root-level
+unreachability is already excluded above, what `--forget-orphans` clears is
+genuinely confirmed-dead, so bulk clearing without per-series targeting is
+the right level of ceremony. `--forget-orphans` requires `--fix` (enforced
+by clap) and prints exactly what it's about to permanently delete before
+doing it. Don't let this silently vanish into "tracked-root validity" being
+read as root-level only — it must include per-series validity within a
+still-tracked root, not just whether the root itself still exists.
 
 ### mpv `watch_later` reading is launcher-independent — tracking never needs an IPC socket, but resuming does spawn mpv
 **Corrected wording — the previous phrasing here ("Tsuzuki never launches

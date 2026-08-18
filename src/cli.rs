@@ -103,9 +103,23 @@ pub enum Command {
         action: Option<ConfigCommand>,
     },
 
-    /// Environment health checks (mpv config, watch_later reachability,
-    /// tracked-root validity, MAL auth status)
-    Doctor,
+    /// Environment health checks (mpv availability, mpv.conf, watch_later
+    /// reachability, Flatpak permissions, the tsuzuki.lua companion script,
+    /// tracked-root validity, orphaned state.toml records)
+    Doctor {
+        /// Apply every currently-safe, non-destructive fix (today: only
+        /// installing/updating the tsuzuki.lua companion script). Never
+        /// edits mpv.conf and never clears orphaned records on its own.
+        #[arg(long)]
+        fix: bool,
+
+        /// Permanently clear every currently-confirmed orphaned
+        /// state.toml record (a series deleted/moved/renamed out from
+        /// under a still-tracked root). Requires --fix. Prints exactly
+        /// what it's about to delete before doing it.
+        #[arg(long, requires = "fix")]
+        forget_orphans: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
