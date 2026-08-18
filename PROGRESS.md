@@ -3,9 +3,9 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 5 — State machine & core commands (implemented,
-verified, dogfooded — paused at the dogfood checkpoint for user review
-before Phase 6)
+**Current phase:** Phase 6 — mpv companion script wiring (implemented,
+verified — paused for user review before Phase 7 (`doctor`), per the same
+stop-and-confirm precedent as the Phase 5 dogfood checkpoint)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -554,11 +554,6 @@ before Phase 6)
   (`dirs::config_dir()`), never state.toml's; state.toml has never lived
   there in any version of this code. No code defect found or fixed in the
   persistence path itself.
-  - Also checked for a referenced "prior correction" to conditional
-    `--start` launch logic the report asked to be re-verified — found no
-    trace of it in `git log`, the current code (`launch.rs`'s `--start=`
-    is unconditional, always appended), or any other running session.
-    Flagged rather than fabricated.
   - The report's second claim — the `resume`/`start` message showing only
     the series name and file path, no episode number or timestamp — **was
     real** and is fixed: `playback_target` (`main.rs`) now also resolves
@@ -713,12 +708,6 @@ before Phase 6)
     episode) then also completing correctly auto-dropped it — confirmed
     via `list` (no longer `in_progress`), `start` (`"Rewatch?"`), and bare
     `tsuzuki` (0 in_progress, falls through to `start`'s listing).
-  - **Flagged, not acted on:** CLAUDE.md documents a separate, already-
-    written "bare spawn, no unconditional `--start`" correction for
-    `launch.rs` as settled, but `launch.rs` still unconditionally passes
-    `--start=<seconds>` on every launch — that fix has not actually landed
-    in code yet. Out of scope here (explicitly excluded); noted for
-    whoever picks up that correction next.
 
 - Phase 5.5 — Dogfood: three real bugs found trying the actual binary and
   real mpv by hand — the human dogfood pass Phase 5g's "Next up" flagged as
@@ -820,17 +809,197 @@ before Phase 6)
   script's log directory, `duration.rs`/`reconcile.rs` don't prefer it
   over the existing pipeline yet. That implementation is the next phase.
 
+- Phase 6 — mpv companion script wiring (per-file preferred source when
+  present, union with `watch_later`, watch_later fallback always intact):
+  - **`src/script_log.rs`** (new): reads `$XDG_DATA_HOME/tsuzuki/mpv-log`
+    (`mpv_log_dir()`, same base directory `state::state_path()` resolves
+    `state.toml` under — fixed, deliberately not a `config.toml` field).
+    `scan_script_log(dir, tracked_roots, home) -> Vec<ScriptLogEntry>`
+    mirrors `mpv.rs`'s `scan_watch_later` shape deliberately: parses each
+    flat entry file (`# <path>` / `duration=` / `position=` / `reason=`),
+    discards `reason=="redirect"` entries and any malformed file without
+    aborting the scan, and filters to tracked roots by reusing
+    `mpv::is_under_a_tracked_root` (bumped from private to `pub(crate)` —
+    the one, minimal touch to `mpv.rs` this phase needed) rather than
+    forking the symlink-aware root-matching logic a second time.
+  - **`src/reconcile.rs`**: candidate discovery is now a per-path union of
+    both sources, not watch_later-only. New private `Candidate` enum
+    (`WatchLater`/`ScriptLog`) and `merge_candidates()` pick a winner per
+    source path by the underlying entry files' own mtime — strictly
+    fresher wins, an exact tie goes to the script entry (deterministic,
+    matching the OS-candidate merge's own tie precedent). New
+    `classify_candidate()` fans out per source: a `watch_later` winner
+    classifies exactly as before (unchanged `mpv::classify()` call); a
+    script winner with `reason=="eof"` is `Completed` unconditionally, no
+    `completion_remaining_seconds` check at all; any other script reason
+    with a real position goes through the same `mpv::classify()` call,
+    fed the script's own `duration` directly when present (skipping the
+    Symphonia/AVI probe for that file entirely) or falling back to
+    `duration::probe_duration` when the script never observed one;
+    `reason=="redirect"` is discarded at parse time in `script_log.rs` and
+    never reaches this layer at all. Everything downstream — the forward
+    scan, `any_completed_found`, `apply_completion_advance`,
+    auto-`Dropped` — is structurally unchanged, just now looks entries up
+    in the merged `HashMap<PathBuf, Candidate>` instead of a
+    `&[WatchLaterEntry]` slice.
+  - **Testability without a new config field:** since the script-log
+    directory is deliberately not configurable (unlike `watch_later_dir`,
+    which tests redirect via `config.mpv.watch_later_dir`), the public
+    `reconcile()` (always resolving the real directory via
+    `script_log::mpv_log_dir()`) now delegates to a private
+    `reconcile_with_script_log_dir(config, state, home, script_log_dir)`
+    that tests call directly with a fabricated tempdir — `reconcile()`
+    itself stays the only public entry point and is exercised for real by
+    the new integration test below.
+  - **`contrib/mpv/tsuzuki.lua`**: the one, small, contained change scope
+    called for — `mkdir -p` was re-running on every single `end-file`
+    event; gated behind a one-time `log_dir_created` flag (persists for
+    the script's lifetime, i.e. once per mpv process launch). No other
+    line of the script's logic, format, or hashing touched.
+  - **`CLAUDE.md`** updated in place (not appended) per its own doc-
+    maintenance rule: "Optional mpv companion script" rewritten from
+    future/"studied and confirmed viable" tense to describe what's now
+    actually built (union-not-enrichment, mtime-based source selection,
+    per-source classification, the persists-forever diffing implication).
+    "Completion detection has a real, permanent blind spot" retitled
+    ("...blind spot for `watch_later` alone") and given a closing
+    paragraph explaining the blind spot is now closable for anyone with
+    the script installed, without weakening the underlying watch_later-
+    only rule (absence is still never, by itself, proof of anything for a
+    file with no script-log entry).
+  - **Judgment call, flagged per the task brief's own request:** whether a
+    script-sourced non-`eof` reading with no `duration` field should fall
+    back to `duration::probe_duration` (this session's choice) or stay
+    `Unknown`/skip the completion check entirely was not explicitly
+    specified. Chose fallback-to-probe since the file is real and on disk
+    regardless of source, and it's strictly more informative than treating
+    a merely-not-yet-observed script duration as unreadable — flagged for
+    review, not silently assumed correct.
+  - 250 unit tests (up from 223 at the end of Phase 5.5) + 1 new
+    integration test (`tests/script_log_integration.rs`, the required
+    real-binary/real-XDG-path test for this phase) + the 2 existing
+    `tests/state_persistence.rs` integration tests = 253 total, all
+    passing; `cargo clippy -p tsuzuki --no-deps --all-targets --
+    -D warnings` clean; `cargo fmt -p tsuzuki --check` clean (scoped to
+    files this phase touched — `launch.rs` has a pre-existing,
+    unrelated `cargo fmt` diff from before this phase, left untouched);
+    `vendor/anitomy` confirmed untouched via `git diff --stat`.
+  - New fabricated-entry tests cover every required scenario: the
+    flagship script-only-eof-on-the-last-episode auto-`Drop` (zero
+    watch_later trace at all — the actual blind-spot-closing claim),
+    eof-on-a-non-last-episode cursor advancement, both-sources-present
+    with watch_later fresher / script fresher / an exact mtime tie,
+    `reason=="stop"` above and below the resume threshold, `redirect`
+    discarded regardless of its position, a malformed script-log file
+    alongside a valid one not aborting the scan, and reconcile called
+    twice against an unchanged script-log entry that already reflects a
+    prior drop confirming the drop isn't undone.
+
+- Phase 6a — Correction: found by dogfooding the real binary against a
+  scratch `$HOME` (running `/run catch-missing-tests`, not any automated
+  test) — a real gap none of the 250+ fabricated-entry tests happened to
+  exercise. A brand-new, never-before-tracked series whose only observed
+  activity is a `Completed` classification — including a script `eof`
+  reading, i.e. exactly the "clean binge, first viewing, script installed"
+  case Phase 6's own flagship claim is about — silently produced **no
+  `state.toml` record at all**. `list` kept showing "never started" forever
+  even though the user watched the entire thing, for both a single-episode
+  series (should auto-`Drop`) and a multi-episode one (should land
+  `InProgress` at episode 2).
+  - **Root cause, traced via `git log -p`, confirmed pre-existing (not a
+    Phase 6 regression):** `reconcile_one_series`'s completion-advance
+    branch (`src/reconcile.rs`, the "nothing real found, but something
+    completed" case) was gated on `existing_index` being `Some(...)` since
+    Phase 5g — the rule was implemented as "advance the CURRENT tracked
+    episode," which silently assumed a tracked episode (an existing
+    record) already had to exist. Phase 6's script `eof` path routed
+    through this exact same gate, so it inherited the gap rather than
+    introducing a new one — but it directly undercuts Phase 6's own
+    headline claim for the single most obvious case (a series' very first
+    viewing).
+  - **Fix:** a never-tracked series (`existing_index == None`) now gets the
+    same index-0 baseline treatment `Dropped`/never-started records already
+    share for the ordinary `Resume` forward-scan (CLAUDE.md's "Forward-scan
+    is strictly forward") — a placeholder record is created purely as the
+    landing spot `apply_completion_advance` then resolves, landing
+    `Dropped` or `InProgress` exactly as it would for an existing record. A
+    genuinely `Dropped` record is deliberately excluded from this new
+    treatment, unchanged from before — it stays a dead end only a real
+    `Resume` reactivates, never a stray `Completed` reading.
+  - CLAUDE.md's "When the CURRENT tracked episode itself completes"
+    section updated in place (the stale "if this mechanism doesn't exist
+    yet" hedge — true in Phase 5's own kickoff, false for years since —
+    replaced with the actual fix and its reasoning, not appended next to
+    the stale text).
+  - 4 new regression tests: single-episode auto-Drop with no prior record,
+    multi-episode advance-to-next-episode with no prior record, the same
+    gap confirmed via an ordinary watch_later `Completed` reading (not
+    script-specific), and an explicit guard proving a genuinely `Dropped`
+    record still isn't reactivated by a fresh `Completed` reading. 254
+    unit tests total (up from 250), all passing; both clippy/fmt gates
+    clean; `vendor/anitomy` untouched. Manually reproduced against the real
+    release binary using the exact previously-broken scenario (brand-new
+    single-episode series, script `eof`, no prior record) both before and
+    after the fix — confirmed silently invisible pre-fix, correctly
+    `dropped`/`"Rewatch?"` post-fix.
+
+- Phase 6b — Correction: investigated a live user report ("installed
+  `tsuzuki.lua`, no logs ever appear in `~/.local/share/tsuzuki/`") against
+  their real system and a genuine Flatpak `io.mpv.Mpv` install — reproduced
+  and root-caused directly, not guessed at.
+  - **Root cause, verified empirically:** `flatpak run --command=sh
+    io.mpv.Mpv -c 'echo $XDG_DATA_HOME'` shows Flatpak overrides
+    `XDG_DATA_HOME` for every sandboxed app to its own private per-app data
+    directory (`~/.var/app/io.mpv.Mpv/data`), never the real
+    `~/.local/share`. The script itself was working correctly — real,
+    well-formed `eof`/`quit` entries were found sitting at
+    `~/.var/app/io.mpv.Mpv/data/tsuzuki/mpv-log/`, genuinely written,
+    permanently invisible to Tsuzuki's old single-fixed-path scan (which
+    resolves `dirs::data_dir()` from its own, unsandboxed environment —
+    the real `~/.local/share`). Also confirmed `host:ro` makes the real
+    host home read-only inside the sandbox (`mkdir` under it fails with
+    "Read-only file system"), ruling out "have the script use `$HOME`
+    instead" as a fix on the script side.
+  - This directly contradicted Phase 6's own original decision text
+    ("unlike `watch_later`, there's no install-method variance to work
+    around here") — the directory *name* is fixed and Tsuzuki-owned, but
+    which real filesystem location it resolves to isn't, once two
+    different processes' environments are doing the resolving.
+  - **Fix:** `script_log.rs`'s single fixed directory became a small
+    candidate list (`mpv_log_dirs()`), mirroring `mpv.rs`'s own
+    `watch_later` install-method candidate table exactly: native
+    (`dirs::data_dir()`, unchanged) plus the verified Flatpak remap.
+    `scan_script_log` now merges across all candidate directories per
+    source path, freshest-file-wins — the exact cross-directory merge
+    precedent `watch_later` scanning already established. No Snap
+    candidate added — its own `XDG_DATA_HOME` remapping behavior for a
+    confined mpv hasn't been verified against a real install, and this
+    project doesn't add candidate paths on a guess.
+  - CLAUDE.md's "Optional mpv companion script" section corrected in place
+    (the wrong "no install-method variance" claim replaced, not appended
+    next to).
+  - New tests: `mpv_log_dirs` includes the Flatpak candidate when home is
+    known / degrades to native-only with no home; a same-source-path
+    cross-directory merge test and a per-path-not-per-directory test
+    mirroring `mpv.rs`'s own equivalents; a new real-binary integration
+    test fabricating an entry *only* at the Flatpak-remapped path (nothing
+    at the native path at all) and confirming Tsuzuki still finds it. 258
+    unit tests total (up from 254) + the existing 2 + 2 integration tests
+    = 262, all passing; both clippy/fmt gates clean; `vendor/anitomy`
+    untouched. Manually reproduced against the user's own real system: the
+    two genuine pre-existing log entries (Dungeon Meshi S01E14/S01E15,
+    `eof`/`quit`) were confirmed sitting at the Flatpak-remapped path,
+    invisible pre-fix; not independently re-verified post-fix against the
+    user's live setup (their tracked roots/state weren't reproduced here),
+    but the exact mechanism is covered end-to-end by the new integration
+    test above.
+
 **Next up:**
-- Phase 6's actual Rust-side wiring is unbuilt: `mpv.rs` needs to read
-  `contrib/mpv/tsuzuki.lua`'s log directory, and `duration.rs`/
-  `reconcile.rs` need the per-file preferred-source-with-fallback rule
-  described in Phase 6's own entry. The script file and its docs exist;
-  the Rust code consuming them does not yet.
-- The `--start` conditional-launch correction CLAUDE.md describes is not
-  yet implemented in `launch.rs` — flagged during Phase 5g, still not
-  fixed (distinct from Phase 5.5 finding 1's per-file *scoping* fix, which
-  addresses inheritance across files, not whether `--start` is passed at
-  all).
+- Phase 7 (`doctor`) is next: proactive setup checks (mpv availability,
+  `write-filename-in-watch-later-config=yes`, whether the companion script
+  is actually installed, orphaned `state.toml` records for deleted
+  series). None of this phase's work wires into `doctor` yet — deliberately
+  excluded from Phase 6's scope.
 
 **Open questions blocking further work:**
 - cleared
