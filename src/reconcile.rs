@@ -469,28 +469,64 @@ fn reconcile_one_series(
         // a `Completed` reading was found anywhere in that same range,
         // resolve the cursor one or more steps further instead of
         // freezing (CLAUDE.md's "When the CURRENT tracked episode itself
-        // completes" rule) — but only for a real InProgress/Paused record;
-        // `Dropped`/never-started series have no "current episode" for
-        // this rule to apply to. Absence alone (no `Completed` reading
+        // completes" rule). Absence alone (no `Completed` reading
         // anywhere) is deliberately never sufficient — see the scan loop's
         // own comment above.
-        if let Some(i) = existing_index {
-            let status = state.series[i].status;
-            if status != Status::Dropped && any_completed_found {
-                apply_completion_advance(
-                    state,
-                    i,
-                    name,
-                    &expanded_root,
-                    &ordered,
-                    candidates,
-                    start_index,
-                    resume_seconds,
-                    completion_remaining_seconds,
-                    home,
-                );
-            }
+        //
+        // A never-tracked series (`existing_index` is `None`) gets this
+        // exact same treatment, not just a frozen "never started" — a
+        // brand-new series watched straight through for the very first
+        // time (a script `eof` reading, or an ordinary near-the-end
+        // `Completed` position, with nothing else ever observed) is real
+        // activity and must not be silently discarded just because no
+        // record existed yet to advance. This is the same index-0-baseline
+        // precedent `Dropped`/never-started already share for the ordinary
+        // `Resume` forward-scan (CLAUDE.md's "Forward-scan is strictly
+        // forward"), extended to completion-advance: a placeholder record
+        // is created at `start_index` (always episode 0 here) purely as a
+        // landing spot for `apply_completion_advance` to resolve — every
+        // field on it is overwritten by that call before this function
+        // returns, since `any_completed_found` guarantees at least one
+        // step of real advancement happens. `Dropped` stays excluded, as
+        // before: it's a deliberate dead end only a genuine `Resume`
+        // reactivates (CLAUDE.md: no `dropped -> paused` transition), not
+        // something a stray `Completed` reading should auto-undo.
+        if !any_completed_found {
+            return;
         }
+        let index = match existing_index {
+            Some(i) if state.series[i].status == Status::Dropped => return,
+            Some(i) => i,
+            None => {
+                state.series.push(SeriesRecord {
+                    root: root.to_string(),
+                    name: name.to_string(),
+                    status: Status::InProgress,
+                    current_relative_path: ordered[start_index]
+                        .strip_prefix(&expanded_root)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| name.to_string()),
+                    position_seconds: 0.0,
+                    episode_number: anitomy::episode_identity(&ordered)
+                        .get(start_index)
+                        .map(|id| id.episode_number),
+                    updated_at: now_unix(),
+                });
+                state.series.len() - 1
+            }
+        };
+        apply_completion_advance(
+            state,
+            index,
+            name,
+            &expanded_root,
+            &ordered,
+            candidates,
+            start_index,
+            resume_seconds,
+            completion_remaining_seconds,
+            home,
+        );
         return;
     };
 
@@ -1763,6 +1799,177 @@ mod tests {
     }
 
     // --- End-to-end `reconcile()` behavior, both candidate sources ---
+
+    #[test]
+    fn a_never_tracked_single_episode_series_completed_via_script_eof_auto_drops() {
+        // Regression test for a real gap found by dogfooding the actual
+        // binary (not caught by any prior fabricated-entry test): a
+        // brand-new series with NO existing `state.toml` record, whose
+        // only observed activity is a `Completed` classification (here,
+        // via a script `eof` reading — but the same gap applied to an
+        // ordinary duration-proximity `Completed` reading too, since
+        // neither ever reached `apply_completion_advance` without an
+        // existing record to advance). Before the fix, this silently
+        // produced NO record at all — `list` kept showing "never started"
+        // forever even though the user watched the entire thing. This is
+        // the single most obvious case Phase 6's "closes the clean-binge
+        // blind spot" claim is about (a series' very first viewing, with
+        // the script installed, finished in one sitting) — the fix must
+        // hold for it, not just for a series that already had a baseline
+        // record.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state
+            .find(&root.to_string_lossy(), "Monster")
+            .expect("a never-tracked series completed on its only episode must get a record");
+        assert_eq!(
+            record.status,
+            Status::Dropped,
+            "the series' one and only episode completing must auto-Drop it, not leave it \
+             invisible"
+        );
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 0.0);
+    }
+
+    #[test]
+    fn a_never_tracked_series_completed_on_a_non_last_episode_lands_on_the_next_one() {
+        // Same gap, non-last-episode variant: episode 1 completes (script
+        // eof) with no prior record and there IS a next episode — must
+        // land `InProgress` at episode 2, position 0 (the same forward-
+        // looking default a brand-new series' ordinary `start` already
+        // uses), not silently produce nothing.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state
+            .find(&root.to_string_lossy(), "Monster")
+            .expect("a never-tracked series completed on a non-last episode must get a record");
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
+        assert_eq!(record.position_seconds, 0.0);
+    }
+
+    #[test]
+    fn a_never_tracked_series_completed_via_an_ordinary_watch_later_reading_also_gets_a_record() {
+        // Confirms the fix isn't script-source-specific: the same gap
+        // applied identically to a plain duration-proximity `Completed`
+        // watch_later reading on a brand-new series with no prior record.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        let fixture = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/short.mkv"
+        ));
+        fs::create_dir_all(&series_path).unwrap();
+        fs::copy(&fixture, series_path.join("ep01.mkv")).unwrap();
+
+        let mut config = default_config(&root);
+        config.thresholds.resume_seconds = 1;
+        config.thresholds.completion_remaining_seconds = 2;
+        let watch_later = dir.path().join("watch_later");
+        // 4.0s into a ~5.0s file -> 1.0s remaining -> Completed.
+        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
+        with_watch_later_override(&mut config, &watch_later);
+
+        let mut state = State::default();
+        reconcile_with_script_log_dir(&config, &mut state, None, None);
+
+        let record = state
+            .find(&root.to_string_lossy(), "Monster")
+            .expect("a never-tracked series completed via watch_later alone must get a record");
+        assert_eq!(record.status, Status::Dropped);
+    }
+
+    #[test]
+    fn a_genuinely_dropped_record_is_not_reactivated_by_a_fresh_completed_reading() {
+        // The one case that must NOT change: `Dropped` stays a deliberate
+        // dead end reachable only by a genuine `Resume` (opening an
+        // episode directly), never by a `Completed` reading — the fix
+        // above must not accidentally start treating Dropped like
+        // never-tracked for this purpose.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // A freshly-appearing eof reading on ep01, the record's own
+        // dropped-at position.
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+        );
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::Dropped,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 0.0,
+                episode_number: Some(1),
+                updated_at: 1,
+            }],
+        };
+
+        reconcile_with_script_log_dir(&config, &mut state, None, Some(&script_log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.status,
+            Status::Dropped,
+            "a Completed reading must never reactivate a Dropped record"
+        );
+        assert_eq!(record.updated_at, 1, "no genuine change occurred");
+    }
 
     #[test]
     fn script_only_eof_on_the_last_episode_auto_drops_flagship() {

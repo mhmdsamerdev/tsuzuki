@@ -617,11 +617,29 @@ exactly one step further:
   `Dropped` state manual dropping already produces, reached automatically
   instead of by command.
 
-If this cursor-advancement/auto-`Dropped` mechanism does not yet exist in
-the codebase (only the narrower "don't lose the position near completion"
-fix does), it is a real, separate, still-missing piece of Phase 5's
-completion handling — not an optional nice-to-have, and not something to
-infer is already covered by the freeze fix.
+**This rule applies identically when no `state.toml` record exists yet.**
+Found by dogfooding the real binary during Phase 6, not by design ahead of
+time: a brand-new, never-before-tracked series whose only observed
+activity is a `Completed` classification — including a script `reason ==
+"eof"` reading, i.e. exactly the "clean binge, watched straight through
+the very first time, script installed" case this project's own companion-
+script rationale is about — used to produce **no record at all**, silently.
+The rule above was implemented as "advance the CURRENT tracked episode,"
+which implicitly assumed a tracked episode (an existing record) already
+had to exist; a series with no record yet has no cursor to advance, so the
+completion signal was simply dropped on the floor. The fix: a never-
+tracked series uses the exact same index-0 baseline `Dropped`/never-started
+records already share for the ordinary `Resume` forward-scan (see "Forward-
+scan is strictly forward" below) — a placeholder record is created purely
+as the landing spot this rule's own advance-or-`Drop` logic then resolves,
+so a brand-new single-episode series watched straight through correctly
+lands `Dropped` (not invisible), and a brand-new multi-episode series
+watched straight through episode 1 correctly lands `InProgress` at episode
+2. A genuinely `Dropped` record is **not** given this same treatment —
+it stays excluded here exactly as it already was, since `Dropped` is a
+deliberate dead end only a real `Resume` reactivates (no `dropped ->
+paused` transition exists), not something a stray `Completed` reading
+should auto-undo.
 
 ### `pause`/`drop` never zero the stored position — reconcile's diffing depends on it
 Found by Phase 5's dogfood pass, not by design ahead of time — worth
