@@ -146,6 +146,8 @@ Both thresholds are fixed numbers, not percentages, and both are configurable (�
 
 **VLC is not supported in v1.** Its resume feature is opt-in (must be manually enabled in VLC's own preferences), stores position in a shared recents file with a different format per OS (including a binary plist on macOS), and has a known reliability gap at the start of playback. If added later, it would plug into the same abstraction mpv uses — a source yielding `(path, timestamp)`.
 
+**Optional: a Tsuzuki-owned mpv companion script.** A small Lua script (`contrib/mpv/tsuzuki.lua`, installed by the user into mpv's own `scripts/` directory — the same launcher-independent loading mechanism as `watch_later` itself, and the same manual-one-time-setup shape as the `write-filename-in-watch-later-config` prerequisite above) can optionally give Tsuzuki a direct signal per file instead of an inferred one: mpv's own `duration` property (read straight from its demuxer, no local probing needed) and the real reason playback ended (`eof` — genuinely reached the end — distinct from `stop`, which is what skipping to another file produces). Strictly additive: a file with no script-log entry falls back to exactly the `watch_later`-based pipeline above, unchanged. Never required for Tsuzuki to work.
+
 ---
 
 ## 5. Episode Ordering
@@ -400,13 +402,16 @@ Candidate-path list per OS/install method, parsing entries (including skipping r
 **Phase 5 — State machine & core commands**
 This is the payoff phase: in_progress/paused/dropped, the resume picker (0/1/many logic), and tsuzuki / resume / status / list / start / pause / drop. Everything from Phases 1–4 gets tied together here into the actual one-command demo. I'd stop and manually dogfood after this phase — it's the point where the tool becomes real.
 
-**Phase 6 — doctor**
+**Phase 6 — Optional mpv companion script**
+An opt-in Lua script (`contrib/mpv/tsuzuki.lua`) giving Tsuzuki a direct per-file signal (real duration, real completion reason) instead of an inferred one, with the existing watch_later-based pipeline as the unconditional per-file fallback. Isolated because it's strictly additive and off by default — nothing before or after this phase depends on it existing.
+
+**Phase 7 — doctor**
 Full environment checks (mpv config flag, watch_later reachability, Flatpak permission gap, tracked-root validity, MAL auth status once Phase 7 exists). Doing it last means it can genuinely check everything rather than being built incrementally and forgotten.
 
-**Phase 7 — MAL sync**
+**Phase 8 — MAL sync**
 OAuth login, exact-match linking against the user's own list, manual sync link, the two-way non-destructive merge, pause/drop mirroring. This is the highest-risk phase (network, external API, auth) — isolating it means a flaky OAuth flow can't destabilize everything you already validated.
 
-**Phase 8 — Distribution & end-to-end tests**
+**Phase 9 — Distribution & end-to-end tests**
 cargo-dist config, install script, assert_cmd end-to-end tests against the compiled binary, PyPI wheel via maturin. Genuinely last — there's no point packaging a binary that's still changing shape.
 
 ---

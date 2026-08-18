@@ -802,13 +802,30 @@ before Phase 6)
     `cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings` clean;
     `vendor/anitomy` untouched.
 
+- Phase 5.6 — Planning & design (chat only, no Rust code yet — matching
+  the Phase 5a precedent): studied whether an mpv Lua script could
+  simplify or replace parts of the watch_later-based tracking pipeline
+  (full study: duration probing, candidate-path/merge complexity in
+  `mpv.rs`, and the absence-based-completion ambiguity Phase 5.5 fixed
+  were all identified as things a script makes strictly better or
+  removable). Confirmed technically: a script is exactly as
+  launcher-independent as `watch_later` (passive file writer, no IPC, no
+  background process — mpv loads it identically regardless of what
+  launched mpv). Decided: strictly opt-in, per-file preferred-source-
+  with-fallback, never a hard requirement — a user who doesn't install it
+  keeps today's exact behavior. `contrib/mpv/tsuzuki.lua` (new file, new
+  `contrib/` directory) written and added to the repo; `CLAUDE.md`/
+  `docs/design.md` updated with the decision and its reasoning.
+  **Not yet wired into any Rust code** — `mpv.rs` doesn't read the
+  script's log directory, `duration.rs`/`reconcile.rs` don't prefer it
+  over the existing pipeline yet. That implementation is the next phase.
+
 **Next up:**
-- Dogfood checkpoint per CLAUDE.md §6 is still pending — Phase 5.5 closed
-  three real bugs the human dogfood pass surfaced, but the checkpoint
-  itself (confirming with the user before starting Phase 6) has not been
-  formally closed. Do not start Phase 6 until the user has confirmed.
-- The EOF-script mechanism (finding 3's deferred follow-up, above) is
-  designed but not implemented.
+- Phase 6's actual Rust-side wiring is unbuilt: `mpv.rs` needs to read
+  `contrib/mpv/tsuzuki.lua`'s log directory, and `duration.rs`/
+  `reconcile.rs` need the per-file preferred-source-with-fallback rule
+  described in Phase 6's own entry. The script file and its docs exist;
+  the Rust code consuming them does not yet.
 - The `--start` conditional-launch correction CLAUDE.md describes is not
   yet implemented in `launch.rs` — flagged during Phase 5g, still not
   fixed (distinct from Phase 5.5 finding 1's per-file *scoping* fix, which

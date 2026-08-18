@@ -139,9 +139,58 @@ already-running mpv instance — never a bare spawn-and-release. This means:
   (native/Flatpak/Snap), merged freshest-file-wins — never environment
   detection. See `docs/design.md` §4 for the exact path list; don't let
   it drift out of sync with `doctor`'s checks.
-- Absence of a `watch_later` entry for a file that was clearly opened is
-  itself a completion signal (mpv doesn't write one if played to the
-  end) — don't treat "no entry" as "never watched" without checking this.
+- **Absence of a `watch_later` entry is never, by itself, proof of
+  completion** — see §3's "Completion detection has a real, permanent
+  blind spot" for why (mpv's own `--resume-playback` deletes a file's
+  bookmark on load regardless of what happens next, so absence is
+  produced identically by a genuine completion and by an ordinary
+  abandon). Don't reintroduce "no entry ⇒ watched" reasoning here; that
+  was a real, shipped bug.
+
+### Optional mpv companion script — per-file preferred source when present, watch_later fallback always intact
+Studied and confirmed viable (see the deferred follow-up on the absence-
+based-completion fix): a small, Tsuzuki-authored Lua script
+(`contrib/mpv/tsuzuki.lua`) placed in mpv's `scripts/` directory is exactly
+as launcher-independent as `watch_later` itself — mpv loads every
+installed script for every invocation regardless of what launched it, and
+the script only ever writes small text files to its own log directory
+(`$XDG_DATA_HOME/tsuzuki/mpv-log`, atomically, temp-file-then-rename). No
+IPC socket, no background process, nothing added to this section's own
+"never holds an ongoing connection to an already-running mpv instance"
+constraint.
+
+**Strictly opt-in, never a hard requirement.** Installing it is a manual,
+documented, one-time step — the same shape as the existing
+`write-filename-in-watch-later-config=yes` prerequisite, not a new command
+surface. A user who never installs it keeps the exact behavior shipped
+today; nothing regresses, nothing new is required for the tool to keep
+working.
+
+**Per-file, not global, and the fallback is free.** For a given source
+file: if the script's log has an entry for it, that entry is the complete,
+sole source for duration/position/completion — a real `reason=="eof"` is a
+direct, unambiguous completion signal (no `completion_remaining_seconds`
+duration-proximity guessing needed), and `duration` comes straight from
+mpv's own demuxer (skips `symphonia`/the AVI fallback entirely for that
+file). If no entry exists for a path — script never installed, this mpv
+build predates it being added, or this particular file was played before
+the script existed — that file falls all the way back to today's pipeline
+(`watch_later` + `symphonia`/AVI probing + the `any_completed_found`
+forward-scan rule), completely unchanged. A script that errors or simply
+never writes an entry for a file is indistinguishable from "not
+installed" — no special error state, matching the existing "one bad entry
+doesn't abort the whole scan" precedent used everywhere else in this
+project.
+
+**Why this instead of replacing `watch_later` reading outright:** a full
+replacement would mean a user without the script gets *zero* tracking
+instead of today's full, correct tracking — a materially worse
+out-of-box floor than the one-line `write-filename-in-watch-later-config`
+ask ever was. Per-file preference-with-fallback gets the accuracy win
+(closes the "clean binge leaves no trace" blind spot entirely for anyone
+who installs it, eliminates the absence-vs-abandon ambiguity at the root
+rather than just making it safe) without raising the floor for anyone who
+doesn't.
 
 ### Thresholds are fixed seconds, both configurable, defaults 120s / 180s
 `resume_seconds = 120` (below this: start from 0, not a real bookmark),
