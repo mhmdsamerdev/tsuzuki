@@ -3,7 +3,9 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 4 — mpv `watch_later` reading (done)
+**Current phase:** Phase 5 — State machine & core commands (implemented,
+verified, dogfooded — paused at the dogfood checkpoint for user review
+before Phase 6)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -305,7 +307,7 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     tsuzuki`, never bare `cargo fmt`.
   - Not wired into any command, `state.toml` untouched — Phase 5 does
     both.
-- Phase 5 — Planning & design (chat only, no code yet):
+- Phase 5a — Planning & design (chat only, no code yet):
   - Resolved both open questions Phase 4 left blocking Phase 5: the exact
     absence-based-completion mechanism (per-series, checks only the one
     file `state.toml` remembers as current, no baseline = can't fire), and
@@ -358,16 +360,460 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
     for the product-level changes (commands table, Cold Start section).
     Phase 5's kickoff prompt is written and ready to hand off.
 
+- Phase 5b — State machine & core commands (implementation):
+  - One more design gap surfaced mid-implementation and resolved before
+    writing `reconcile`: whether completion during reconcile should be
+    absence-only or also duration-aware (design.md §4 says both; the
+    kickoff prompt's own scope/test list only mentioned absence). Resolved:
+    both signals feed the same cursor-advancement rule — `reconcile` calls
+    `mpv::classify()` (Phase 4's `probe_duration`, unmodified) on any entry
+    with a real position, and a `Completed` result is treated identically
+    to an absent entry. Written into CLAUDE.md's "Cursor movement" section
+    before implementation proceeded.
+  - **`src/state.rs`** rewritten: `State.series` is now `Vec<SeriesRecord>`
+    (was a `BTreeMap<String, SeriesState>` keyed by name alone) — keyed by
+    (root's literal persisted form, series name), matching config.rs's
+    `[[exclusions]]` array-of-tables shape. `SeriesRecord` adds
+    `current_relative_path` (relative to root, not series dir — same
+    portability convention as exclusions) and `updated_at` (unix seconds).
+    Added `State::find`/`find_mut`, `now_unix()`, `resolve_root_arg()`.
+  - **`src/reconcile.rs`** (new): the single shared "resolve against mpv
+    reality" step. Scans `watch_later` once per call, resolves each
+    candidate entry's (root, series name) via most-specific-root matching
+    (so composable roots like `Anime` vs. `Anime/Rewatches` resolve
+    correctly), then per series forward-scans natural-sort order from the
+    right starting index (0 for never-tracked/dropped, the matched index
+    otherwise) for the furthest file with a real, non-`Completed` bookmark.
+    Only a genuine change (different file or different position) ever
+    writes — this is what keeps `pause`/`drop` from being silently undone
+    by the next reconcile seeing the same still-there mpv entry.
+  - **`src/launch.rs`** (new): mpv resolution as an injectable pure function
+    (`command_override` bypass → cheap native-on-`PATH` check → cheap
+    Flatpak-install-dir check → typed `NotResolvable`) plus a real
+    fire-and-forget `spawn`. New `[mpv] command_override` config field.
+  - **`src/target.rs`** (new): resolves an explicit series name + optional
+    `--root` to a tracked root, same 0/1/many shape `exclude`'s `--root`
+    already established (reimplemented independently since `exclude.rs`'s
+    own helper is private/off-limits).
+  - **`src/pause_drop.rs`** (new): `pause`/`drop` transitions exactly per
+    the allowed-transitions table. Caught and fixed a real bug during
+    dogfood: `drop` originally zeroed `position_seconds`, which made the
+    *next* reconcile see the still-unchanged real `watch_later` entry as
+    "new activity" and silently flip the series back to `in_progress` —
+    undoing the drop with no user action. Fix: `drop` no longer mutates the
+    stored position/path at all (the "position reset" design.md describes
+    is already achieved by `playback_target`'s Dropped special-case at
+    launch time); locked in with a dedicated reconcile regression test
+    (two reconcile calls in a row after a drop, bookmark unchanged, must
+    stay dropped).
+  - **`src/picker.rs`** (new): TTY-injectable interactive/non-interactive
+    picker; non-TTY lists indexed choices and performs no action.
+  - **`src/overview.rs`** (new): shared per-series display data for
+    `list`/`status`/`start`, `list`'s grouping/ordering, and the
+    Start/Resume/Rewatch? display-word logic (with a dedicated test
+    asserting a paused series' line never contains "Rewatch").
+  - **`main.rs`/`cli.rs`**: `resume`/`start` gained `[series] [--root]`;
+    `pause`/`drop` gained `[--root]`; `current` removed entirely (cut per
+    CLAUDE.md, fully subsumed by `status`); bare `tsuzuki` now really does
+    the 0/1/many dispatch (0 → falls through to `start`, 1 → resumes
+    directly, many → picker).
+  - 197 tests total (up from 143 at the end of Phase 4), all passing;
+    `cargo clippy -p tsuzuki --no-deps -- -D warnings` clean both with and
+    without `--tests`; `cargo fmt -p tsuzuki --check` clean; `vendor/anitomy`
+    untouched.
+  - Manually dogfooded end-to-end against a fabricated `HOME` (real
+    `tsuzuki` binary, fabricated `watch_later` entries, no real mpv
+    install needed): add → start (non-TTY listing, then explicit pick) →
+    fabricate a bookmark → bare `tsuzuki` resumes correctly → `pause` →
+    confirmed it drops out of the automatic picker → `list` → `drop` a
+    different series → confirmed `start` shows "Rewatch?" for that one
+    specifically and "Resume" (never "Rewatch") for the still-paused one.
+    This is where the drop/reconcile bug above was actually caught.
+
+- Phase 5c — Gap audit (separate review pass, not the implementation
+  session): hunted for what wasn't tested rather than confirming what was.
+  Three required findings, all with real passing-test evidence, not just
+  reasoning:
+  1. Traced every `SeriesRecord` write path (pause, drop, reconcile's own
+     write) for the drop-bug's *pattern*, not just the fixed instance.
+     `pause`/`drop` only ever touch `status`/`updated_at` (now with
+     dedicated tests asserting every other field is untouched); reconcile's
+     own write always stores exactly what it just found, so it can't
+     manufacture a diff against itself (proven by a new test: two reconcile
+     calls back to back with nothing changed on disk, `updated_at` doesn't
+     move on the second). No other instance of the bug class found.
+  2. A `Paused` series with a genuinely new real bookmark on a *later*
+     episode does correctly advance to `in_progress` at the new position —
+     this was untested (only the "unchanged bookmark stays paused" and
+     "earlier bookmark blocked" cases existed); added and confirmed passing.
+  3. Multi-step chaining through *both* completion signals in one call
+     (absence, then a duration-based `Completed` reading, then an ordinary
+     real position) was previously only tested with each signal type in
+     isolation; added and confirmed it resolves in a single `reconcile()`
+     call.
+  - General sweep found and fixed two real gaps (not required findings,
+    but real): `launch.rs`'s native-mpv-on-`PATH` check used `is_file()`
+    alone, which can't distinguish "exists" from "is actually executable"
+    — fixed with a cheap permission-bit check on Unix (still just a
+    `stat`, never a spawn), regression test added. `picker.rs`'s TTY
+    branch called `dialoguer::Select` directly with no way to test the
+    actual selection path at all — refactored to inject the selector
+    (production passes a real `dialoguer_select` function; tests pass a
+    fake one), closing a real coverage gap.
+  - Also added: a consolidated overview.rs test asserting all four real
+    states' display words together (not four separate tests that could
+    each pass while wrong relative to each other); `main.rs` had *no*
+    tests at all before this pass — added real `--root` disambiguation
+    tests against two actually identically-named series under two real
+    tracked roots for `pause`/`drop` and for the shared `explicit_play`
+    path `resume`/`start` use; `is_tty` was refactored from an internal
+    `stdin_is_tty()` call inside `resume_command`/`start_command` into a
+    value threaded down from `dispatch` (queried once), specifically so
+    "an explicit series argument bypasses the picker even with a TTY
+    available" is a testable claim, not just one provable by reading the
+    control flow — confirmed with a timeout-guarded test (same precedent
+    as `series.rs`'s symlink-cycle test) so a real regression fails loudly
+    rather than hanging.
+  - Confirmed empirically (not just by reasoning) that no pre-Phase-5
+    `state.toml` can exist in practice — `git log -p -- src/main.rs` shows
+    the only `write()` call that ever existed before this phase wrote
+    nothing but an empty default and was removed the same day, and no real
+    `~/.local/share/tsuzuki/` exists on the development machine. Added a
+    test covering the hypothetical anyway: an old-schema file fails
+    deserialization cleanly (typed `Err`, never a panic or silent data
+    loss) against today's reader.
+  - Idempotency boundary ("`pause`/`drop` on an inconsistent stored
+    record") isn't reachable — `Status` is an exhaustive 3-variant enum
+    with no partial state possible in Rust's type system, and both
+    functions match it exhaustively with no wildcard arm.
+  - No stale tests found — every test/comment from the implementation
+    session that mentions completion signals already reflects the
+    corrected (absence + duration-`Completed`) design, since the
+    clarifying question was asked and answered before `reconcile.rs` was
+    written at all.
+  - 211 tests total (up from 197), all passing; both clippy gates clean;
+    `cargo fmt -p tsuzuki --check` clean; `vendor/` untouched.
+
+- Phase 5d — Correction: config.toml forward-compatibility (found during
+  the human dogfood pass): `tsuzuki add` against a real, older config.toml
+  failed outright with "missing field `video_extensions`" — that field
+  (Phase 1) had no serde default at all, so any config.toml predating it
+  could never be read again. Full field-by-field audit of `Config` found
+  this was not an isolated case: **every** top-level `Config` field except
+  `exclusions` lacked `#[serde(default)]`, and `Thresholds`'s own
+  `resume_seconds`/`completion_remaining_seconds` had the same
+  no-default problem one level down, with the same aggravating factor as
+  `video_extensions` — their correct defaults (120/180) are non-zero, so a
+  *bare* `#[serde(default)]` would have "fixed" the crash into a silently
+  wrong `0` instead of the documented value, not a real fix.
+  - Fixed with two consistent defaulting layers throughout `config.rs`:
+    each `Config` field now has `#[serde(default)]` (backed by a real
+    `Default` impl per substruct) covering a whole section being absent,
+    and any field whose correct default isn't already `Default::default()`
+    (`video_extensions`, `resume_seconds`, `completion_remaining_seconds`)
+    gets `#[serde(default = "fn")]` with a named function, covering that
+    one key being absent from an otherwise-present section. `Config`'s
+    manual `impl Default` was removed in favor of `#[derive(Default)]`,
+    now that every substruct composes to the exact same documented values
+    — one source of truth instead of two that could drift apart.
+  - Full per-field audit (`paths`, `auto_pause_days`, `watch_later_dir`,
+    `command_override`, `client_id`) confirmed their correct defaults are
+    already `Default::default()`-equivalent (empty/zero/empty string) — a
+    bare `#[serde(default)]` was already correct for those, no change
+    needed beyond adding it where it was missing at the section level.
+    `Exclusion`'s two fields (`root`/`path`) were deliberately left
+    without defaults — both were introduced together in one commit with no
+    incremental-field-add history, and there's no sensible default for a
+    partially-specified exclusion entry.
+  - Two new regression tests assert on the actual resulting values, not
+    just "doesn't error": a config.toml missing `video_extensions`
+    entirely defaults to exactly the documented 5-extension list; a
+    config.toml missing the whole `[thresholds]` table *and* one missing
+    just one key within an otherwise-present table both default
+    `resume_seconds`/`completion_remaining_seconds` to 120/180, not 0.
+  - Manually reproduced the exact broken shape from the dogfood report
+    (a `[roots]` table with `paths` but no `video_extensions` key) against
+    the real binary: `add` and `list` both now succeed; confirmed
+    `video_extensions` actually resolved to the real (non-empty) default
+    in memory by adding a real `.mkv` file and seeing `list` find it — not
+    just that the command stopped crashing. On-disk config.toml stays
+    untouched by the read, per the existing no-auto-rewrite convention.
+  - 213 tests total (up from 211), all passing; both clippy gates clean;
+    `cargo fmt -p tsuzuki --check` clean; `vendor/` untouched.
+
+- Phase 5e — Correction: investigated a reported "`state.toml` never gets
+  written" bug from the human dogfood pass — **did not reproduce**. Direct
+  repro against the real release binary, including a fully clean `env -i`
+  shell with no `XDG_*` overrides (matching a normal user's terminal
+  exactly), confirmed `state.toml` is correctly created at
+  `~/.local/share/tsuzuki/state.toml` (via `dirs::data_dir()`, exactly as
+  `state::state_path()` is coded and documented) with the correct
+  `in_progress` record, after `resume` picks up a genuine pre-existing
+  real bookmark. The bug report's own verification command checked
+  `~/.config/tsuzuki/state.toml` — that's `config.toml`'s directory
+  (`dirs::config_dir()`), never state.toml's; state.toml has never lived
+  there in any version of this code. No code defect found or fixed in the
+  persistence path itself.
+  - Also checked for a referenced "prior correction" to conditional
+    `--start` launch logic the report asked to be re-verified — found no
+    trace of it in `git log`, the current code (`launch.rs`'s `--start=`
+    is unconditional, always appended), or any other running session.
+    Flagged rather than fabricated.
+  - The report's second claim — the `resume`/`start` message showing only
+    the series name and file path, no episode number or timestamp — **was
+    real** and is fixed: `playback_target` (`main.rs`) now also resolves
+    the correct episode number via `anitomy::episode_identity` (the exact
+    mechanism `reconcile.rs` already uses, not a third formatting path)
+    for every case including never-started/dropped, which has no
+    record-side episode number to fall back on at all. `play_series`'s
+    message is now `"{verb} \"{name}\" — episode {N} ({mm:ss}) — {file}"`.
+    An early draft of this fix conflated "index resolved to 0 because the
+    record's file was genuinely episode 1" with "index defaulted to 0
+    because no usable record existed" (which would have silently shown
+    position 0 even for a real paused/in-progress record at episode 1) —
+    caught before landing by re-deriving the logic explicitly rather than
+    trusting the first version; fixed to carry index and position as one
+    resolved pair, defaulting together or not at all.
+  - Closed the actual, real test-coverage gap this investigation
+    surfaced: every one of the 213 unit tests constructs its own
+    `state_path`/`config_path` via `tempdir().join(...)` and passes it
+    directly as a function argument — none of them call
+    `state::state_path()`/`config::config_path()` themselves, and none of
+    them invoke the compiled binary or `main()`/`dispatch()` at all. A new
+    `tests/state_persistence.rs` integration test spawns the real
+    compiled binary (`env!("CARGO_BIN_EXE_tsuzuki")`) against a genuine
+    temp `$HOME` with `XDG_CONFIG_HOME`/`XDG_DATA_HOME` explicitly cleared,
+    exercising `add` → fabricated `watch_later` bookmark → `resume` →
+    reading back real `~/.local/share/tsuzuki/state.toml`, plus a second
+    test proving persistence survives across separate process invocations
+    (`status`/`list` in fresh processes reading what an earlier `resume`
+    process wrote). Verified this test would have failed pre-fix by
+    literally reverting the message-format change and re-running it: the
+    episode/timestamp assertions fail exactly as expected, while the
+    persistence assertion still passes even pre-fix — direct, reproduced
+    confirmation that persistence itself was never the actual bug.
+  - 215 tests total (213 unit + 2 new integration), all passing; both
+    clippy gates clean; `cargo fmt -p tsuzuki --check` clean; `vendor/`
+    untouched. Manual repro re-run against the real release binary,
+    matching the bug report's exact sequence: `state.toml` confirmed
+    correctly absent at the (wrong) reported path and present with the
+    correct record at the real path; resume message confirmed showing
+    `episode 1 (09:20)`.
+
+- Phase 5f — Correction: reconcile silently froze once a tracked file's
+  real position crossed into `completion_remaining_seconds` of the
+  episode's end. Confirmed repeatable and permanent across multiple real,
+  separate quits, not a one-off timing fluke — a session watched further
+  and quit again near the end three separate times, and the record stayed
+  frozen at the same pre-threshold position every time.
+  - **Root cause, found by tracing (not guessed at):**
+    `reconcile_one_series`'s forward-scan loop only ever set its landing
+    candidate (`best`) for a `PlaybackAction::Resume` classification;
+    `Completed` fell through and set nothing. CLAUDE.md's own wording —
+    "a `Completed` result is treated identically to an absent entry" — was
+    read (and implemented) too literally: it correctly means neither
+    should ever advance the cursor to a later episode on its own, but the
+    code also discarded the `Completed` entry's *own real position*
+    exactly like absence's genuine lack of one. Absence and `Completed`
+    are not alike in what they carry — absence means mpv deleted the
+    entry (nothing left to record); `Completed` means mpv is still
+    reporting a real, current, changing position for the file already
+    being tracked. Once nothing existed past a `Completed` entry, `best`
+    stayed `None` and the whole reconcile call returned having recorded
+    nothing at all — every single time, since the file's own real
+    position kept re-classifying as `Completed` on every later call too.
+  - **Fix:** the forward-scan now sets `best` for `Completed` as well as
+    `Resume`, using the entry's own real position. Since `best` is
+    unconditionally overwritten as the scan moves forward, a later real
+    entry (of either classification) still always overrides an earlier
+    one — multi-step binge chaining is unaffected, confirmed by the two
+    existing chaining tests still passing unchanged. The only behavioral
+    change: when nothing is found forward of a `Completed` entry, its own
+    position is now the fallback landing point and gets recorded, instead
+    of the whole observation being silently discarded.
+  - CLAUDE.md's "Completion has two real signals" section and
+    `reconcile.rs`'s own module/inline doc comments rewritten to make this
+    distinction explicit — "identical for cursor-advancement purposes" is
+    not "identical in every respect" — per the doc-maintenance rule
+    (delete and replace imprecise text, don't append a correction next to
+    it).
+  - New test reproduces the exact real shape, not a single fabricated
+    multi-file call: three separate `reconcile()` calls against the SAME
+    tracked file — `Resume` (creates/updates), then `Completed`
+    (must advance, was frozen pre-fix), then a second, later `Completed`
+    reading (must advance again, not repeat the second call's value — the
+    part a single before/after test wouldn't catch, since the bug recurred
+    on every subsequent call). Confirmed failing pre-fix by temporarily
+    reverting only the `match` change and re-running it — failed exactly
+    as expected (frozen at the first value); passes with the fix restored.
+  - **Independence from the separate `--start` launch-flag issue,
+    investigated not assumed:** this bug lives entirely in `reconcile.rs`'s
+    forward-scan `best`-selection — the layer that decides *what position
+    gets stored*. The `--start` issue is in `launch.rs` — the layer that
+    decides *what argument to pass mpv at launch time*, using whatever
+    `reconcile` already decided. These are causally sequential, non-
+    overlapping code paths; this fix touches only `reconcile.rs` (plus its
+    own new test) and does not touch `launch.rs` at all. Confirmed
+    unrelated, not assumed.
+  - 216 tests total (214 unit + 2 integration), all passing; both clippy
+    gates clean; `cargo fmt -p tsuzuki --check` clean; `vendor/` untouched.
+    Manual repro against the real release binary using the project's own
+    committed `tests/fixtures/short.mkv` (~5.0s, real symphonia-probed
+    duration) with tuned thresholds to reach the completion window
+    quickly: three separate real `resume` invocations (1.5s → 4.0s →
+    4.3s) each correctly advanced the persisted position — no freeze.
+
+- Phase 5g — Build: cursor advancement / auto-`Dropped` when the CURRENT
+  tracked episode itself completes. The completion-freeze fix only made
+  reconcile *record* a `Completed` reading; CLAUDE.md's later "When the
+  CURRENT tracked episode itself completes" section specified the actual
+  full behavior, which was genuinely missing: advance to the next episode
+  at position 0, or auto-`Drop` if there is no next episode.
+  - **This superseded, not extended, the freeze fix's own approach.**
+    That fix landed a `Completed` reading at its own file's position
+    (staying on the same episode). The correct behavior is different: a
+    confirmed-complete episode should never land on itself at all — it
+    should resolve the cursor one step further. Reverted the "Completed
+    sets `best` at its own index" change; `Completed` (like absence) is no
+    longer a landing candidate in the main forward-scan at all.
+  - New `apply_completion_advance` (in `reconcile.rs`) runs only when the
+    scan finds nothing real (`Resume`) anywhere and the series' own
+    currently-tracked episode is confirmed complete — via absence (only
+    counts with a real stored baseline, else a freshly-advanced/never-
+    watched episode at position 0 would immediately "complete" again next
+    call) or a real `Completed` reading (unconditional, since it's current
+    real data). Walks forward past any further *consecutively* completed
+    episode (a binge that quit near the end of more than one episode in a
+    row), landing at position 0 of the first genuinely blank episode, or
+    transitioning to `Dropped` if the walk runs out of episodes — all in
+    one reconcile() call. Ordinary binge chaining (a real `Resume` position
+    already sitting on a later episode) needed no new logic at all — the
+    existing forward-scan already finds it directly, since it's still
+    within the same scan range; `apply_completion_advance` only ever runs
+    when that scan already came up empty. Auto-`Drop` never mutates the
+    stored position/path, matching manual `drop`'s established rule, for
+    the same reconcile-diffing-stability reason.
+  - Rewrote the freeze-fix's own single-episode test: under the new rule, a
+    single/last episode confirmed complete must auto-`Drop`, not update its
+    own position and stay `InProgress` — the old expectation was
+    superseded, not just extended.
+  - Found and fixed a real collateral regression while re-running the full
+    suite: three pre-existing `--root`-disambiguation tests in `main.rs`
+    fabricated a bare `InProgress` record for a single-episode series with
+    no matching mpv bookmark at all — now indistinguishable from "mpv
+    deleted the bookmark, it's done," so reconcile correctly auto-dropped
+    them before `pause`/`drop` ever ran, breaking those tests' original,
+    unrelated intent. Fixed by fabricating a matching real bookmark in each,
+    restoring a true reconcile no-op.
+  - 219 tests total (217 unit + 2 integration), all passing; both clippy
+    gates clean; `cargo fmt -p tsuzuki --check` clean; `vendor/` untouched.
+    Manual repro against the real release binary with two real fixture
+    episodes: episode 1 completing (absence) correctly advanced `Monster`
+    to episode 2 at 0:00, still `in_progress`; episode 2 (the actual last
+    episode) then also completing correctly auto-dropped it — confirmed
+    via `list` (no longer `in_progress`), `start` (`"Rewatch?"`), and bare
+    `tsuzuki` (0 in_progress, falls through to `start`'s listing).
+  - **Flagged, not acted on:** CLAUDE.md documents a separate, already-
+    written "bare spawn, no unconditional `--start`" correction for
+    `launch.rs` as settled, but `launch.rs` still unconditionally passes
+    `--start=<seconds>` on every launch — that fix has not actually landed
+    in code yet. Out of scope here (explicitly excluded); noted for
+    whoever picks up that correction next.
+
+- Phase 5.5 — Dogfood: three real bugs found trying the actual binary and
+  real mpv by hand — the human dogfood pass Phase 5g's "Next up" flagged as
+  still pending. None of these were caught by any prior gap-audit pass,
+  since all three depend on real mpv behavior no fabricated-entry test had
+  exercised.
+  1. **`--start=<seconds>` inherited by whatever mpv played next in the
+     playlist.** mpv treats a bare command-line option as a session-wide
+     default, not a property of the one file it was given for — so once
+     mpv advanced past the initially-resumed file (`playlist-next`, EOF
+     auto-advance, an autoload script), the next file silently inherited
+     the same start offset. **Fix** (`src/launch.rs`): `--start=` is now
+     wrapped in mpv's own per-file option braces (`--{ --start=… file
+     --}`), scoping it to just the one file `resume_playback` launches. No
+     shell sits between this and `execve`, so `--{`/`--}` need no escaping
+     here. New regression test spawns a fake `mpv` shell script and
+     asserts the exact captured argv shape.
+  2. **A tracked root nested inside another tracked root double-counted as
+     a series.** Registering both `~/Anime` and `~/Anime/Rewatches`
+     showed `Rewatches` twice: once correctly as its own root's series
+     list, once incorrectly again as a "series" named `Rewatches` under
+     `Anime`. **Fix** (`src/series.rs`): `series_in_root` now takes every
+     currently-tracked root's own canonicalized real path and excludes any
+     depth-1 child that matches one, using the same `roots::normalize`
+     comparison `add`/`exclude` already use for root/exclusion idempotency
+     — catches a symlinked or `..`-relative alias to a tracked root
+     exactly like a literal path match would. All four call sites
+     (`overview.rs`, `exclude.rs`, `mpv.rs`, `reconcile.rs`) updated to
+     compute and pass this list. A `series.rs` test that had asserted the
+     buggy behavior as "expected" was corrected, not just extended.
+  3. **Absence of a `watch_later` entry silently treated as proof of
+     completion — the serious one, real data loss.** Root cause, confirmed
+     against mpv's own PR #8141 / issue #9623: mpv's `--resume-playback`
+     (on by default, independent of who launches mpv) deletes a file's
+     bookmark the instant it's *loaded*, regardless of what happens next —
+     and mpv never rewrites a fresh one for a file left mid-playback via a
+     playlist command before it's ever quit while still loaded. So "no
+     entry for the current episode" was produced identically by a genuine
+     completion and by an ordinary abandon (skip to a different episode,
+     quit having spent under `resume_seconds` there, or none at all) —
+     provably indistinguishable from `watch_later` state alone. The old
+     rule (absence + the record's last stored position was real ⇒
+     confirmed complete) silently discarded real progress on the abandoned
+     episode and could even auto-`Drop` the whole series off a one-minute
+     peek at its finale. **Fix** (`src/reconcile.rs`): removed the
+     absence-based branch entirely. `reconcile_one_series` now tracks a
+     single `any_completed_found` flag across the *whole* forward scan
+     (not just the current episode) — only a real `Resume` position or a
+     `Completed` classification found anywhere justifies moving the cursor
+     or changing status; absence alone is a pure no-op. This does widen
+     the already-accepted "clean binge leaves no trace" blind spot (a
+     series finished via a true, silent EOF with *zero* further activity
+     ever recorded no longer auto-`Drop`s) — accepted as the right
+     tradeoff, since the ordinary way people finish an episode (quitting
+     on or near it) still writes a `Completed` reading before deletion can
+     happen, so auto-advance/auto-drop is unaffected for that common path.
+     One test rewritten (it encoded the old buggy behavior as expected),
+     one new regression test added reproducing the exact reported
+     scenario; the other 7 completion-related tests were traced by hand
+     against the new logic and confirmed to pass unchanged — a strict
+     tightening, not a new heuristic. `CLAUDE.md`'s "Completion detection
+     has a real, permanent blind spot," "When the CURRENT tracked episode
+     itself completes," and "Cursor movement" sections corrected in place
+     per its own doc-maintenance rule (deleted and replaced, not appended
+     to).
+  - Considered and explicitly rejected for finding 3: disabling mpv's
+    `--resume-playback` globally via the user's own `mpv.conf` (breaks
+    native resume for every other video the user watches, not just
+    tracked anime — disproportionate); an IPC socket (only works when
+    Tsuzuki is the launcher, contradicts "tracking is launcher-
+    independent"); a third-party history-logging Lua script (a new, heavy
+    dependency this project has never needed). Researched and confirmed
+    viable but deliberately deferred: a small Tsuzuki-*owned* Lua script
+    listening for mpv's `end-file` event with `reason=="eof"` (distinct
+    from `"stop"`, which is exactly what `playlist-next` produces) would
+    give a genuine positive completion signal, launcher-independent, read
+    after the fact exactly like `watch_later` — written up as a follow-up
+    in `/home/mhmdsamer/.claude/plans/so-the-question-is-humble-cupcake.md`,
+    not blocking this fix.
+  - 225 tests total (223 unit + 2 integration, up from 219), all passing;
+    `cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings` clean;
+    `vendor/anitomy` untouched.
+
 **Next up:**
-- Phase 5 — State machine & core commands (design.md §11). Design work is
-  done — every open question from Phase 4 is resolved, plus a full round
-  of additional Phase 5-specific decisions (state.toml's schema, the
-  shared reconcile-before-acting rule, pause/drop semantics and allowed
-  transitions, mpv launch resolution, the `current` command being cut,
-  start's three display words) are all written into CLAUDE.md. Kickoff
-  prompt is written and ready to hand off. Code not started yet. Dogfood
-  checkpoint per CLAUDE.md §6: pause and confirm with the user after this
-  phase before continuing to Phase 6.
+- Dogfood checkpoint per CLAUDE.md §6 is still pending — Phase 5.5 closed
+  three real bugs the human dogfood pass surfaced, but the checkpoint
+  itself (confirming with the user before starting Phase 6) has not been
+  formally closed. Do not start Phase 6 until the user has confirmed.
+- The EOF-script mechanism (finding 3's deferred follow-up, above) is
+  designed but not implemented.
+- The `--start` conditional-launch correction CLAUDE.md describes is not
+  yet implemented in `launch.rs` — flagged during Phase 5g, still not
+  fixed (distinct from Phase 5.5 finding 1's per-file *scoping* fix, which
+  addresses inheritance across files, not whether `--start` is passed at
+  all).
 
 **Open questions blocking further work:**
 - cleared
