@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::exclude;
-use crate::roots::expand_tilde;
+use crate::roots::{expand_tilde, normalize};
 use crate::series;
 use crate::state::{SeriesRecord, State, Status};
 
@@ -35,10 +35,17 @@ pub struct SeriesOverview {
 /// the place to surface a filesystem error for one bad root out of many.
 pub fn all_series(config: &Config, state: &State, home: Option<&Path>) -> Vec<SeriesOverview> {
     let mut overviews = Vec::new();
+    let tracked_root_real_paths: Vec<_> = config
+        .roots
+        .paths
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
 
     for root in &config.roots.paths {
         let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(series_list) = series::series_in_root(&expanded_root) else {
+        let Ok(series_list) = series::series_in_root(&expanded_root, &tracked_root_real_paths)
+        else {
             continue;
         };
         let excluded = exclude::excluded_paths_for_root(config, root, home);
@@ -310,6 +317,42 @@ mod tests {
         let fresh = overviews.iter().find(|o| o.name == "Fresh Show").unwrap();
         assert_eq!(fresh.status, None);
         assert_eq!(fresh.file_count, 1);
+    }
+
+    #[test]
+    fn a_nested_tracked_root_does_not_also_appear_as_a_series_of_its_parent_root() {
+        // Regression test for a dogfood-found bug: with both `Anime` and
+        // `Anime/Rewatches` registered as tracked roots, `list`/`status`
+        // (backed by `all_series`) showed `Rewatches` twice — once
+        // correctly as its own root's series, and once incorrectly as a
+        // "series" named "Rewatches" under `Anime`.
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let anime_root = dir.path().join("Anime");
+        let rewatches_root = anime_root.join("Rewatches");
+        fs::create_dir_all(anime_root.join("Monster")).unwrap();
+        fs::create_dir_all(rewatches_root.join("Cowboy Bebop")).unwrap();
+
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime_root.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatches_root.to_string_lossy().into_owned());
+
+        let state = State { series: vec![] };
+        let overviews = all_series(&config, &state, None);
+
+        let names: Vec<_> = overviews.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names.iter().filter(|n| **n == "Rewatches").count(), 0);
+        assert!(names.contains(&"Monster"));
+        assert!(names.contains(&"Cowboy Bebop"));
+        assert_eq!(overviews.len(), 2);
     }
 
     #[test]

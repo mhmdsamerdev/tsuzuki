@@ -168,6 +168,10 @@ fn is_under_a_tracked_root(
     home: Option<&Path>,
 ) -> bool {
     let real_source = normalize(source_path, home);
+    let tracked_root_real_paths: Vec<_> = tracked_roots
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
 
     tracked_roots.iter().any(|root| {
         let real_root = normalize(Path::new(root), home);
@@ -176,7 +180,7 @@ fn is_under_a_tracked_root(
         }
 
         let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(children) = series::series_in_root(&expanded_root) else {
+        let Ok(children) = series::series_in_root(&expanded_root, &tracked_root_real_paths) else {
             return false;
         };
         children.into_iter().any(|child| {

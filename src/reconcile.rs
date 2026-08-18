@@ -122,6 +122,12 @@ fn classify_root_and_series(
     home: Option<&Path>,
 ) -> Option<(String, String)> {
     let real_source = normalize(source_path, home);
+    let tracked_root_real_paths: Vec<_> = config
+        .roots
+        .paths
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
 
     let mut best: Option<(PathBuf, String, String)> = None;
     for root in &config.roots.paths {
@@ -138,7 +144,7 @@ fn classify_root_and_series(
         }
 
         let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(children) = series::series_in_root(&expanded_root) else {
+        let Ok(children) = series::series_in_root(&expanded_root, &tracked_root_real_paths) else {
             continue;
         };
         for child in children {

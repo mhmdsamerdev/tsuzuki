@@ -32,22 +32,39 @@ pub struct Series {
 /// protection is needed here: this function never recurses, so a symlink
 /// cycle among `root`'s immediate children can't cause unbounded work.
 ///
+/// `tracked_root_real_paths` is every currently-tracked root's own
+/// canonicalized real path (this root included — harmless, since a
+/// directory is never its own depth-1 child). A child directory that is
+/// itself a tracked root (e.g. `Anime/Rewatches` when `~/Anime/Rewatches`
+/// is separately registered) is excluded from the results: composable
+/// roots (CLAUDE.md §3) means that folder contributes its own series
+/// independently, and showing it a second time as a series of its parent
+/// would double-count it. Comparison is on the canonicalized real path via
+/// the same `roots::normalize` helper `add`/`exclude` already use for
+/// root/exclusion idempotency, so a symlink or `..`-relative alias to a
+/// tracked root is caught exactly like a literal path match would be.
+///
 /// Results are naturally sorted by name for deterministic output, but this
 /// ordering isn't meaningful yet — Phase 5's `list`/`start` decide how
 /// series are actually presented.
 #[allow(dead_code)]
-pub fn series_in_root(root: &Path) -> io::Result<Vec<Series>> {
+pub fn series_in_root(root: &Path, tracked_root_real_paths: &[PathBuf]) -> io::Result<Vec<Series>> {
     let mut series = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if is_dir_following_symlinks(&path) {
+        if is_dir_following_symlinks(&path) && !is_a_tracked_root(&path, tracked_root_real_paths) {
             let name = entry.file_name().to_string_lossy().into_owned();
             series.push(Series { path, name });
         }
     }
     series.sort_by(|a, b| natord::compare(&a.name, &b.name));
     Ok(series)
+}
+
+fn is_a_tracked_root(path: &Path, tracked_root_real_paths: &[PathBuf]) -> bool {
+    let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    tracked_root_real_paths.contains(&real)
 }
 
 /// Hierarchical natural sort over a series' full path tree (design.md §5):
@@ -239,29 +256,51 @@ mod tests {
         // A loose file directly under root is not a series.
         touch(&root.join("readme.txt"));
 
-        let series = series_in_root(root).unwrap();
+        let series = series_in_root(root, &[]).unwrap();
         let names: Vec<_> = series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["Monster", "One Piece"]);
         assert_eq!(series[0].path, root.join("Monster"));
     }
 
     #[test]
-    fn composable_roots_produce_independent_series_lists() {
+    fn a_child_not_separately_tracked_as_its_own_root_is_still_listed_as_a_series() {
         let dir = tempdir().unwrap();
         let anime_root = dir.path().join("Anime");
         let rewatches_root = anime_root.join("Rewatches");
         std_fs::create_dir_all(anime_root.join("Monster")).unwrap();
         std_fs::create_dir_all(rewatches_root.join("Monster")).unwrap();
 
-        let anime_series = series_in_root(&anime_root).unwrap();
-        let rewatches_series = series_in_root(&rewatches_root).unwrap();
-
-        // "Rewatches" itself shows up as a series under the Anime root
-        // (it's just another depth-1 directory there) — that's expected;
-        // registering it separately is what makes it its own root too.
+        // Rewatches/ is an ordinary subfolder here — it isn't separately
+        // registered as its own tracked root — so it must still show up
+        // as a plain series, exactly like any other depth-1 directory.
+        let anime_series = series_in_root(&anime_root, &[]).unwrap();
         let anime_names: Vec<_> = anime_series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(anime_names, vec!["Monster", "Rewatches"]);
+    }
 
+    #[test]
+    fn a_child_that_is_itself_a_tracked_root_is_excluded_from_its_parents_series_list() {
+        // Regression test for a dogfood-found bug: with both `Anime` and
+        // `Anime/Rewatches` registered as tracked roots, `Rewatches` must
+        // not double as a "series" under `Anime` in addition to
+        // contributing its own series independently (composable roots,
+        // design.md §3) — it was, incorrectly, showing up both ways.
+        let dir = tempdir().unwrap();
+        let anime_root = dir.path().join("Anime");
+        let rewatches_root = anime_root.join("Rewatches");
+        std_fs::create_dir_all(anime_root.join("Monster")).unwrap();
+        std_fs::create_dir_all(rewatches_root.join("Monster")).unwrap();
+
+        let tracked_root_real_paths = vec![
+            std_fs::canonicalize(&anime_root).unwrap(),
+            std_fs::canonicalize(&rewatches_root).unwrap(),
+        ];
+
+        let anime_series = series_in_root(&anime_root, &tracked_root_real_paths).unwrap();
+        let anime_names: Vec<_> = anime_series.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(anime_names, vec!["Monster"]);
+
+        let rewatches_series = series_in_root(&rewatches_root, &tracked_root_real_paths).unwrap();
         let rewatches_names: Vec<_> = rewatches_series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(rewatches_names, vec!["Monster"]);
 
@@ -392,7 +431,7 @@ mod tests {
         touch(&root.join("readme.txt"));
         touch(&root.join("ep01.mkv"));
 
-        let series = series_in_root(&root).unwrap();
+        let series = series_in_root(&root, &[]).unwrap();
         assert!(series.is_empty());
     }
 
@@ -647,7 +686,7 @@ mod tests {
 
         symlink(&real_series, root.join("Monster")).unwrap();
 
-        let series = series_in_root(&root).unwrap();
+        let series = series_in_root(&root, &[]).unwrap();
         let names: Vec<_> = series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["Monster"]);
     }
@@ -750,7 +789,7 @@ mod tests {
             "\n=== ordering demo: series_in_root({}) ===",
             root.display()
         );
-        let series = series_in_root(&root).unwrap();
+        let series = series_in_root(&root, &[]).unwrap();
         for s in &series {
             println!("series: {}", s.name);
             let episodes = ordered_episodes(&s.path, &default_extensions()).unwrap();

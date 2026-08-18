@@ -308,10 +308,17 @@ pub struct Candidate {
 /// surface an I/O error for one bad root out of many.
 pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate> {
     let mut candidates = Vec::new();
+    let tracked_root_real_paths: Vec<_> = config
+        .roots
+        .paths
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
 
     for root in &config.roots.paths {
         let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(series_list) = series::series_in_root(&expanded_root) else {
+        let Ok(series_list) = series::series_in_root(&expanded_root, &tracked_root_real_paths)
+        else {
             continue;
         };
         let excluded = excluded_paths_for_root(config, root, home);
