@@ -234,7 +234,7 @@ pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
 
     let contents = match fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return CheckResult::fail(
                 label,
                 format!(
@@ -242,6 +242,17 @@ pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
                      Add this line to it:\n      write-filename-in-watch-later-config=yes",
                     path.display()
                 ),
+            );
+        }
+        Err(e) => {
+            // A real, distinct problem from "missing" — e.g. permission
+            // denied on the file or one of its parent directories. Mirrors
+            // check_mpv_log_dirs's own missing-vs-unreadable distinction;
+            // conflating the two here would send a user chasing "create the
+            // file" for what's actually a permissions problem.
+            return CheckResult::fail(
+                label,
+                format!("{} exists but is unreadable: {e}", path.display()),
             );
         }
     };
@@ -758,6 +769,47 @@ mod tests {
         let r = check_mpv_conf(&install);
         assert_eq!(r.level, Level::Fail);
         assert!(r.message.contains("does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_mpv_conf_permission_denied_is_distinguished_from_missing() {
+        // Dogfood-found gap: an unreadable-but-present mpv.conf (permission
+        // denied on the file itself) was originally conflated with "does
+        // not exist," which would send a user chasing "create the file"
+        // for what's actually a permissions problem — the same
+        // missing-vs-unreadable distinction check_mpv_log_dirs already
+        // makes correctly, just missing here.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("mpv");
+        std_fs::create_dir_all(&config_dir).unwrap();
+        let conf_path = config_dir.join("mpv.conf");
+        std_fs::write(&conf_path, "write-filename-in-watch-later-config=yes\n").unwrap();
+        std_fs::set_permissions(&conf_path, std_fs::Permissions::from_mode(0o000)).unwrap();
+
+        let install = MpvInstall {
+            label: "native",
+            config_dir: config_dir.clone(),
+        };
+        let r = check_mpv_conf(&install);
+
+        // Restore permissions before any assertion can fail the test, so
+        // tempdir cleanup can still remove it either way.
+        std_fs::set_permissions(&conf_path, std_fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(r.level, Level::Fail);
+        assert!(
+            r.message.contains("unreadable"),
+            "expected an unreadable-specific message, got: {}",
+            r.message
+        );
+        assert!(
+            !r.message.contains("does not exist"),
+            "a present-but-unreadable file must not be reported as missing, got: {}",
+            r.message
+        );
     }
 
     #[test]
