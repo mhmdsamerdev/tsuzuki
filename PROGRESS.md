@@ -3,9 +3,10 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 6 — mpv companion script wiring (implemented,
-verified — paused for user review before Phase 7 (`doctor`), per the same
-stop-and-confirm precedent as the Phase 5 dogfood checkpoint)
+**Current phase:** Phase 7 — `doctor` (implemented, verified — paused for
+user review before Phase 8 (MAL sync), per the same stop-and-confirm
+precedent as the Phase 5 dogfood checkpoint; this phase adds a new
+file-writing `--fix` path and a destructive `--forget-orphans` path)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -994,12 +995,226 @@ stop-and-confirm precedent as the Phase 5 dogfood checkpoint)
     but the exact mechanism is covered end-to-end by the new integration
     test above.
 
+- Phase 7 — `doctor`: the full check list (1a-1h from CLAUDE.md's kickoff
+  decisions; 1i/MAL auth status excluded, Phase 8 doesn't exist yet), wired
+  into `tsuzuki doctor [--fix] [--forget-orphans]`.
+  - **`src/doctor.rs`** (new): every check is a pure function over
+    already-resolved inputs (booleans, paths, file contents) — no check
+    function itself shells out or touches real environment resolution
+    (`dirs::config_dir()`, a real `flatpak` subprocess) directly, mirroring
+    `launch.rs`'s own injectable-closure convention; that glue lives in
+    `main.rs`'s `doctor_command` instead. `CheckResult { label, level: Ok |
+    Warn | Fail, message }` is the common shape every check returns;
+    `render()` formats one `[OK ]`/`[WARN]`/`[FAIL] label: message` line.
+    - **1a mpv availability**: reuses `launch::native_mpv_on_path`/
+      `flatpak_mpv_installed` (bumped `pub(crate)`, the same minimal-touch
+      precedent Phase 6 already set for `mpv::is_under_a_tracked_root`) for
+      detection, plus a new `launch::program_on_path` (the general form
+      `native_mpv_on_path` now delegates to) and `is_executable_file`
+      (also bumped `pub(crate)`) for validating a configured
+      `command_override` actually resolves — `resolve_mpv_command` itself
+      never validated the override's program exists, only split it, so
+      doctor adds the missing check rather than reusing that function
+      directly. Neither found → FAIL; exactly one → OK; both → WARN
+      (ambiguous but not broken, since `resolve_mpv_command` always picks
+      native); a broken override → FAIL even if native/Flatpak would
+      otherwise resolve, since an override always takes priority at launch
+      time too.
+    - **1b mpv.conf**: `write_filename_flag_state` parses
+      `write-filename-in-watch-later-config`'s last effective directive
+      (bare flag / `=yes` / `no-` negation / commented-out-or-absent →
+      `None`) — later directives override earlier ones, matching mpv's own
+      config-parsing order. Checked only for install methods 1a actually
+      detected (no native mpv → no native mpv.conf check) — an
+      undetected-install's config file being "missing" isn't a real
+      problem. Never writes to the file either way.
+    - **1c watch_later reachability**: reuses `mpv::scan_watch_later`
+      directly rather than re-implementing candidate resolution — its
+      `ScanResult::warning` already carries exactly the
+      "configured-override-doesn't-resolve" signal doctor needs. OS-default
+      mode never FAILs (an absent candidate is normal); only a configured
+      override that doesn't resolve does. `mpv::candidate_watch_later_dirs`
+      bumped `pub(crate)` so doctor can report the OS-default candidate
+      count without duplicating the table.
+    - **1d Flatpak permission gap**: best-effort, `flatpak info
+      --show-permissions io.mpv.Mpv` output (fetched by `main.rs`, parsed
+      by a pure `check_flatpak_permissions`) scanned for
+      `filesystem(s)=host`/`home`. Deliberately **never FAILs** under any
+      input — sandbox permissions are the user's own security decision, and
+      this check's own confidence (a substring scan, not real per-path
+      verification) can't justify more than WARN regardless of what it
+      finds. No `flatpak` CLI, no Flatpak mpv, or a failed subprocess call
+      all degrade to a plain WARN saying so, never silently omitted.
+    - **1e tsuzuki.lua**: `BUNDLED_SCRIPT` is `include_str!`'d from
+      `contrib/mpv/tsuzuki.lua` at compile time, so `--fix` works from a
+      distributed binary with no `contrib/` directory on disk. Comparison
+      is a **direct byte-for-byte read**, not a hash — flagged as a
+      judgment call below. `install_script` writes atomically (temp file in
+      the same directory, then rename), matching `state.rs`'s own
+      discipline exactly. Checked/fixed only for install methods 1a
+      detected, same reasoning as 1b.
+    - **1f mpv-log reachability**: every `script_log::mpv_log_dirs()`
+      candidate checked — missing is `Ok` (indistinguishable from, and as
+      normal as, "script just installed, mpv hasn't quit anything yet");
+      existing-but-unreadable (a real permissions problem) is `Fail`.
+    - **1g tracked-root validity**: plain existence/directory check per
+      `config.roots.paths` entry.
+    - **1h orphaned records**: `find_orphans` walks `series_in_root` under
+      every root 1g found *valid* only — an unreachable root is skipped
+      entirely for this check, never treated as "every series under it is
+      gone" (CLAUDE.md's explicit false-positive concern for an unmounted
+      drive). `forget_orphans` is a plain internal function (`state.series
+      .retain(...)`) — no new public command or entry point, per decision
+      2.
+  - **Orphan-clearing command decision (locked in, not re-litigated):**
+    `tsuzuki doctor --fix --forget-orphans` — both flags required together
+    (`--forget-orphans` has `#[arg(long, requires = "fix")]` in `cli.rs`,
+    enforced by clap itself, never a hand-rolled Tsuzuki check for this one
+    dependency — matches the CLI bare-invocation contract's own precedent
+    of leaving malformed-input-shaped cases to clap). Bulk-clears every
+    *currently-confirmed* orphan in one pass, prints exactly what it's
+    about to delete first. CLAUDE.md's "state.toml record whose series has
+    been deleted" section updated in place (not appended) to reflect this
+    exact command, replacing its old "not decided yet" placeholder.
+  - **`main.rs`'s `doctor_command`**: runs `reconcile_state` first (the same
+    "every state-touching command reconciles against mpv reality first"
+    rule every other state-mutating command already follows — `--fix
+    --forget-orphans` is a real `state.toml` mutation, so `doctor` counts),
+    then runs every check in order, applying `--fix`'s script
+    install/update inline (re-checking immediately after so the final
+    report — and its exit code — reflect the post-fix reality, not the
+    pre-fix one), then `--forget-orphans`'s deletion+write if requested.
+    Every check line prints to **stdout**, not stderr — this report *is*
+    doctor's real output/purpose, not an incidental warning about achieving
+    some other goal (CLAUDE.md's stderr convention is for the latter).
+    Exit 0 only if zero FAIL-level results remain after any mutation;
+    `tsuzuki doctor && echo healthy` works as a script check. A trailing
+    `MAL auth status: not checked — Phase 8 (MAL sync) doesn't exist yet.`
+    line is always printed — not a check, not silently omitted either, per
+    decision 1i.
+  - **`cli.rs`**: `Doctor` grew from a bare stub variant to `Doctor { fix:
+    bool, forget_orphans: bool }`.
+  - 309 unit tests total (up from 258 at the end of Phase 6b — 47 new in
+    `doctor.rs` covering every check function's full decision table in
+    isolation, plus 4 new in `main.rs` covering `doctor_command`'s own
+    glue: orphan-reported-but-not-cleared without `--forget-orphans`,
+    `--fix` alone not clearing orphans, `--fix --forget-orphans` clearing
+    exactly the confirmed orphan and leaving an unrelated still-tracked
+    series completely untouched, and a no-orphans case leaving state.toml
+    byte-for-byte unchanged) + 1 new integration test file
+    (`tests/doctor_integration.rs`, 2 tests: the required real-binary/
+    real-XDG-path test for this phase, spawning the compiled binary against
+    a genuine scratch `$HOME` with a deliberately broken setup — an
+    unreachable configured `watch_later_dir` override and one orphaned
+    record — confirming the full report content and non-zero exit code,
+    then confirming `--fix --forget-orphans` actually clears the orphan
+    from the real on-disk `state.toml`; plus a second test confirming
+    clap itself — not a hand-rolled check — rejects `--forget-orphans`
+    without `--fix`) + the existing 6 (`script_log_integration.rs` ×2,
+    `state_persistence.rs` ×2) = 315 tsuzuki-side tests total (up from
+    262), all passing; `cargo clippy -p tsuzuki --no-deps --all-targets --
+    -D warnings` clean; `cargo fmt -p tsuzuki --check` clean; `vendor/
+    anitomy` confirmed untouched via `git diff --stat`.
+  - Manually dogfooded against a real scratch `$HOME` on this machine's
+    real, standing Flatpak mpv install (no native mpv on this machine):
+    fresh install → `doctor` correctly reports mpv.conf missing and
+    tsuzuki.lua not installed (both FAIL) alongside OK results for
+    watch_later/mpv-log/tracked-root/orphans → `doctor --fix` installs
+    tsuzuki.lua, confirmed byte-identical to `contrib/mpv/tsuzuki.lua` via
+    `diff`, and a re-run shows it OK → fabricated a real bookmark, ran
+    `resume` to create a genuine `in_progress` record, deleted that
+    series' folder out from under its still-tracked root → `doctor`
+    correctly reports it as the one orphan (and only that one — a sibling
+    series whose folder still exists is never flagged) with the exact
+    `tsuzuki doctor --fix --forget-orphans` invocation → running that
+    exact command clears it, confirmed via a direct read of the real
+    `state.toml` (`series = []`) afterward.
+  - **Judgment calls, flagged per the task brief's own request:**
+    1. **1e's "hash compare" was implemented as a direct byte-for-byte
+       comparison instead.** The file is tiny (a few KB), so a real
+       comparison costs nothing extra over hashing and carries zero
+       collision risk — hashing's only actual advantage (comparing short
+       digests instead of full content) doesn't matter at this size. No
+       new dependency needed either way (a hash would have used
+       `std::collections::hash_map::DefaultHasher`, stdlib-only, but the
+       direct comparison needs even less code).
+    2. **1d (Flatpak permission gap) is capped at WARN, never FAIL, by
+       design** — not explicitly specified as a severity level in the
+       kickoff decisions, only as "diagnostic only, no --fix." Chose WARN
+       as the ceiling since the check's own confidence is inherently
+       limited (a substring scan over `flatpak info --show-permissions`
+       output, not real path-by-path verification) and the underlying
+       fact — if genuinely narrow — is a deliberate user security choice,
+       not a bug Tsuzuki should ever assert is definitely broken.
+    3. **This development/test environment could not verify 1d's happy
+       path against a real narrow-permission Flatpak install** — only
+       against fabricated `flatpak info --show-permissions` output text
+       (unit-tested directly) and the real environment's actual broad
+       default permissions (dogfooded, produced the expected WARN). The
+       `flatpak info --show-permissions` output format itself was not
+       independently verified against multiple real flatpak versions;
+       if a future flatpak release changes that output's shape, this
+       check's substring scan may need updating — it already degrades to
+       an honest WARN rather than a wrong OK/FAIL if the format drifts
+       enough to just not match either pattern, so this isn't considered
+       blocking, but it's worth naming as the check's real limitation.
+    4. **mpv.conf/tsuzuki.lua checks are gated on 1a's install-method
+       detection** (not checked at all for an install method with no mpv
+       found) — not explicitly specified either way in the kickoff
+       decisions. Chose this over checking both candidate locations
+       unconditionally, since an install method with no mpv at all has no
+       real mpv.conf/scripts directory to be right or wrong about yet;
+       the alternative would produce a spurious FAIL for, say, the
+       Flatpak mpv.conf on a machine that only has native mpv installed.
+
+- Phase 7a — Correction: found by dogfooding the real release binary
+  against a scratch `$HOME` (`/run catch-missing-tests`, not any automated
+  test) — a real gap none of the 310 fabricated-entry tests happened to
+  exercise. A present-but-unreadable `mpv.conf` (permission denied on the
+  file itself) was reported identically to a genuinely missing one —
+  `"...mpv.conf does not exist. Add this line to it..."` — which would send
+  a user chasing "create the file" for what's actually a permissions
+  problem. This is exactly the missing-vs-unreadable distinction
+  `check_mpv_log_dirs` (1f) already makes correctly; 1b's `check_mpv_conf`
+  simply never made the same distinction.
+  - Also dogfooded and confirmed correct, no further gaps found: composable
+    roots sharing a series name (`~/Anime/Monster` vs.
+    `~/Anime/Rewatches/Monster`, both `in_progress`) — deleting only one
+    copy's folder flagged exactly that one as orphaned, never the other;
+    `--forget-orphans` with genuinely zero orphans present prints no
+    spurious "forgetting 0 record(s)" message and leaves `state.toml`
+    untouched; running `doctor --fix` twice in a row is fully idempotent
+    (identical output, exit 0 both times) once every fixable problem is
+    actually fixed; a pristine `$HOME` with zero tracked roots at all
+    doesn't panic or print anything nonsensical for the tracked-root/orphan
+    checks.
+  - **Fix** (`src/doctor.rs`'s `check_mpv_conf`): matches on `fs::read_to_string`'s
+    error `kind()` instead of collapsing every `Err` to "missing" —
+    `NotFound` keeps the existing message; any other error (permission
+    denied, and in principle anything else `read_to_string` can fail with)
+    now reports `"<path> exists but is unreadable: <e>"`, mirroring 1f's
+    own wording exactly. Never changes what's checked or whether the
+    result is FAIL — a real problem either way — only makes the message
+    honest about which real problem it is.
+  - New regression test (`#[cfg(unix)]`, chmod `0o000` on a real file, same
+    permission-manipulation pattern `check_mpv_log_dirs`'s own unreadable-
+    directory test already uses) asserts the message says "unreadable" and
+    explicitly asserts it does *not* say "does not exist" — confirmed
+    failing pre-fix by re-running it against the reverted code path before
+    landing the fix, not just written to pass. 310 unit tests total (up
+    from 309), all passing; both clippy/fmt gates clean; `vendor/anitomy`
+    untouched. Manually reproduced against the real release binary:
+    `chmod 000` on a real `mpv.conf` now correctly reports "exists but is
+    unreadable: Permission denied (os error 13)" instead of "does not
+    exist."
+
 **Next up:**
-- Phase 7 (`doctor`) is next: proactive setup checks (mpv availability,
-  `write-filename-in-watch-later-config=yes`, whether the companion script
-  is actually installed, orphaned `state.toml` records for deleted
-  series). None of this phase's work wires into `doctor` yet — deliberately
-  excluded from Phase 6's scope.
+- Phase 8 (MAL sync) is next: OAuth login, exact-match linking against the
+  user's own MAL list, the two-way non-destructive merge, pause/drop
+  mirroring. This is the highest-risk phase (network, external API, auth) —
+  per design.md §11, isolating it means a flaky OAuth flow can't destabilize
+  everything already validated. Also the point where 1i (MAL auth status)
+  finally gets a real `doctor` check instead of the placeholder note.
 
 **Open questions blocking further work:**
 - cleared
