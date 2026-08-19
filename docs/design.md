@@ -231,8 +231,11 @@ Sync is optional — nothing about core tracking or resuming depends on MAL bein
 1. First `sync` touching a given series: fetch the user's MAL list.
 2. Normalize both sides (case, brackets, whitespace) and check for an **exact match** between the local folder name and *any* of an entry's known titles — not fuzzy similarity against one title.
 3. **Match found** → link automatically, cache the ID locally.
-4. **No exact match** → show the closest candidates by title (similarity ranks what's *displayed*, never decides a match) — user picks one. That folder name is saved as a new synonym, so it's an exact match next time.
-5. **Nothing on the list** → tell the user plainly; they add it on MAL, or use `tsuzuki sync link <series> --mal-id <id>` as a manual override.
+4. **No exact match, and the closest candidate clears `fuzzy_match_threshold`** → a single "did you mean...?" line naming that one candidate, plus the exact `tsuzuki sync link "<series>" --mal-id <id>` command to confirm it — never a ranked list, never a raw similarity percentage (similarity ranks what's *displayed*, never decides a match, and a weak candidate is noise, not help). The user still has to run that command explicitly; nothing auto-links.
+5. **No exact match, and nothing clears the threshold** → a plain "no matching series found," no suggestion shown at all.
+6. **Nothing on the list** → tell the user plainly; they add it on MAL, or use `tsuzuki sync link <series> --mal-id <id>` as a manual override.
+
+**`sync` output is one line per series, action-oriented.** A successful merge reads `✓ <series> — episode <n> synced`; a case needing manual linking reads `⚠ <series> — ...` with an indented `→ tsuzuki sync link ...` command when there's something to run; a real failure reads `✗ <series> — sync failed: <reason>`. The run ends with one compact summary line (`Sync complete: 1 synced, 2 need manual linking`) — categories with a zero count are omitted rather than padding the line. Nothing about *how* a match was found (similarity scores, candidate counts, which title field matched) belongs in this output — that's internal reasoning, not a result or an action the user needs to take.
 
 **Two-way, non-destructive merge.** A push-only sync is harmful — if the user watched ahead elsewhere and updated MAL directly, a naive push would overwrite MAL *backward*. The rule:
 
@@ -284,6 +287,7 @@ watch_later_dir = ""                 # empty = use OS-default candidate list
 [mal]
 client_id = ""               # optional override; empty = use Tsuzuki's built-in client_id (see §7 — no MAL app registration required by default)
 redirect_port = 8734        # local OAuth-callback listener port used by `tsuzuki sync login`
+fuzzy_match_threshold = 0.8  # minimum title similarity (0.0-1.0) before `sync` suggests a "did you mean...?" — below this, no suggestion is shown at all
 ```
 
 **`tsuzuki config` is a thin CLI layer over the same file** — same relationship git has to `.gitconfig`:

@@ -624,6 +624,44 @@ documented local/MAL numbering-drift gap in `docs/design.md`, not
 something worth a new persisted "was this episode actually completed"
 field for.
 
+### Sync output only ever suggests a confident fuzzy match, and stays one line per series
+Found in Phase 9 dogfooding: `tsuzuki sync` was printing every one of
+`rank_candidates`' top-5 results, similarity percentage included, even
+when the "closest" candidate was still an unrelated series. A weak
+candidate isn't a helpful suggestion — it's noise the user has to read
+past, and a raw similarity number is internal matching detail, not a
+result or an action.
+
+- **`sync::best_candidate` gates what's shown, `find_exact_match` still
+  gates what's a match.** `[mal] fuzzy_match_threshold` (default `0.8`,
+  same two-defaulting-layers treatment as `redirect_port` — a bare
+  `#[serde(default)]` would silently produce `0.0`, which would suggest
+  anything) is the bar `rank_candidates`' own top-1 result must clear
+  before `OutcomeKind::NoExactMatch` carries `Some(candidate)` instead of
+  `None`. This never changes what counts as a real match — only
+  `find_exact_match` (exact, post-normalization, against any known title)
+  still decides that, unchanged. It only decides what's worth *displaying*
+  as a "did you mean...?" hint. At most one suggestion is ever shown, not
+  a ranked list — this project's own "list-only, not interactive"
+  precedent (the Anitomy-candidate confirmation flow) still applies: the
+  user must explicitly re-run `sync link` to confirm it, nothing
+  auto-links.
+- **Terminal output is one line per series, symbol-coded, no matching
+  internals.** `✓` for anything that completed with no action needed
+  (`Merged`, any direction — Push/Pull/NoOp all read the same to the
+  user), `⚠` for anything needing a manual `sync link` (a confident
+  suggestion, no suggestion, or an empty MAL list), `✗` for a real
+  failure. A confident suggestion gets its exact `tsuzuki sync link
+  "<series>" --mal-id <id>` command printed on the next, indented line —
+  the point is the user can act on the output directly, never re-derive
+  the command themselves. Similarity scores and multi-candidate lists are
+  gone entirely; that reasoning stays internal to `sync.rs`.
+- **The run-end summary omits zero-count categories** (`sync_summary_line`
+  in `main.rs`) rather than always printing all three — "Sync complete: 1
+  synced, 2 need manual linking" instead of padding it with "0 failed" on
+  the common all-good run. Exit-code logic (`ExitCode::FAILURE` iff any
+  series failed) is unchanged — only the printed text changed.
+
 ## 4. Dev environment
 
 **All build/test/lint commands run inside `nix-shell`**, not against the

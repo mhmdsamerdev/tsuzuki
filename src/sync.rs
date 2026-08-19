@@ -212,6 +212,28 @@ pub fn rank_candidates(
     scored
 }
 
+/// The single best-matching candidate for a "did you mean...?" suggestion —
+/// but only when it's actually good enough to be worth showing.
+/// `fuzzy_match_threshold` (`[mal] fuzzy_match_threshold` in config.toml,
+/// CLAUDE.md's "sync output only ever suggests a confident fuzzy match")
+/// is the bar: below it, `rank_candidates`' own top result is still just
+/// "the least-bad of whatever's on the list" — often a completely unrelated
+/// series — and surfacing it as a suggestion is noise, not help. This never
+/// changes what counts as a *match*; `find_exact_match` alone still decides
+/// that. It only decides what's worth *displaying* as a manual-link hint,
+/// same list-only, never-auto-links precedent `rank_candidates` itself
+/// already documents.
+pub fn best_candidate(
+    local_name: &str,
+    entries: &[AnimeListEntry],
+    fuzzy_match_threshold: f64,
+) -> Option<Candidate> {
+    rank_candidates(local_name, entries, 1)
+        .into_iter()
+        .next()
+        .filter(|c| c.similarity >= fuzzy_match_threshold)
+}
+
 // --- MAL data API: fetch list, fetch one anime's status, push a count ---
 
 #[derive(Debug)]
@@ -582,8 +604,11 @@ fn upsert_link(state: &mut State, root: &str, name: &str, mal_id: u32) {
 pub enum OutcomeKind {
     /// Linked (just now, or already) and merged.
     Merged { mal_id: u32, action: MergeAction },
-    /// Not yet linked, and no exact title match was found.
-    NoExactMatch { candidates: Vec<Candidate> },
+    /// Not yet linked, and no exact title match was found. `suggestion` is
+    /// `Some` only when the best candidate cleared `fuzzy_match_threshold`
+    /// — see [`best_candidate`]. Never more than one: a list of weak
+    /// candidates is noise, not a useful "did you mean" prompt.
+    NoExactMatch { suggestion: Option<Candidate> },
     /// Not yet linked, and the user's MAL list is completely empty.
     EmptyList,
     /// Any failure — network, API rejection, parse error — for this series
@@ -618,6 +643,7 @@ pub fn run_sync(
     state: &mut State,
     targets: &[(String, String)],
     delay: Duration,
+    fuzzy_match_threshold: f64,
 ) -> Vec<SeriesOutcome> {
     if targets.is_empty() {
         return Vec::new();
@@ -684,7 +710,11 @@ pub fn run_sync(
                                 root: root.clone(),
                                 name: name.clone(),
                                 kind: OutcomeKind::NoExactMatch {
-                                    candidates: rank_candidates(name, entries, 5),
+                                    suggestion: best_candidate(
+                                        name,
+                                        entries,
+                                        fuzzy_match_threshold,
+                                    ),
                                 },
                             });
                             continue;
@@ -743,6 +773,11 @@ mod tests {
     use super::*;
     use crate::mal::HttpError;
     use std::cell::RefCell;
+
+    /// A representative `fuzzy_match_threshold`, used everywhere `run_sync`
+    /// is exercised end-to-end in this module's tests unless a test is
+    /// specifically about the threshold boundary itself.
+    const TEST_FUZZY_MATCH_THRESHOLD: f64 = 0.8;
 
     // --- Title normalization ---
 
@@ -865,6 +900,30 @@ mod tests {
         assert_eq!(find_exact_match("One Piece", &entries), None);
         let ranked = rank_candidates("One Piece", &entries, 5);
         assert_eq!(ranked.len(), 1);
+    }
+
+    // --- best_candidate: the threshold gate on what's worth suggesting ---
+
+    #[test]
+    fn best_candidate_is_none_when_the_top_result_is_below_threshold() {
+        let entries = vec![entry(1, "Totally Unrelated Show", "", "", &[])];
+        assert_eq!(best_candidate("One Piece", &entries, 0.8), None);
+    }
+
+    #[test]
+    fn best_candidate_is_some_when_the_top_result_clears_threshold() {
+        let entries = vec![entry(1, "One Piece!", "", "", &[])];
+        let candidate = best_candidate("One Piece", &entries, 0.8).unwrap();
+        assert_eq!(candidate.mal_id, 1);
+    }
+
+    #[test]
+    fn best_candidate_boundary_is_inclusive() {
+        let entries = vec![entry(1, "abcde", "", "", &[])];
+        // Exactly 0.8 similarity to "abcd" (1 edit / 5 chars) — must pass a
+        // threshold of exactly 0.8, not require strictly greater than.
+        assert_eq!(title_similarity("abcd", "abcde"), 0.8);
+        assert!(best_candidate("abcd", &entries, 0.8).is_some());
     }
 
     // --- Merge decision table (CLAUDE.md §2's core invariant) ---
@@ -1032,6 +1091,7 @@ mod tests {
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(outcomes.len(), 1);
@@ -1123,8 +1183,13 @@ mod tests {
     // --- run_sync: no-match / empty-list outcomes ---
 
     #[test]
-    fn run_sync_reports_no_exact_match_with_ranked_candidates_and_does_not_link() {
+    fn run_sync_reports_no_exact_match_with_no_suggestion_when_nothing_clears_the_threshold() {
         let client = FakeClient::new();
+        // "One Piece" vs "One Piece Special" — related-looking, but the
+        // similarity a naive reader might expect is well under a reasonable
+        // confidence bar (~0.53 here). This is exactly the noisy-suggestion
+        // shape this project's own dogfooding flagged: a weak candidate is
+        // worse than no candidate at all, so it must not surface.
         client.push_list_response(
             200,
             r#"{"data":[{"node":{"id":5,"title":"One Piece Special","alternative_titles":{"en":"","ja":"","synonyms":[]},"my_list_status":{"num_episodes_watched":0}}}]}"#,
@@ -1140,13 +1205,55 @@ mod tests {
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(outcomes.len(), 1);
         match &outcomes[0].kind {
-            OutcomeKind::NoExactMatch { candidates } => assert_eq!(candidates.len(), 1),
+            OutcomeKind::NoExactMatch { suggestion } => {
+                assert_eq!(*suggestion, None, "a weak candidate must not be suggested")
+            }
             other => panic!("expected NoExactMatch, got {other:?}"),
         }
+        assert!(state.find_mal_link("~/Anime", "One Piece").is_none());
+    }
+
+    #[test]
+    fn run_sync_reports_no_exact_match_with_a_confident_suggestion() {
+        let client = FakeClient::new();
+        // "One Piece" vs "One Piece!" — a single extra character, similarity
+        // 0.9, comfortably above TEST_FUZZY_MATCH_THRESHOLD (0.8).
+        client.push_list_response(
+            200,
+            r#"{"data":[{"node":{"id":5,"title":"One Piece!","alternative_titles":{"en":"","ja":"","synonyms":[]},"my_list_status":{"num_episodes_watched":0}}}]}"#,
+        );
+
+        let mut state = State {
+            series: vec![base_record()],
+            mal_links: Vec::new(),
+        };
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0].kind {
+            OutcomeKind::NoExactMatch { suggestion } => {
+                let suggestion = suggestion
+                    .as_ref()
+                    .expect("expected a confident suggestion");
+                assert_eq!(suggestion.mal_id, 5);
+                assert_eq!(suggestion.title, "One Piece!");
+            }
+            other => panic!("expected NoExactMatch, got {other:?}"),
+        }
+        // Never auto-linked — a suggestion is display-only, `sync link`
+        // is still required to actually confirm it.
         assert!(state.find_mal_link("~/Anime", "One Piece").is_none());
     }
 
@@ -1165,6 +1272,7 @@ mod tests {
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(outcomes.len(), 1);
@@ -1193,6 +1301,7 @@ mod tests {
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(outcomes.len(), 1);
@@ -1258,6 +1367,7 @@ mod tests {
                 ("~/Anime".to_string(), "Working Show".to_string()),
             ],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(
@@ -1316,6 +1426,7 @@ mod tests {
                 ("~/Anime".to_string(), "Linked Show".to_string()),
             ],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(outcomes.len(), 2);
@@ -1364,6 +1475,7 @@ mod tests {
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
         );
 
         assert_eq!(
@@ -1378,7 +1490,14 @@ mod tests {
     fn run_sync_on_empty_targets_makes_no_network_call_at_all() {
         let client = FakeClient::new();
         let mut state = State::default();
-        let outcomes = run_sync(&client, "token", &mut state, &[], Duration::ZERO);
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &[],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
         assert!(outcomes.is_empty());
         assert!(client.get_calls.borrow().is_empty());
     }

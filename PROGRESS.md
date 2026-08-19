@@ -6,15 +6,22 @@ narrative, bug-hunt traces, and dogfood step-by-steps are not kept here
 once a fix lands; git history has that story, and any decision worth
 protecting from regression has already been folded into `CLAUDE.md`.
 
-**Current phase:** Phase 9 dogfooding is underway. A real bug surfaced:
-`sync` was pushing the tracked cursor's raw episode number to MAL instead
-of the last actually-watched episode (off by one in the common case) —
-fixed in `sync::local_effective_episode`; see CLAUDE.md's "MAL push
-number is the last watched episode, not the tracked cursor" for the full
-reasoning, including the one narrow exception for a `Dropped` record left
-on a just-completed finale.
+**Current phase:** Phase 9 dogfooding is underway. Two real issues
+surfaced and are fixed:
+- `sync` was pushing the tracked cursor's raw episode number to MAL
+  instead of the last actually-watched episode (off by one in the common
+  case) — fixed in `sync::local_effective_episode`; see CLAUDE.md's "MAL
+  push number is the last watched episode, not the tracked cursor."
+- `sync` terminal output was noisy: every one of the top-5 fuzzy
+  candidates was printed with a raw similarity percentage, even fully
+  unrelated series. Redesigned to one concise, symbol-coded line per
+  series (`✓`/`⚠`/`✗`), a single "did you mean...?" suggestion only when
+  it clears a new `[mal] fuzzy_match_threshold` config value (default
+  `0.8`), and a summary line that omits zero-count categories — see
+  CLAUDE.md's "Sync output only ever suggests a confident fuzzy match,
+  and stays one line per series."
 
-**Test suite:** 384 passing + 4 `#[ignore]`d real-API tests (excluded
+**Test suite:** 389 passing + 4 `#[ignore]`d real-API tests (excluded
 from the default run). Both clippy gates (`-p tsuzuki --no-deps
 --all-targets -D warnings`) and `cargo fmt -p tsuzuki --check` clean.
 `vendor/anitomy` untouched throughout.

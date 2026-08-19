@@ -866,6 +866,7 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         &mut state,
         &targets,
         sync::API_CALL_DELAY,
+        config.mal.fuzzy_match_threshold,
     );
 
     if state != before
@@ -879,11 +880,11 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 
     let mut failed = 0;
     let mut needs_linking = 0;
-    let mut merged = 0;
+    let mut synced = 0;
     for outcome in &outcomes {
         print_sync_outcome(outcome);
         match &outcome.kind {
-            sync::OutcomeKind::Merged { .. } => merged += 1,
+            sync::OutcomeKind::Merged { .. } => synced += 1,
             sync::OutcomeKind::NoExactMatch { .. } | sync::OutcomeKind::EmptyList => {
                 needs_linking += 1;
             }
@@ -893,8 +894,8 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 
     println!();
     println!(
-        "{merged} synced, {needs_linking} need manual linking, {failed} failed ({} total)",
-        outcomes.len()
+        "Sync complete: {}",
+        sync_summary_line(synced, needs_linking, failed)
     );
 
     if failed > 0 {
@@ -904,47 +905,64 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
     }
 }
 
+/// Comma-joined, zero-count categories omitted — "1 synced, 2 need manual
+/// linking", never "1 synced, 2 need manual linking, 0 failed". Keeps the
+/// common all-good run's summary a single short clause instead of padding
+/// it with categories that didn't happen.
+fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
+    let mut parts = Vec::new();
+    if synced > 0 {
+        parts.push(format!("{synced} synced"));
+    }
+    if needs_linking > 0 {
+        parts.push(format!("{needs_linking} need manual linking"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    if parts.is_empty() {
+        "nothing to report".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// One concise, action-oriented line per series (design.md §7's "sync
+/// output communicates the result and any required user action, never
+/// unnecessary matching detail" — CLAUDE.md's "sync output only ever
+/// suggests a confident fuzzy match"): `✓` for anything that completed
+/// without user action needed, `⚠` for anything that needs one, `✗` for a
+/// real failure. Never prints similarity percentages or a list of weak
+/// candidates — `run_sync` itself already filtered a fuzzy suggestion down
+/// to at most one, and only when it was confident enough to be worth
+/// showing at all.
 fn print_sync_outcome(outcome: &sync::SeriesOutcome) {
     let name = &outcome.name;
     match &outcome.kind {
         sync::OutcomeKind::Merged {
-            mal_id,
-            action: sync::MergeAction::Push(n),
-        } => println!("{name}: linked to MAL #{mal_id} — pushed episode {n} to MyAnimeList"),
+            action: sync::MergeAction::Push(n) | sync::MergeAction::Pull(n),
+            ..
+        } => println!("✓ {name} — episode {n} synced"),
         sync::OutcomeKind::Merged {
-            mal_id,
-            action: sync::MergeAction::Pull(n),
-        } => println!(
-            "{name}: linked to MAL #{mal_id} — MAL ahead, local awareness updated to episode {n}"
-        ),
-        sync::OutcomeKind::Merged {
-            mal_id,
             action: sync::MergeAction::NoOp,
-        } => println!("{name}: linked to MAL #{mal_id} — already in sync"),
-        sync::OutcomeKind::NoExactMatch { candidates } => {
-            println!("{name}: no exact match on your MAL list.");
-            if candidates.is_empty() {
-                println!("  No close candidates found either.");
-            } else {
-                println!("  Closest matches:");
-                for c in candidates {
-                    println!(
-                        "    \"{}\" (MAL #{}, {:.0}% similar)",
-                        c.title,
-                        c.mal_id,
-                        c.similarity * 100.0
-                    );
-                }
-            }
-            println!("  Run `tsuzuki sync link \"{name}\" --mal-id <id>` to link manually.");
+            ..
+        } => println!("✓ {name} — already in sync"),
+        sync::OutcomeKind::NoExactMatch {
+            suggestion: Some(c),
+        } => {
+            println!(
+                "⚠ {name} — did you mean \"{}\" (MAL #{})?",
+                c.title, c.mal_id
+            );
+            println!("  → tsuzuki sync link \"{name}\" --mal-id {}", c.mal_id);
+        }
+        sync::OutcomeKind::NoExactMatch { suggestion: None } => {
+            println!("⚠ {name} — no matching series found");
         }
         sync::OutcomeKind::EmptyList => {
-            println!("{name}: nothing on your MyAnimeList list yet.");
-            println!(
-                "  Add it on MAL, or run `tsuzuki sync link \"{name}\" --mal-id <id>` to link manually."
-            );
+            println!("⚠ {name} — your MyAnimeList list is empty");
         }
-        sync::OutcomeKind::Failed(msg) => println!("{name}: sync failed — {msg}"),
+        sync::OutcomeKind::Failed(msg) => println!("✗ {name} — sync failed: {msg}"),
     }
 }
 

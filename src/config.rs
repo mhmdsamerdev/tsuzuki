@@ -142,6 +142,16 @@ pub struct Mal {
     pub client_id: String,
     #[serde(default = "default_mal_redirect_port")]
     pub redirect_port: u16,
+    /// The minimum title-similarity score (`sync::title_similarity`, `0.0`
+    /// to `1.0`) a fuzzy candidate must clear before `tsuzuki sync` will
+    /// suggest it as a "did you mean...?" — below this, `sync`'s own output
+    /// shows a plain "no matching series found" instead of a low-confidence
+    /// guess (CLAUDE.md's "sync output only ever suggests a confident fuzzy
+    /// match"). Same two-defaulting-layers reasoning as `redirect_port`: the
+    /// correct default (`0.8`) isn't `f64::default()` (`0.0`, which would
+    /// suggest literally anything on the user's list).
+    #[serde(default = "default_fuzzy_match_threshold")]
+    pub fuzzy_match_threshold: f64,
 }
 
 impl Default for Mal {
@@ -149,8 +159,17 @@ impl Default for Mal {
         Mal {
             client_id: String::new(),
             redirect_port: default_mal_redirect_port(),
+            fuzzy_match_threshold: default_fuzzy_match_threshold(),
         }
     }
+}
+
+/// `0.8`, chosen so an unrelated series (typically well under 0.6 similarity
+/// even for same-franchise titles like "One Piece" vs. "One Piece Special")
+/// never surfaces as a suggestion, while a genuine minor-formatting/
+/// synonym-level difference (the common real case) still does.
+fn default_fuzzy_match_threshold() -> f64 {
+    0.8
 }
 
 /// One `tsuzuki exclude`d file or directory (CLAUDE.md's "Exclusion
@@ -329,6 +348,7 @@ mod tests {
         assert_eq!(config.mpv.command_override, "");
         assert_eq!(config.mal.client_id, "");
         assert_eq!(config.mal.redirect_port, 8734);
+        assert_eq!(config.mal.fuzzy_match_threshold, 0.8);
         assert!(config.exclusions.is_empty());
     }
 
@@ -527,5 +547,38 @@ client_id = ""
 
         let config = read(&path).unwrap();
         assert_eq!(config.mal.redirect_port, 8734);
+    }
+
+    #[test]
+    fn missing_fuzzy_match_threshold_key_defaults_to_zero_point_eight_not_zero() {
+        // Same defaulting-layer bug class again: a bare `#[serde(default)]`
+        // would silently produce `0.0`, which would suggest literally any
+        // candidate on the user's MAL list regardless of similarity.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[thresholds]
+resume_seconds = 120
+completion_remaining_seconds = 180
+auto_pause_days = 0
+
+[roots]
+paths = []
+video_extensions = ["mkv"]
+
+[mpv]
+watch_later_dir = ""
+
+[mal]
+client_id = ""
+redirect_port = 8734
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert_eq!(config.mal.fuzzy_match_threshold, 0.8);
     }
 }
