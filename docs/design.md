@@ -222,6 +222,8 @@ No metadata, no posters, no scraping — just a filtered enumeration of director
 
 Sync is optional — nothing about core tracking or resuming depends on MAL being configured.
 
+**Scope boundary: episode progress only.** MAL sync only ever moves episode-progress numbers between the two sides — it never pushes a status change (`on_hold`/`dropped`/etc.) to MAL. Status (`paused`/`dropped`/`in_progress`) stays a purely local Tsuzuki concept.
+
 **Prerequisite: one-time OAuth authorization.** `tsuzuki sync login` walks through MAL's OAuth flow once.
 
 **Linking a series without manual IDs.** Matching against MAL's global database would be open-ended inference; instead, Tsuzuki matches against the user's own MAL list, which returns each entry's main title, English title, Japanese title, and any synonyms.
@@ -243,8 +245,6 @@ Sync is optional — nothing about core tracking or resuming depends on MAL bein
 The pushed number uses Anitomy-parsed episode identity when available (§5), ordinal position otherwise — keeping sync accurate for series with numbering gaps.
 
 **This directly answers "forced to click through episodes."** If MAL says episode 12 but local history only knows up to 9, Tsuzuki doesn't make the user play through 10–11 to catch up — it trusts the higher number and treats 13 as next. If the user wants to actually rewatch 10–11, they open those files directly in mpv, already a fully legitimate way to interact with the system.
-
-`pause`/`drop` (§8) can optionally mirror to MAL's own `on_hold`/`dropped` statuses, keeping both sides consistent.
 
 **Known unsolved edge case:** local and MAL numbering can still diverge beyond what Anitomy catches — split-cour renumbering, dub/sub differences. The local-to-MAL correspondence is fixed at link time; further drift is a manual re-link.
 
@@ -409,7 +409,7 @@ An opt-in Lua script (`contrib/mpv/tsuzuki.lua`) giving Tsuzuki a direct per-fil
 Full environment checks (mpv config flag, watch_later reachability, Flatpak permission gap, tracked-root validity, MAL auth status once Phase 7 exists). Doing it last means it can genuinely check everything rather than being built incrementally and forgotten.
 
 **Phase 8 — MAL sync**
-OAuth login, exact-match linking against the user's own list, manual sync link, the two-way non-destructive merge, pause/drop mirroring. This is the highest-risk phase (network, external API, auth) — isolating it means a flaky OAuth flow can't destabilize everything you already validated.
+OAuth login, exact-match linking against the user's own list, manual sync link, the two-way non-destructive merge. This is the highest-risk phase (network, external API, auth) — isolating it means a flaky OAuth flow can't destabilize everything you already validated.
 
 **Phase 9 — Distribution & end-to-end tests**
 cargo-dist config, install script, assert_cmd end-to-end tests against the compiled binary, PyPI wheel via maturin. Genuinely last — there's no point packaging a binary that's still changing shape.
