@@ -124,9 +124,12 @@ updated_at = 1
         "a series whose folder still exists must never be reported as orphaned, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("mal-auth") && stdout.contains("not configured"),
-        "Phase 8a: an empty [mal] client_id must report the real mal-auth check as \
-         not-configured (WARN), not the old Phase-7 placeholder line, got:\n{stdout}"
+        stdout.contains("mal-auth") && stdout.contains("not logged in"),
+        "Phase 8a-correction: an unset [mal] client_id now resolves to the built-in default \
+         client_id (no per-user registration required), so a fresh $HOME with no mal_token.toml \
+         must report the real mal-auth check as not-logged-in (WARN) — not \"not configured\" \
+         (that state is no longer reachable from an empty config), and not the old Phase-7 \
+         placeholder line either, got:\n{stdout}"
     );
 
     if any_mpv_install_detected() {

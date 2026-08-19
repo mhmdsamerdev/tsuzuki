@@ -31,10 +31,42 @@ use rand::Rng;
 use rand::distributions::Alphanumeric;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::state::atomic_write;
 
 pub const AUTHORIZE_URL: &str = "https://myanimelist.net/v1/oauth2/authorize";
 pub const TOKEN_URL: &str = "https://myanimelist.net/v1/oauth2/token";
+
+/// Tsuzuki's own registered MAL client_id, committed here in the clear —
+/// deliberately, not an oversight. MyAnimeList's PKCE/no-secret app type
+/// (what this whole module implements — no `client_secret` field exists or
+/// is ever sent) does not treat `client_id` as confidential; only
+/// `client_secret` is, and Tsuzuki never has one to leak. Precedent: Taiga
+/// (erengy/taiga, a long-running, widely-used open-source MAL client)
+/// commits its own `client_id` as a plain constant in public source
+/// (`src/sync/myanimelist.h`) the same way, with no secret alongside it —
+/// this is the established, safe pattern for this app type, not something
+/// unique to Tsuzuki. **Do not "helpfully" remove or redact this as a
+/// leaked credential** — a future session flagging it without this context
+/// would be a regression, not a fix; see CLAUDE.md's MAL-sync section for
+/// the full reasoning. `[mal] client_id` in config.toml remains a genuine
+/// override for anyone running their own fork against their own
+/// registration (`resolve_client_id`, below) — this default only removes
+/// the *requirement* to do that before `sync login` works at all.
+pub(crate) const DEFAULT_CLIENT_ID: &str = "ef3b1252d151e7a0ef248753dab34551";
+
+/// Resolves the `client_id` to actually use: the user's own `[mal]
+/// client_id` override when set, `DEFAULT_CLIENT_ID` otherwise. The single
+/// seam every caller (`sync_login_command`, `doctor_command`) goes through —
+/// nothing else in this crate reads `config.mal.client_id` directly, so
+/// there's exactly one place this decision is made.
+pub(crate) fn resolve_client_id(config: &Config) -> &str {
+    if config.mal.client_id.is_empty() {
+        DEFAULT_CLIENT_ID
+    } else {
+        &config.mal.client_id
+    }
+}
 
 /// A stored token's own safety margin before treating it as needing refresh
 /// — matches CLAUDE.md's "any MAL API call checks the stored token's expiry
@@ -517,7 +549,11 @@ pub fn refresh_with_token(
 /// this function, not `doctor.rs` itself.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenStatus {
-    /// `[mal] client_id` is empty — sync isn't set up at all yet.
+    /// `client_id` passed in was empty. Not reachable through the real call
+    /// path anymore — `resolve_client_id` always returns a non-empty value
+    /// (the built-in `DEFAULT_CLIENT_ID` when no override is configured),
+    /// and every real caller resolves through it before calling this
+    /// function. Kept as a defensive guard, not a state real users can hit.
     NotConfigured,
     /// `client_id` is set, but no `mal_token.toml` exists (or it's
     /// unreadable/corrupt — treated the same as never-logged-in, since
@@ -543,8 +579,10 @@ pub enum TokenStatus {
 /// expiry first... and transparently refreshes"). This is a real network
 /// call when (and only when) a token exists and is within
 /// `EXPIRY_SAFETY_MARGIN_SECS` of expiring — never on every `doctor` run
-/// regardless of token freshness, and never at all when `client_id` is empty
-/// or no token has ever been stored.
+/// regardless of token freshness, and never at all when no token has ever
+/// been stored. `client_id` is expected to already be resolved (via
+/// `resolve_client_id`) by the caller — this function's own empty-string
+/// guard exists only for direct/defensive callers, not the real path.
 pub fn token_status(
     client: &dyn MalHttpClient,
     token_path: &Path,
@@ -647,21 +685,28 @@ mod tests {
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8734%2Fcallback"));
     }
 
-    /// Not asserted on — this is item 5 of Phase 8a's verification list:
-    /// print the exact authorize URL, with a fake client_id, so it can be
-    /// sanity-checked by eye before any real login attempt. Run with
-    /// `cargo test print_sample_authorize_url -- --nocapture`.
+    /// Phase 8a-correction verification item 3: the real authorize URL
+    /// through the actual zero-config default resolution path (an untouched
+    /// `Config::default()` — no `[mal] client_id` set) must contain the real
+    /// `DEFAULT_CLIENT_ID` and the exact registered redirect URL. Run with
+    /// `cargo test print_real_default_authorize_url -- --nocapture` to see
+    /// it printed.
     #[test]
-    fn print_sample_authorize_url() {
+    fn print_real_default_authorize_url_from_zero_config() {
+        let config = Config::default();
+        let client_id = resolve_client_id(&config);
         let pkce = generate_pkce();
         let state = generate_state();
         let url = authorize_url(
-            "test-client-id-not-real",
-            8734,
+            client_id,
+            config.mal.redirect_port,
             &pkce.code_challenge,
             &state,
         );
-        println!("sample authorize URL:\n{url}");
+        println!("real, zero-config default authorize URL:\n{url}");
+
+        assert!(url.contains("client_id=ef3b1252d151e7a0ef248753dab34551"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8734%2Fcallback"));
     }
 
     #[test]
@@ -849,6 +894,25 @@ mod tests {
         format!(
             r#"{{"token_type":"Bearer","expires_in":{expires_in},"access_token":"{access}","refresh_token":"{refresh}"}}"#
         )
+    }
+
+    // --- client_id resolution: built-in default vs. configured override ---
+
+    #[test]
+    fn resolve_client_id_uses_the_built_in_default_when_config_is_empty() {
+        let config = Config::default();
+        assert_eq!(
+            config.mal.client_id, "",
+            "sanity: default config has no override"
+        );
+        assert_eq!(resolve_client_id(&config), DEFAULT_CLIENT_ID);
+    }
+
+    #[test]
+    fn resolve_client_id_uses_the_configured_override_when_present() {
+        let mut config = Config::default();
+        config.mal.client_id = "users-own-registered-client-id".to_string();
+        assert_eq!(resolve_client_id(&config), "users-own-registered-client-id");
     }
 
     #[test]

@@ -977,6 +977,45 @@ not just call internal functions with an injected path. Retrofit this for
 existing phases opportunistically; require it going forward for any new
 phase that reads or writes a real on-disk file.
 
+### MAL `client_id` is a built-in, publicly committed credential — not a per-user registration requirement
+`mal::DEFAULT_CLIENT_ID` in `src/mal.rs` is Tsuzuki's own registered MAL
+`client_id`, committed to source in the clear on purpose. This reverses an
+earlier assumption made when Phase 8a was first built (that every user
+would need to register their own MAL API application before `sync login`
+could work at all) — that assumption was wrong, not merely superseded, and
+the corrected reasoning matters enough to state plainly so it isn't
+"fixed" back the other way by a future session that doesn't know why.
+
+**Why committing it is safe, not an oversight.** Tsuzuki's OAuth flow is
+Authorization Code + PKCE for a public/native-client app type (§7) — MAL
+does not treat `client_id` as confidential for this app type, only
+`client_secret` is, and there is no `client_secret` field anywhere in this
+codebase (`mal.rs` has never had one, and never will — PKCE is chosen
+specifically so one is never needed). A `client_id` alone, with no secret
+alongside it, cannot authenticate as the app on its own; it only starts an
+OAuth flow that still requires a real user to log in and approve on MAL's
+own site, plus a matching PKCE `code_verifier` generated fresh per attempt.
+Precedent: Taiga (erengy/taiga, `src/sync/myanimelist.h`), a long-running,
+widely-used open-source MAL client, commits its own `client_id` as a plain
+constant in public source the exact same way, with nothing alongside it to
+protect.
+
+**Never "helpfully" redact, rotate, or remove this as a leaked credential**
+without first re-reading this section — a `client_id` for a PKCE/no-secret
+app type is not the same risk category as an API key or `client_secret`,
+and treating it as one here would be a regression back to the earlier,
+already-corrected mistake (requiring every user to register their own app
+just to run `tsuzuki sync login` once).
+
+**`[mal] client_id` in `config.toml` is an optional override, not a
+required field.** Empty (the shipped default) resolves to
+`DEFAULT_CLIENT_ID` via `mal::resolve_client_id` — the single function
+every caller goes through, so this decision is made in exactly one place.
+A non-empty value overrides it, for anyone running their own fork against
+their own registered MAL app. `tsuzuki sync login` and `tsuzuki doctor`'s
+MAL-auth check both work against a completely untouched `config.toml` —
+zero config edits required before first use.
+
 ## 4. Dev environment
 
 **All build/test/lint commands run inside `nix-shell`**, not against the

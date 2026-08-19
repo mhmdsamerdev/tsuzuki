@@ -2,41 +2,45 @@
 //! MyAnimeList API. **`#[ignore]`d — never runs in a normal `cargo test`.**
 //! Everything else in Phase 8a (PKCE generation, the local callback
 //! listener's state-mismatch/timeout/denied handling, token-expiry-triggers-
-//! refresh logic, atomic `mal_token.toml` writes) is covered by real,
-//! network-free unit tests in `src/mal.rs`. This one test is the only place
-//! in the whole test suite that talks to the real MAL API, and it has
-//! genuinely never been run — Phase 8a's own report says so explicitly. Run
-//! it yourself, by hand, before trusting this auth path against production.
+//! refresh logic, atomic `mal_token.toml` writes, client_id resolution) is
+//! covered by real, network-free unit tests in `src/mal.rs`. This one test
+//! is the only place in the whole test suite that talks to the real MAL
+//! API, and it has genuinely never been run — this codebase's own report
+//! says so explicitly. Run it yourself, by hand, before trusting this auth
+//! path against production, and especially before trusting the now-committed
+//! `mal::DEFAULT_CLIENT_ID` actually works end to end.
 //!
 //! ## How to run this for real
 //!
-//! 1. Register an app at <https://myanimelist.net/apppages> (or your
-//!    existing dev app). App type: "other". Note its **Client ID** — do
-//!    **not** commit it anywhere in this repo.
-//! 2. In that app's settings, add an **App Redirect URL** of exactly
-//!    `http://127.0.0.1:8734/callback` (or whatever port you'll pass below —
-//!    it must match byte-for-byte, including the port).
-//! 3. Run:
+//! ```sh
+//! cargo test --test mal_login_integration -- --ignored --nocapture
+//! ```
 //!
-//!    ```sh
-//!    TSUZUKI_TEST_MAL_CLIENT_ID=<your real client id> \
-//!      cargo test --test mal_login_integration -- --ignored --nocapture
-//!    ```
+//! No config setup is required — this exercises the real, zero-config
+//! default path (an untouched, freshly-generated `config.toml`, no `[mal]
+//! client_id` override), the same path a brand-new install goes through.
+//! The test prints the authorize URL and opens your browser. Log in to MAL
+//! and approve the app within 2 minutes. It then reads back the resulting
+//! `mal_token.toml` and runs `tsuzuki doctor`, checking the `mal-auth` line
+//! reports `OK`.
 //!
-//! 4. The test prints the authorize URL and opens your browser. Log in to
-//!    MAL and approve the app. The test polls for up to 2 minutes for the
-//!    resulting `mal_token.toml` to appear, then runs `tsuzuki doctor` and
-//!    checks the `mal-auth` line reports `OK`.
-//! 5. Without `TSUZUKI_TEST_MAL_CLIENT_ID` set, this test skips itself with
-//!    a clear message rather than failing — so accidentally running
-//!    `-- --ignored` without a real client_id doesn't produce a confusing
-//!    failure.
+//! To instead test the `[mal] client_id` *override* path (someone running
+//! their own fork against their own registered app), set
+//! `TSUZUKI_TEST_MAL_CLIENT_ID` to that app's client_id and register
+//! `http://127.0.0.1:8734/callback` as its redirect URL first:
+//!
+//! ```sh
+//! TSUZUKI_TEST_MAL_CLIENT_ID=<your own registered client id> \
+//!   cargo test --test mal_login_integration -- --ignored --nocapture
+//! ```
 //!
 //! **What this specifically has not yet verified, since it has never been
 //! run:** whether MAL's token endpoint truly requires no `client_secret` for
-//! this PKCE flow (design.md/CLAUDE.md's assumption, per MAL's own public
-//! OAuth docs, but unconfirmed against a live exchange by this codebase);
-//! and the exact shape of a real token/refresh response body match what
+//! this PKCE flow (design.md/CLAUDE.md's assumption, matching Taiga's own
+//! long-standing public use of the same pattern, but unconfirmed against a
+//! live exchange by this codebase); whether MAL actually accepts the
+//! now-committed `mal::DEFAULT_CLIENT_ID` for a real token exchange; and the
+//! exact shape of a real token/refresh response body match what
 //! `TokenResponse` in `src/mal.rs` expects.
 
 use std::fs;
@@ -48,28 +52,23 @@ fn tsuzuki_bin() -> &'static str {
 }
 
 #[test]
-#[ignore = "requires a real, registered MAL client_id and manual browser interaction — see module docs"]
+#[ignore = "requires manual browser interaction against the live MAL API — see module docs"]
 fn real_login_flow_against_the_live_mal_api() {
-    let Ok(client_id) = std::env::var("TSUZUKI_TEST_MAL_CLIENT_ID") else {
-        eprintln!(
-            "skipping: set TSUZUKI_TEST_MAL_CLIENT_ID to a real, registered MAL client_id to \
-             actually run this test (see module docs at the top of this file)"
-        );
-        return;
-    };
-
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
-    // Seed config.toml with the real client_id before `sync login` runs —
-    // mirrors how a real user would set it via `tsuzuki config set` or by
-    // hand-editing the file.
-    let config_dir = home.join(".config").join("tsuzuki");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            r#"[thresholds]
+    // An optional override, for testing the [mal] client_id override path
+    // specifically. Left unset, this test exercises the real zero-config
+    // default (mal::DEFAULT_CLIENT_ID) — no config.toml is written at all,
+    // matching exactly what a brand-new install's first run looks like.
+    if let Ok(client_id) = std::env::var("TSUZUKI_TEST_MAL_CLIENT_ID") {
+        println!("testing the [mal] client_id override path with a custom client_id");
+        let config_dir = home.join(".config").join("tsuzuki");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join("config.toml"),
+            format!(
+                r#"[thresholds]
 resume_seconds = 120
 completion_remaining_seconds = 180
 auto_pause_days = 0
@@ -86,9 +85,15 @@ command_override = ""
 client_id = "{client_id}"
 redirect_port = 8734
 "#
-        ),
-    )
-    .unwrap();
+            ),
+        )
+        .unwrap();
+    } else {
+        println!(
+            "testing the real zero-config default path (mal::DEFAULT_CLIENT_ID) — no \
+             config.toml pre-seeded"
+        );
+    }
 
     println!(
         "Starting `tsuzuki sync login` — a browser window should open. Log in to MyAnimeList \

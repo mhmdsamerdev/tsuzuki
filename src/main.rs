@@ -744,12 +744,7 @@ fn drop_command(
 /// small, individually-testable building blocks; the actual sequencing and
 /// all user-facing output happen in `main.rs`.
 fn sync_login_command(config: &Config) -> ExitCode {
-    if config.mal.client_id.is_empty() {
-        return fail(
-            "no [mal] client_id configured — register an app on MyAnimeList and set client_id \
-             in config.toml first (see docs/design.md §7)",
-        );
-    }
+    let client_id = mal::resolve_client_id(config);
 
     let token_path = match mal::mal_token_path() {
         Ok(p) => p,
@@ -770,7 +765,7 @@ fn sync_login_command(config: &Config) -> ExitCode {
         }
     };
 
-    let url = mal::authorize_url(&config.mal.client_id, port, &pkce.code_challenge, &state);
+    let url = mal::authorize_url(client_id, port, &pkce.code_challenge, &state);
     println!("Open this URL to authorize Tsuzuki with MyAnimeList:");
     println!();
     println!("  {url}");
@@ -796,14 +791,8 @@ fn sync_login_command(config: &Config) -> ExitCode {
 
     let client = mal::UreqClient;
     let now = state::now_unix();
-    let token = match mal::exchange_code(
-        &client,
-        &config.mal.client_id,
-        &code,
-        &pkce.code_verifier,
-        port,
-        now,
-    ) {
+    let token = match mal::exchange_code(&client, client_id, &code, &pkce.code_verifier, port, now)
+    {
         Ok(t) => t,
         Err(e) => return fail(&e.to_string()),
     };
@@ -959,7 +948,7 @@ fn doctor_command(
             let status = mal::token_status(
                 &mal_client,
                 &token_path,
-                &config.mal.client_id,
+                mal::resolve_client_id(config),
                 state::now_unix(),
             );
             results.push(doctor::check_mal_auth(&status));

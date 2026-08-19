@@ -226,6 +226,8 @@ Sync is optional — nothing about core tracking or resuming depends on MAL bein
 
 **Prerequisite: one-time OAuth authorization.** `tsuzuki sync login` walks through MAL's OAuth flow once.
 
+**No per-user MAL app registration required.** Tsuzuki ships a built-in, publicly committed `client_id` (`mal::DEFAULT_CLIENT_ID`), so `sync login` works immediately against an untouched `config.toml` — no separate MAL developer registration step before first use. This is safe because Tsuzuki's OAuth flow is Authorization Code + PKCE for a public/native client: `client_id` is not treated as confidential for this app type, and there is no `client_secret` field anywhere in this codebase to leak — only `client_secret` would need protecting, and Tsuzuki never has one. The same pattern is established, long-running precedent: Taiga (erengy/taiga), a widely-used open-source MAL client, commits its own `client_id` as a plain constant in public source the same way. `[mal] client_id` in `config.toml` remains available as an explicit override for anyone running their own fork against their own registered app — empty (the default) means "use the built-in one."
+
 **Linking a series without manual IDs.** Matching against MAL's global database would be open-ended inference; instead, Tsuzuki matches against the user's own MAL list, which returns each entry's main title, English title, Japanese title, and any synonyms.
 
 1. First `sync` touching a given series: fetch the user's MAL list.
@@ -280,7 +282,7 @@ video_extensions = ["mkv", "mp4", "avi", "webm", "mov"]  # only these extensions
 watch_later_dir = ""                 # empty = use OS-default candidate list
 
 [mal]
-client_id = ""
+client_id = ""               # optional override; empty = use Tsuzuki's built-in client_id (see §7 — no MAL app registration required by default)
 redirect_port = 8734        # local OAuth-callback listener port used by `tsuzuki sync login`
 ```
 

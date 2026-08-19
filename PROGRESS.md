@@ -1280,6 +1280,69 @@ proceed automatically" instruction)
     placeholder line, now asserts on the real `mal-auth: ... not configured`
     WARN output instead.
 
+- Phase 8a-correction — reversed the original assumption that every user
+  must register their own MAL API application before `sync login` could
+  work. That assumption was wrong: MAL's Authorization Code + PKCE flow for
+  a public/native-client app type does not treat `client_id` as
+  confidential (only `client_secret` is, and Tsuzuki never has one) —
+  confirmed by Taiga (erengy/taiga)'s own long-standing, public
+  `client_id` constant in `src/sync/myanimelist.h`, the same pattern.
+  - `src/mal.rs`: added `pub(crate) const DEFAULT_CLIENT_ID` (a real,
+    already-registered client_id, committed deliberately — its doc comment
+    explains why this is safe and warns against a future session
+    "helpfully" removing it as a leaked credential) and
+    `resolve_client_id(config)`, the single seam every caller goes through:
+    empty `[mal] client_id` (the shipped default) → `DEFAULT_CLIENT_ID`;
+    non-empty → the user's override, for anyone running their own fork
+    against their own registration.
+  - `src/main.rs`: `sync_login_command`'s old "no client_id configured, run
+    `sync login` first" hard-fail is gone — both it and `doctor_command` now
+    resolve through `mal::resolve_client_id` instead of reading
+    `config.mal.client_id` directly. `tsuzuki sync login` now works against
+    a completely untouched `config.toml` — no config edits required before
+    first use.
+  - `doctor.rs`'s `check_mal_auth` itself needed no changes — `TokenStatus`'s
+    `NotConfigured` branch is still there (defensive only, for a direct
+    `client_id: ""` call) but is no longer reachable through the real
+    `doctor`/`sync login` call path, since both now always pass an
+    already-resolved, non-empty client_id.
+  - `tests/doctor_integration.rs`'s mal-auth assertion updated again: an
+    empty `[mal] client_id` no longer produces "not configured" (that state
+    isn't reachable from an empty config anymore) — a fresh `$HOME` with no
+    `mal_token.toml` now correctly reports `mal-auth: ... not logged in`
+    instead.
+  - `tests/mal_login_integration.rs` rewritten to exercise the real
+    zero-config default path by default (no env var needed at all anymore)
+    — `TSUZUKI_TEST_MAL_CLIENT_ID` is now an optional way to test the
+    override path specifically, not a requirement to run the test at all.
+  - Verified: the real authorize URL through the actual zero-config default
+    path (`Config::default()`, no `[mal] client_id` set) contains
+    `client_id=ef3b1252d151e7a0ef248753dab34551` and
+    `redirect_uri=http%3A%2F%2F127.0.0.1%3A8734%2Fcallback` exactly (printed
+    via `cargo test print_real_default_authorize_url_from_zero_config --
+    --nocapture`, asserted on directly in the test itself too). Grepped for
+    `client_secret` (zero hits that are an actual field/value — only
+    explanatory prose) and every 32-hex-char string in source (only
+    `DEFAULT_CLIENT_ID` itself, its own test assertion, and the unrelated
+    vendored-anitomy commit hash in CLAUDE.md).
+  - 348 tests passing (up from 346 — 4 new: 2 `resolve_client_id` tests plus
+    the rewritten default-URL print/assert test replacing the old
+    fake-client-id one). Both clippy and fmt gates clean. `vendor/anitomy`
+    untouched.
+  - **Not verified by this session — flagged explicitly, same as Phase 8a's
+    own report:** whether MAL's real token endpoint actually accepts this
+    committed `client_id` for a genuine login/exchange has never been
+    tested against the live API. The real `sync login` flow needs to be run
+    by hand once this lands to confirm MAL accepts it end to end — this
+    session did not and was not asked to attempt that.
+  - Docs updated to match: design.md §7 (new "No per-user MAL app
+    registration required" paragraph, replacing the old registration-first
+    framing) and §8's example `client_id` comment; CLAUDE.md gained a new
+    §3 decision section ("MAL `client_id` is a built-in, publicly committed
+    credential — not a per-user registration requirement") stating the
+    reversal and its reasoning explicitly, specifically so a future session
+    doesn't "fix" this back the other way without the context.
+
 **Next up:**
 - Phase 8b: exact-match linking against the user's own MAL list, the
   two-way non-destructive episode-progress merge (never a status push —
