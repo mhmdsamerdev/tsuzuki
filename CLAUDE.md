@@ -53,1013 +53,537 @@ the user first — they are the reason the tool stays simple and predictable.
 
 ## 3. Architecture decisions (with reasoning)
 
+Each subsection below is meant to be readable alone — grep for the topic
+you need rather than reading top to bottom.
+
 ### Series identity = depth-1 directory under a tracked root
 A series is *always* the immediate child of a tracked root — never
-detected by content, never configurable per-series. Season folders,
-release-tag folders, anything below depth 1 is opaque to Tsuzuki as a
-category and only feeds the natural-sort tree. If a folder layout doesn't
-fit (e.g. a `Rewatches/` layer), the answer is registering that layer as
-its own root (`tsuzuki add ~/Anime/Rewatches`) — not adding a
-depth-detection flag. Composable roots is the *general* escape hatch;
-don't add a special case for one folder shape when this already covers it.
+detected by content, never configurable per-series. Everything below
+depth 1 (season folders, release-tag folders) is opaque to Tsuzuki as a
+category and only feeds the natural-sort tree. A layout that doesn't fit
+(e.g. a `Rewatches/` layer) gets registered as its own root
+(`tsuzuki add ~/Anime/Rewatches`) — composable roots is the general
+escape hatch; don't add a depth-detection flag for one folder shape.
 
 ### State vs. config are two separate files
-`~/.config/tsuzuki/config.toml` (human-tunable, defaults, comments) and
-`~/.local/share/tsuzuki/state.toml` (machine-written, atomic). Don't merge
-them — config is meant to be hand-edited and versioned in dotfiles repos;
-state is not.
+`~/.config/tsuzuki/config.toml` (human-tunable, hand-edited, versionable
+in dotfiles) and `~/.local/share/tsuzuki/state.toml` (machine-written,
+atomic). Don't merge them.
 
 ### State file: single flat TOML, atomic write, not SQLite, not sharded
-Tsuzuki's state is small and bounded (dozens of series, not thousands of
-files) — full-parse-on-every-invocation is cheap, so there's no case for
-SQLite's complexity or mpv's per-file sharding. **Every write must be
-temp-file-then-rename**, never an in-place write — a kill mid-write must
-never leave a half-written state file. Any new state-writing code path
-must go through the same atomic-write helper; don't add a second write
-path that writes in place "just this once."
+State is small and bounded (dozens of series) — full-parse-on-every-
+invocation is cheap, so there's no case for SQLite or mpv's per-file
+sharding. **Every write is temp-file-then-rename**, through one shared
+atomic-write helper — a kill mid-write must never leave a half-written
+file; never add a second write path that writes in place.
 
-**A moved or renamed series folder is indistinguishable from deletion, and
-this is intentional, not a gap.** Tsuzuki has no path-history or rename
-detection anywhere — series identity is the literal directory name (§3/
-design.md §3, "no parsing, no aliasing"), so a folder at a new path or new
-name is, by that same rule, simply a different, never-before-seen series
-as far as Tsuzuki is concerned. The old record becomes exactly as orphaned
-as a genuine deletion (handled identically, below); the new location
-appears in `series_in_root`'s walk as a brand-new, untracked series with no
-history. Do not add rename detection later "for convenience" — matching a
-new folder back to an old record by any heuristic (name similarity, file
-count, whatever) is precisely the fuzzy inference §2 rules out everywhere
-else.
+**A moved/renamed series folder is indistinguishable from deletion — on
+purpose.** No path-history or rename detection anywhere: series identity
+is the literal directory name, so a folder at a new path/name is simply a
+new, never-before-seen series. The old record goes orphaned exactly like a
+genuine deletion; the new location appears as an untracked series with no
+history. Never add rename-matching by heuristic (name similarity, file
+count) — that's the fuzzy inference §2 rules out everywhere.
 
-**A `state.toml` record whose series has been deleted from disk stays
-inert until explicitly cleaned, never auto-removed.** `start`/`list`
-already can't show a deleted series wrong, structurally — they cross-
-reference `state.toml` against a live walk of the tracked root (`series_in_root`,
-Phase 1), and a deleted folder simply can't appear in that walk regardless
-of what `state.toml` still says. The real risk is narrower: the automatic
-resume picker (bare `tsuzuki`) resolves a specific file an `in_progress`
-record points to — if that record's series was deleted, the file's gone
-too, and this must degrade gracefully (skip it, never crash, never treat
-it as resumable), same "one bad entry doesn't abort the whole scan"
-precedent used everywhere else in this project. But the stale record
-itself must NOT be silently deleted the moment its path fails to resolve —
-that would be inference (assuming a missing path means the user wants the
-record forgotten) in a project that avoids exactly that everywhere else.
-Cleanup is `doctor`'s job (Phase 7): it detects an orphaned `state.toml`
-record — a series tracked under a root that's *itself* still valid, but
-whose own folder no longer resolves on disk — and hands back the exact
-command to clear it, same list-and-hand-back-the-command pattern §3 already
-uses for exclude ambiguity and Anitomy suggestions — never automatic. A
-root that's currently unreachable at all (unmounted drive, permission
-denied) is excluded from per-series orphan detection entirely, not treated
-as "every series under it is gone" — that would be a false-positive orphan
-flood from a simple unplugged drive, not a real per-series problem; doctor
-checks root-level validity first and only runs per-series orphan detection
-under a root that passes it. The exact command doctor hands back is
-`tsuzuki doctor --fix --forget-orphans` — not a new, separate top-level
-command, and not scoped to one series at a time: since root-level
-unreachability is already excluded above, what `--forget-orphans` clears is
-genuinely confirmed-dead, so bulk clearing without per-series targeting is
-the right level of ceremony. `--forget-orphans` requires `--fix` (enforced
-by clap) and prints exactly what it's about to permanently delete before
-doing it. Don't let this silently vanish into "tracked-root validity" being
-read as root-level only — it must include per-series validity within a
-still-tracked root, not just whether the root itself still exists.
+**An orphaned `state.toml` record (series deleted from disk) stays inert
+until explicitly cleaned — never auto-removed.** `start`/`list` can't
+misrepresent it (they cross-reference a live directory walk). The
+automatic resume picker must degrade gracefully if it points at a deleted
+file (skip it, never crash) — but the record itself isn't silently
+deleted just because its path fails to resolve; that would be inference.
+Cleanup is `doctor`'s job: it detects the orphan and hands back
+`tsuzuki doctor --fix --forget-orphans` (requires `--fix`, enforced by
+clap; prints exactly what it's about to delete; bulk not per-series, since
+what it clears is already confirmed-dead). A root that's itself
+unreachable (unmounted drive, permission denied) is excluded from
+per-series orphan detection entirely — doctor checks root-level validity
+first — so a simple unplugged drive never floods false-positive orphans.
 
 ### mpv `watch_later` reading is launcher-independent — tracking never needs an IPC socket, but resuming does spawn mpv
-**Corrected wording — the previous phrasing here ("Tsuzuki never launches
-mpv") was misleading and, read literally, would have blocked Phase 5's
-whole reason to exist.** What's actually true, and what matters: *tracking*
-doesn't depend on Tsuzuki being the one that launched mpv — it only reads
-`watch_later` files after the fact, so it works identically whether a file
-was opened by Tsuzuki, a file manager, or the terminal. That's a completely
-separate question from *resuming*, which is a core feature: `tsuzuki` /
-`resume` / `start` genuinely do spawn `mpv <file> --start=<seconds>` (a
-plain fire-and-forget process launch, then immediately let go) — otherwise
-the tool's entire one-command pitch (§1) is meaningless. What's actually
-ruled out is holding an ongoing IPC socket or requiring control over an
-already-running mpv instance — never a bare spawn-and-release. This means:
+*Tracking* doesn't depend on Tsuzuki having launched mpv — it only reads
+`watch_later` files after the fact, so it works identically regardless of
+what opened the file. *Resuming* (`tsuzuki`/`resume`/`start`) is a
+separate, core feature: it spawns `mpv <file> --start=<seconds>`
+fire-and-forget, then lets go. What's ruled out is holding an ongoing IPC
+socket or controlling an already-running mpv instance — never a bare
+spawn-and-release.
 - **`write-filename-in-watch-later-config=yes` is a hard prerequisite** —
-  without it, entries are only MD5 hashes of the path, which are
-  one-way and unrecoverable. `doctor` must check for this explicitly,
-  never assume it's set.
-- **Redirect entries (`# redirect entry`) must be filtered out** — they
-  come from opening a directory/playlist in mpv and contain no real
-  position. Silently including them would corrupt "most recent" logic.
+  without it, entries are only unrecoverable MD5 hashes of the path.
+  `doctor` checks for this explicitly, never assumes it's set.
+- **Redirect entries (`# redirect entry`)** — produced by opening a
+  directory/playlist in mpv, no real position — are filtered out.
 - **Candidate `watch_later` paths are a fixed list per OS/install method**
   (native/Flatpak/Snap), merged freshest-file-wins — never environment
-  detection. See `docs/design.md` §4 for the exact path list; don't let
-  it drift out of sync with `doctor`'s checks.
+  detection. See `docs/design.md` §4 for the path list; keep `doctor`'s
+  checks in sync with it.
 - **Absence of a `watch_later` entry is never, by itself, proof of
-  completion** — see §3's "Completion detection has a real, permanent
-  blind spot" for why (mpv's own `--resume-playback` deletes a file's
-  bookmark on load regardless of what happens next, so absence is
-  produced identically by a genuine completion and by an ordinary
-  abandon). Don't reintroduce "no entry ⇒ watched" reasoning here; that
-  was a real, shipped bug.
+  completion** — see "Completion detection has a real blind spot" below.
 
 ### Optional mpv companion script — per-file preferred source when present, watch_later fallback always intact
-A small, Tsuzuki-authored Lua script (`contrib/mpv/tsuzuki.lua`) placed in
-mpv's `scripts/` directory is exactly as launcher-independent as
-`watch_later` itself — mpv loads every installed script for every
-invocation regardless of what launched it, and the script only ever writes
-small text files to its own log directory (`$XDG_DATA_HOME/tsuzuki/mpv-log`,
-as *mpv's own process* resolves it, atomically, temp-file-then-rename). No
-IPC socket, no background process, nothing added to this section's own
-"never holds an ongoing connection to an already-running mpv instance"
-constraint. Reading this log is `script_log.rs`'s job — its scan shape
-(parse-one-entry, skip malformed/`reason=="redirect"` entries without
-aborting, filter to tracked roots via the same symlink-aware helper
-`watch_later` parsing already uses) mirrors `mpv.rs`'s own
-`scan_watch_later` deliberately.
+`contrib/mpv/tsuzuki.lua`, installed by the user into mpv's `scripts/`
+directory, is exactly as launcher-independent as `watch_later` — mpv
+loads it for every invocation regardless of what launched it. It writes
+small text logs atomically to `$XDG_DATA_HOME/tsuzuki/mpv-log` (resolved
+by mpv's own process). No IPC, no background process. `script_log.rs`
+mirrors `mpv.rs`'s `scan_watch_later` shape (parse-one-entry, skip
+malformed/redirect entries without aborting, filter to tracked roots via
+the same helper).
 
-**Strictly opt-in, never a hard requirement.** Installing it is a manual,
-documented, one-time step — the same shape as the existing
-`write-filename-in-watch-later-config=yes` prerequisite, not a new command
-surface. A user who never installs it keeps the exact behavior shipped
-before this script existed; nothing regresses, nothing new is required for
-the tool to keep working.
+**Strictly opt-in, never required.** A user who never installs it keeps
+the exact pre-script behavior — nothing regresses.
 
-**The directory name is fixed and Tsuzuki-owned — never a `config.toml`
-field — but which real directory it resolves to does have install-method
-variance after all, exactly like `watch_later`.** This was gotten wrong
-once, at Phase 6's original decision ("unlike `watch_later`, there's no
-install-method variance to work around here"), and corrected only after a
-live report of "no logs ever appear" against a genuine Flatpak `io.mpv.Mpv`
-install. Verified directly (`flatpak run --command=sh io.mpv.Mpv -c 'echo
-$XDG_DATA_HOME'`): Flatpak overrides `XDG_DATA_HOME` for every sandboxed
-app to point into that app's own private per-app data directory
-(`~/.var/app/io.mpv.Mpv/data`), never the real `~/.local/share`. The
-script reading `os.getenv("XDG_DATA_HOME")` is exactly correct from inside
-the sandbox — the bug was on Tsuzuki's side, assuming its own
-unsandboxed `dirs::data_dir()` resolution and mpv's sandboxed one always
-agree. (The Flatpak `host:ro` permission also rules out "have the script
-use `$HOME` instead" as a fix: that mount is read-only inside the
-sandbox, confirmed directly.) Fixed the same way `watch_later`'s own
-install-method variance already is: `script_log::mpv_log_dirs()` returns a
-small candidate list (native + the verified Flatpak remap,
-`~/.var/app/io.mpv.Mpv/data/tsuzuki/mpv-log`), merged freshest-file-wins
-across directories exactly like `watch_later`'s own cross-directory merge.
-Still **not** a `config.toml` field — a fixed candidate table matched
-against install method, same as `watch_later`'s own table, not a
-user-configured override. No Snap candidate was added: Snap's own
-`XDG_DATA_HOME` remapping behavior for a confined mpv hasn't been verified
-against a real install, and candidate paths don't get added on a guess
-(§2) — revisit if a Snap report ever surfaces the same way this one did.
+**The directory name is fixed and Tsuzuki-owned, but which real directory
+it resolves to has install-method variance, same as `watch_later`.**
+Flatpak remaps `XDG_DATA_HOME` for every sandboxed app to its own private
+per-app data dir (verified directly: `flatpak run --command=sh io.mpv.Mpv
+-c 'echo $XDG_DATA_HOME'` → `~/.var/app/io.mpv.Mpv/data`) — the script's
+own env read is correct, the bug was Tsuzuki assuming its unsandboxed
+`dirs::data_dir()` and mpv's sandboxed one always agree. (Flatpak's
+`host:ro` also rules out "use `$HOME` instead" — that mount is read-only
+in the sandbox.) Fixed the same way `watch_later` is:
+`script_log::mpv_log_dirs()` returns a small candidate list (native + the
+verified Flatpak remap), merged freshest-file-wins across directories.
+Still not a `config.toml` field. No Snap candidate — unverified against a
+real install, and this project doesn't add candidate paths on a guess.
 
 **An independent candidate source, unioned with `watch_later` — not mere
-enrichment.** `reconcile.rs`'s candidate discovery scans both sources and
-merges them per source path (`merge_candidates`), so a file with a
-script-log entry but no `watch_later` entry at all (a clean binge, watched
-straight through with the script installed — mpv writes no `watch_later`
-entry for a file that reaches a true, uninterrupted EOF) still surfaces as
-real activity. This is what actually closes the "clean binge leaves no
-trace" blind spot below for anyone who has the script installed — union,
-not fallback-only, is what makes that true.
+enrichment.** `reconcile.rs`'s `merge_candidates` scans both sources per
+path, so a script-log entry with no `watch_later` entry at all (a clean
+binge with the script installed — mpv never writes an entry for a file
+that reaches a true EOF) still surfaces as real activity. This is what
+actually closes the "clean binge leaves no trace" blind spot for anyone
+with the script installed.
 
 **Per-path source selection is mtime-based, not "script always wins."**
-When a path has entries from both sources, the fresher one wins by the
-underlying entry file's own mtime; an exact tie goes to the script entry,
-deterministically (same precedent as the OS-candidate merge's own
-exact-mtime-tie rule). This matters because `watch_later` entries can
-legitimately be fresher — e.g. a `resume`d file quit again after the
-script-log entry was last written.
+The fresher entry file wins; an exact tie goes to the script entry,
+deterministically — `watch_later` can legitimately be fresher (e.g. a
+`resume`d file quit again after the script last wrote).
 
-**Classification is per source, once a winner is picked.** A
-`watch_later`-sourced winner classifies exactly as before, unchanged
-(`resume_seconds`/`completion_remaining_seconds`, Symphonia/AVI duration
-probing). A script-sourced winner with `reason=="eof"` is treated as
-`Completed` unconditionally — a direct, unambiguous signal, never run
-through the `completion_remaining_seconds` proximity check at all. A
-script-sourced winner with any other reason (`stop`/`quit`/`error`/
-`unknown`) and a real position is classified exactly like a `watch_later`
-reading (the same `resume_seconds` noise threshold, the same
-`completion_remaining_seconds` proximity check) — just fed the script's
-own `duration` directly when it has one, skipping the Symphonia/AVI probe
-entirely for that file, per this same section's original design. **When
-the script's own `duration` field is empty** (mpv's `duration` property
-observer never fired for that session, e.g. quit almost immediately) —
-**falls back to `duration::probe_duration` on the file itself, exactly as
-a `watch_later`-sourced reading always has**, rather than leaving duration
-`Unknown` and skipping the completion check. The file is real and on disk
-regardless of which source won; probing it costs the same
-low-hundreds-of-microseconds it always has (§3's "Completion threshold
-needs episode duration" already established this is cheap, not a caching
-concern), and there's no reason a script-sourced reading should know
-*less* about a file's completion state than a `watch_later`-sourced one
-would for the exact same file. A `reason=="redirect"` entry is discarded
-at parse time, never a candidate at
-all — the script-log equivalent of `watch_later`'s own redirect-entry
-filtering. A script entry that errors, or simply never gets written for a
-file, is indistinguishable from "script not installed" for that file — no
-special error state, matching the existing "one bad entry doesn't abort
-the whole scan" precedent used everywhere else in this project.
+**Classification is per source.** A `watch_later` winner classifies
+exactly as before. A script winner with `reason=="eof"` is `Completed`
+unconditionally, no proximity check. Any other script reason with a real
+position goes through the normal `resume_seconds`/
+`completion_remaining_seconds` classify(), fed the script's own `duration`
+when present (skipping the Symphonia/AVI probe), else falling back to
+`duration::probe_duration` on the file itself rather than leaving
+`Unknown` — the file is real and on disk regardless of source, and
+probing costs the same low-hundreds-of-microseconds it always does.
+`reason=="redirect"` is discarded at parse time.
 
-**Script-log entries persist forever on disk — mpv never deletes them.**
-Unlike `watch_later`, which mpv's own `--resume-playback` clears on load,
-a script-log entry just sits there unchanged indefinitely once written.
-This means the existing "only write to `state.toml` on a genuine content
-change vs. what's currently stored" diffing rule has to hold for
-script-sourced readings too, or an unchanged entry seen on every
-subsequent invocation would look like fresh activity forever — most
-concretely, it must never silently undo a prior `pause`/`drop` the way an
-un-zeroed `watch_later` bookmark could before that bug was fixed (see
-"`pause`/`drop` never zero the stored position" above).
+**Script-log entries persist forever — mpv never deletes them**, unlike
+`watch_later`. So the "only write state.toml on a genuine change" diffing
+rule must hold for script readings too, or an unchanged entry would look
+like fresh activity on every invocation and could silently undo a prior
+`pause`/`drop`.
 
-**Why union-with-fallback instead of replacing `watch_later` reading
-outright:** a full replacement would mean a user without the script gets
-*zero* tracking instead of full, correct `watch_later`-only tracking — a
-materially worse out-of-box floor than the one-line
-`write-filename-in-watch-later-config` ask ever was. Union-with-fallback
-gets the accuracy win (closes the "clean binge leaves no trace" blind spot
-entirely for anyone who installs it, eliminates the absence-vs-abandon
-ambiguity at the root rather than just making it safe) without raising the
-floor for anyone who doesn't.
+**Why union-with-fallback, not a full replacement:** a user without the
+script must still get full, correct `watch_later`-only tracking, never
+zero tracking.
 
 ### Thresholds are fixed seconds, both configurable, defaults 120s / 180s
-`resume_seconds = 120` (below this: start from 0, not a real bookmark),
-`completion_remaining_seconds = 180` (this close to the end: mark
-complete). Every tunable in the design doc must have a corresponding
-`[thresholds]`/`[roots]`/`[mpv]`/`[mal]` config field — a hardcoded value
-that isn't configurable is inference in disguise; don't add one without
-also wiring it into `config.toml` and `tsuzuki config`.
+`resume_seconds = 120` (below this: start from 0), `completion_remaining_
+seconds = 180` (this close to the end: mark complete). Every tunable must
+have a corresponding config field — a hardcoded value that isn't
+configurable is inference in disguise.
 
 ### Exclusions run before ordering, always
-`tsuzuki exclude` removes files/dirs from the tree *before* the natural
-sort runs, not as a post-filter on results. If ordering logic and
-exclusion logic ever get combined into one pass for a "cleaner" refactor,
-verify exclusions still fully remove nodes pre-sort — don't let excluded
-files leak into natural-sort comparisons even if their final output
-position ends up correct by luck.
+`tsuzuki exclude` removes files/dirs from the tree *before* natural sort
+runs, never as a post-filter. If ordering and exclusion logic are ever
+merged into one pass, verify exclusions still fully remove nodes pre-sort.
 
 ### Exclusion persistence and disambiguation
-Exclusions persist in `config.toml` (not `state.toml`) — they're an
-explicit, human-declared, one-time rule, same category as tracked roots,
-not something Tsuzuki derives while running. Like roots (above), the
-stored form must stay portable: store the relative path plus a reference
-to which tracked root it belongs to (using that root's own persisted
-literal form as the key), never a resolved absolute path baked to one
-machine. `exclude` validates the resolved path exists on disk before
-excluding, matching `add`'s validate-now behavior — an exclude of a
-typo'd path should error, not silently accept garbage. Excluding an
-entire series folder (a depth-1 directory itself) is rejected as invalid
-usage — not tracking it, or a future `drop`, is the correct tool for
-that; allowing `exclude` to also remove a whole series would be a third,
-confusing way to make one disappear. When the same relative path exists
-under more than one tracked root, resolution is a `--root <path>` flag,
-not an interactive prompt — `exclude` is a rare setup action, not the
-daily reflex path, so staying scriptable (usable in a script/dotfiles
-install, non-interactive) wins over minimizing keystrokes here. Contrast
-this deliberately with the resume picker (§8 in docs/design.md), where
-the opposite tradeoff was made for the opposite reason.
+Exclusions persist in `config.toml` (not `state.toml`) — explicit,
+human-declared, same category as roots. Stored form: the relative path
+plus the owning root's own persisted literal form (never a resolved
+absolute path). `exclude` validates the path exists before excluding
+(matches `add`'s validate-now behavior). Excluding a whole series
+(depth-1 dir itself) is rejected — not-adding or a future `drop` is the
+right tool. Same relative path under more than one root resolves via
+`--root <path>`, not an interactive prompt — `exclude` is a rare setup
+action, so scriptability wins over keystrokes here (contrast the resume
+picker, which makes the opposite tradeoff for the opposite reason).
 
-**Idempotency comparison must be normalized, not a raw string match.**
-`"One Piece/Specials"` and `"One Piece/Specials/"` (or any other
-equivalent form `add`'s own idempotency check already treats as the same
-path — trailing slash, `..`-resolution, symlink aliasing) must be
-recognized as the same exclusion. Resolve/canonicalize both sides before
-comparing, exactly like `add` does — this was previously stated as
-already matching `add`'s behavior but didn't in practice; if these two
-checks (roots.rs's and exclude.rs's) ever diverge again, that's a bug,
-not an acceptable inconsistency.
-
-**The path argument to `exclude` must be validated as relative before
-any join.** `PathBuf::join` silently discards its base entirely when
-given an absolute path — so an unvalidated leading `/` in user input
-(typo or otherwise) can resolve against the filesystem root instead of
-the tracked root, landing on something completely unrelated. Reject an
-absolute `path` argument outright with a clear error before it ever
-reaches a `.join()` call; never let a malformed argument silently
-resolve to an unintended location.
-
-**Exclusion enforcement checks the resolved (symlink-following) path,
-not the walked entry's own literal path.** Consistent with "symlinks are
-followed everywhere" (Phase 1) — a symlink located outside an excluded
-directory but pointing *into* excluded content must still be excluded,
-because what it resolves to is excluded, even though its own path in the
-tree isn't. Checking only the entry's literal path lets a symlink alias
-silently bypass an exclusion.
+- **Idempotency comparison must be normalized**, not a raw string match —
+  resolve/canonicalize both sides before comparing (trailing slash,
+  `..`-resolution, symlink aliasing), exactly like `add`'s own check. If
+  `roots.rs`'s and `exclude.rs`'s normalization ever diverge, that's a bug.
+- **The path argument must be validated as relative before any `.join()`**
+  — `PathBuf::join` silently discards its base on an absolute path, so an
+  unvalidated leading `/` could resolve against the filesystem root.
+  Reject absolute `path` up front.
+- **Exclusion enforcement checks the resolved (symlink-following) path,
+  not the walked entry's literal path** — a symlink outside an excluded
+  dir but pointing into it must still be excluded.
 
 ### Anitomy only annotates, never reorders
 `anitomy-rs` parses episode *identity* for MAL sync. When parsing fails,
-fall back to ordinal position — silently, no error surfaced to the user
-for this specific fallback since it's expected/common. Anitomy failing to
-parse a filename is not a bug to fix upstream; it's the designed fallback
-path, and it must always resolve to *some* usable episode number.
+fall back to ordinal position — silently, since it's expected/common.
+Always resolves to *some* usable episode number.
 
 ### Anitomy is vendored, not a live dependency — hands off except real bugs
-`vendor/anitomy/` is Rapptz/anitomy-rs's source (MPL-2.0), copied in at
-commit `c5271be1d9fe71a49e93e98ac3f982b38e6e27b6`, renamed to
-`tsuzuki-anitomy` to avoid confusion with the unrelated, C++-backed
-`anitomy` crate on crates.io. It was vendored — not pulled as a live git
-dependency — for safety against the upstream repo disappearing or going
-stale (its own commit history is genuinely sparse) and full edit control,
-since Tsuzuki only needs a narrow slice of what it parses. Its original
-`Cargo.toml` pinned a fork of `phf` (`edef1c/rust-phf`) for case-
-insensitive lookup support that wasn't yet released upstream — that
-support has since shipped in `phf 0.12`, so the vendored copy's
-`Cargo.toml` uses plain `phf = { version = "0.12", features = ["macros",
-"uncased"] }` from crates.io, not the fork. Verified by rebuilding
-against the swap and confirming all of anitomy-rs's own regression tests
-still pass unchanged. This means Tsuzuki's dependency graph has **no**
-remaining git-only dependencies — `cargo install tsuzuki` and a full
-crates.io publish are both viable once desired, no longer blocked.
-`vendor/anitomy/` is treated as read-only, off-limits code: don't
-refactor, "clean up," or restyle it in a session working on anything
-else. The only acceptable reason to touch it is a confirmed, reproduced
-bug in its parsing behavior that's actually blocking Tsuzuki — and even
-then, treat it as a deliberate, isolated change with its own report, not
-a drive-by edit alongside unrelated work.
+`vendor/anitomy/` is Rapptz/anitomy-rs (MPL-2.0, commit
+`c5271be1d9fe71a49e93e98ac3f982b38e6e27b6`), renamed `tsuzuki-anitomy` to
+avoid a crates.io name collision with an unrelated C++-backed `anitomy`
+crate. Vendored (not a live git dep) for safety against upstream
+disappearing and full edit control. Its original `Cargo.toml` pinned an
+unmerged `phf` fork for case-insensitive lookups; that support has since
+shipped in `phf 0.12`, so the vendored copy now depends on plain
+crates.io `phf 0.12` — verified all of anitomy-rs's own regression tests
+still pass. Result: Tsuzuki has **no** remaining git-only dependencies,
+so `cargo install`/crates.io publish are both viable. Treat `vendor/` as
+read-only — the only acceptable edit is a confirmed, reproduced parsing
+bug actually blocking Tsuzuki, as its own isolated, deliberate change.
 
 ### Anitomy must be called with a bare filename, never a full/relative path
-Verified by direct testing: `anitomy::parse()` silently mis-parses when
-given a path with directory components (e.g. `"Season 1/ep02.mkv"` — the
-episode number is lost entirely, swallowed into the title). Always call
-`.file_name()` (or equivalent) before passing anything to Anitomy. This
-matters a lot in practice — season subfolders are a normal, expected
-structure (§3), not an edge case, so getting this wrong would silently
-break episode parsing for a large fraction of real libraries.
+Verified by direct testing: a path with directory components (e.g.
+`"Season 1/ep02.mkv"`) silently loses the episode number, swallowed into
+the title. Always call `.file_name()` first. Season subfolders are
+normal, not an edge case — getting this wrong breaks parsing for a large
+fraction of real libraries.
 
 ### Anitomy-candidate suggest-worthy Type values
-The full `ElementKind::Type` keyword table treats every value —
-including `TV` and `SP` — as equally "ambiguous" internally, so
-ambiguity alone doesn't distinguish which values should trigger a
-suggestion. The actual list Tsuzuki suggests on: `OVA`, `Special`,
+Every `Type` keyword is internally marked "ambiguous," so that alone
+doesn't distinguish anything. The actual suggest list: `OVA`, `Special`,
 `Specials`, `Movie`, `Gekijouban`, `ONA`, `OAD`, `OAV` (case-insensitive).
-`Gekijouban` is included even though it wasn't in the original phase
-scope — it's a confirmed real value, semantically identical to `Movie`.
-`TV` and `SP` are deliberately excluded: `TV` denotes the mainline
-episode category (suggesting it would mean suggesting regular episodes
-for exclusion), and `SP` has a documented real-title collision noted in
-Anitomy's own source. If this list is ever revisited, don't shrink it
-back to "just the phase-3 prompt's original list" — that list was a
-starting guess, not the settled answer; this one is.
+`TV` is excluded (denotes the mainline episode category — the opposite of
+exclude-worthy); `SP` is excluded (documented real-title collision in
+Anitomy's own source, e.g. `"...SP Professional"`). Don't shrink this
+list back to a smaller "starting guess" version.
 
 ### CLI bare-invocation contract
-Every command group with subcommands (`config`, `sync`) must have an
-explicit, documented answer for what happens when it's invoked with no
-subcommand — never clap's generic "subcommand required" error, which is
-accurate but reads as accidental rather than decided. If the group
-already has a specified default action (`sync` bare = run the sync,
-per `docs/design.md` §9), that action must stay reachable without a
-subcommand — don't model it as a required-subcommand enum that
-accidentally blocks the primary command. If a group has no single
-default meaning (`config` — `get`/`set`/`list`/`edit` are all equally
-valid, none is "the" default), bare invocation prints help and exits 0.
-This does **not** extend to malformed input (bad flags, unknown
-subcommands, missing required args) — that stays on clap's own
-error/usage output. Clap's default error handling is mature and matches
-the rest of the Rust CLI ecosystem (ripgrep, cargo, fd); reimplementing
-it would be exactly the kind of self-inflicted complexity "boring over
-clever" (§2) exists to avoid. Don't extend Tsuzuki's own error-message
-layer beyond the one gap this closes.
+Every command group with subcommands (`config`, `sync`) has an explicit,
+documented behavior for no-subcommand invocation — never clap's generic
+"subcommand required" error. A group with a specified default action
+(`sync` bare = run the sync) must keep that reachable without a
+subcommand. A group with no single default (`config`) prints help and
+exits 0. Malformed input (bad flags, unknown subcommands, missing
+required args) stays on clap's own error output — don't extend Tsuzuki's
+error layer beyond this one gap.
 
 ### Video file filtering within a series tree
-The ordering tree under a series only includes files matching a
-configurable video-extension allowlist (`[roots] video_extensions`,
-default `["mkv", "mp4", "avi", "webm", "mov"]`) — sidecar files common in
-release folders (`.srt`/`.ass` subtitles, `.nfo`, cover art, samples)
-would otherwise shift natural-sort positions and corrupt "next episode"
-logic. This is a narrow exception to "no content classification
-anywhere" (§2/§3) — it's plausibly-a-video-file, not "is this an episode
-of this story," and it's explicit + user-overridable rather than a
-silent heuristic, consistent with §8's "every tunable is genuinely
-configurable." Directories are never filtered by this list — only files.
+The ordering tree only includes files matching `[roots] video_extensions`
+(default `["mkv", "mp4", "avi", "webm", "mov"]`) — sidecar files
+(subtitles, `.nfo`, cover art) would otherwise shift natural-sort
+positions. A narrow, explicit, user-overridable exception to "no content
+classification anywhere" — plausibly-a-video-file, not "is this an
+episode." Directories are never filtered by this list.
 
 ### `tsuzuki add` validation and idempotency
-`add` validates the path exists and is a directory at add-time, exiting
-non-zero with a clear error if not — doesn't defer this to `doctor`.
-Adding an already-tracked root is not an error: it's idempotent, exits 0,
-and prints which case occurred (already tracked vs. newly added) so the
-user gets confirmation either way without a script treating a harmless
-re-run as a failure.
+`add` validates existence/directory-ness at add-time, not deferred to
+`doctor`. Re-adding an already-tracked root is idempotent (exit 0),
+printing which case occurred.
 
 ### Roots are persisted in the form the user typed, never rewritten to an absolute path
-`~` expansion happens only in memory, for validation and for the
-already-tracked comparison — the path written back to `config.toml` is
-whatever the user gave `add`, unchanged. Rewriting `~/Anime` to a
-canonicalized absolute path on write would silently break config
-portability across machines (different usernames/home paths), which
-directly contradicts config.toml's stated purpose (§8: hand-edited,
-versionable in a dotfiles repo) and the `~`-form example already shown
-there. If a future phase needs an absolute path (e.g. for filesystem
-scanning), expand at the point of use — never persist the expanded form.
+`~` expansion happens only in memory (validation, idempotency
+comparison) — the value written to `config.toml` is exactly what the
+user gave `add`. Canonicalizing on write would break config portability
+across machines (different usernames/home paths). If a future need
+requires an absolute path, expand at point of use, never persist it.
 
 ### Symlinks are followed everywhere, with cycle protection
-A symlinked series folder or symlinked episode file behaves exactly like
-a real one — "the user's filesystem is already their library" (§2)
-includes symlinks as a legitimate, ordinary part of that filesystem, not
-something to silently hide. This must be applied consistently: any
-filesystem-walking code (series enumeration, episode-tree building, root
-validation/comparison) uses stat semantics (follows symlinks), never
-lstat semantics (which would silently make symlinked content invisible
-with no error). Because following symlinks makes cycles possible (a
-symlink pointing back into its own ancestry), any recursive walk must
-track canonicalized real paths already visited and stop descending into
-a repeat — this guard is not optional once symlinks are followed at all.
+A symlinked series folder or episode file behaves exactly like a real
+one — every filesystem walk (enumeration, tree building, root
+comparison) uses stat semantics, never lstat. Since this makes cycles
+possible, any recursive walk tracks canonicalized real paths already
+visited and stops descending into a repeat — not optional once symlinks
+are followed at all.
 
 ### video_extensions entries are normalized on read (leading dot stripped)
-A config entry of `.mkv` and `mkv` are treated identically — config.rs
-strips a leading `.` if present when loading `video_extensions`. Without
-this, a natural, common way to hand-type the list (`.mkv` instead of
-`mkv`) would silently match nothing, with no error surfaced — exactly
-the kind of silent failure the project avoids everywhere else. The
-canonical stored/documented form stays the bare extension (no dot), per
-§8's example; the normalization only exists to make the dotted form also
-work rather than fail silently.
+`.mkv` and `mkv` are treated identically — `config.rs` strips a leading
+`.` on load, in memory only (on-disk file is never rewritten by the
+read). Canonical documented form stays the bare extension.
 
-### Series selection: interactive by default, explicit when scripted — `resume`/`start`, Phase 5
-`tsuzuki resume` and `tsuzuki start` share one selection mechanism, decided
-now so it isn't improvised under time pressure later. Invoked with no
-explicit series argument, and a real TTY is available: a real interactive
-arrow-key selector (↑/↓, Enter — via a crate like `dialoguer`/`inquire`),
-not "type a number." This is the one place in the tool where losing
-scriptability is the right tradeoff — it's the daily one-command reflex
-path the whole tool exists for, so minimizing keystrokes matters more than
-non-interactive use here. But — this was a real gap in the earlier version
-of this note — the picker must not be the *only* way to complete the
-action: both commands also accept an explicit series name (with `--root`
-when the same name exists under more than one tracked root, same mechanism
-as `exclude`/`pause`/`drop`), so the action can always be completed
-non-interactively and used reliably from scripts, without ever depending on
-a TTY existing at all. In a non-TTY context with no explicit series given:
-never hang waiting for input — list the available choices with indexes and
-exit without performing the action (non-zero exit, see "informed but did
-not complete the action" below). An explicit series argument always bypasses
-the picker entirely and proceeds directly, TTY or not. The interactive
-picker is a convenience layered on top of a fully scriptable command, never
-a requirement of the command's actual semantics.
+### Series selection: interactive by default, explicit when scripted — `resume`/`start`
+No explicit series argument + a real TTY → a real interactive arrow-key
+selector (↑/↓, Enter), not "type a number." The one place in the tool
+where losing scriptability is the right tradeoff — it's the daily
+one-command reflex path. But the picker must never be the *only* way to
+complete the action: both commands also accept an explicit series name
+(with `--root` to disambiguate, same mechanism as `exclude`/`pause`/
+`drop`), always usable from a script. Non-TTY with no explicit series:
+never hang — list choices with indexes and exit without acting (non-zero
+exit). An explicit series argument always bypasses the picker, TTY or
+not.
 
 ### `current` was cut — folded into `status`
-An earlier draft of the command list (design.md §9) had `tsuzuki current`
-as a separate command ("which series would bare `tsuzuki` resume right
-now"). Revisited during Phase 5 planning: it added no information `status`
-can't already show — a single `in_progress` series is `status`'s one row;
-multiple are `status`'s full list, which can just note that running
-`tsuzuki` bare will prompt among them. Cut entirely rather than kept as a
-redundant thin wrapper — one fewer command surface, zero lost capability.
+Added no information `status` can't already show (one row for a single
+`in_progress` series, a full list plus a note otherwise). Cut entirely
+rather than kept as a redundant wrapper.
 
 ### Anitomy-candidate confirmation stays list-only, not interactive
-Bare `tsuzuki exclude` (no path) lists Anitomy-suggested OVA/Special/
-Movie candidates plus the exact `tsuzuki exclude "<path>"` command for
-each — it does not run an interactive y/n walkthrough, and there is no
-separate indexed `--confirm` follow-up command. Same reasoning as the
-`--root` disambiguation case (§3): `exclude` stays non-interactive by
-design, and re-running it with an explicit path reuses Phase 2's already-
-validated logic rather than adding a new command surface or new
-cross-invocation state (an index from a prior "list" call would only be
-valid if nothing on disk changed in between — a fragile guarantee this
-project avoids relying on elsewhere).
+Bare `tsuzuki exclude` lists suggested candidates plus the exact
+`tsuzuki exclude "<path>"` command for each — no interactive walkthrough,
+no separate indexed `--confirm` command. Re-running with an explicit path
+reuses Phase 2's already-validated logic rather than adding new
+cross-invocation state (an index from a prior listing would only be valid
+if nothing changed on disk in between — a guarantee this project avoids
+relying on).
 
 ### Clippy's strict gate is scoped to `-p tsuzuki --no-deps`, not `--workspace`
-`vendor/anitomy` is a workspace member (needed for `cargo build` to work
-at all) but is off-limits code (see the hands-off policy above) — it was
-never held to Tsuzuki's own lint bar and doing so now would mean either
-restyling vendored third-party code for no functional reason, or having
-every future phase's verification fail against pre-existing, unrelated
-lints. `cargo build --workspace` still checks the whole thing compiles;
-only the strict `-D warnings` clippy gate is scoped down. See
-COMMANDS.md for the exact command.
+`vendor/anitomy` is a workspace member (needed for `cargo build`) but is
+off-limits code — never held to Tsuzuki's own lint bar. `cargo build
+--workspace` still checks the whole thing compiles; only the `-D
+warnings` clippy gate is scoped down. See COMMANDS.md for the exact
+command.
 
 ### Threshold precedence when position + completion checks overlap (short files)
-On a short enough file, a single saved position can satisfy both
-`resume_seconds` (small enough to count as noise) and
-`completion_remaining_seconds` (close enough to that file's own ending) at
-once — the two zones only stay separate on episode-length video. Current
-code (`src/mpv.rs`'s `classify()`) has the position check win: such a case
-resolves to `StartFromZero`, never `Completed`. Reasoning: getting this
-wrong the other way silently claims progress the user may not have actually
-watched, where getting it wrong this way only costs a possible rewatch of a
-few seconds — and the real completion signal for a fully-watched file (no
-`watch_later` entry at all) still catches these cases independently once
-Phase 5 exists, so erring conservative here doesn't lose real detection.
-This is this session's judgment call, not something docs/design.md specifies
-— if real usage says the other order feels more correct, this is a one-line
-change in `classify()`, not a structural one; revisit if it doesn't hold up.
+On a short enough file, a single position can satisfy both
+`resume_seconds` (noise) and `completion_remaining_seconds` (near-end) at
+once. `mpv.rs`'s `classify()` has the position check win → `StartFromZero`,
+never `Completed`. Reasoning: the wrong-call-cost is asymmetric (falsely
+claiming progress vs. a possible few-second rewatch), and the
+independent absence/duration completion signal still catches these cases
+separately. A judgment call, not a design.md spec — a one-line change in
+`classify()` if real usage disagrees.
 
-**`start`'s listing has three distinct display words, one per state — this
-was caught by literally simulating a session, not obvious from the state
-mechanics alone.** Never-started (no `state.toml` record) → **"Start."**
-Paused → **"Resume"** (at its saved position) — genuinely different from
-the other two; a paused series has a real position waiting, not a reset
-one. Dropped (manually, or via the one detectable "finished the whole
-series" signal — see the binge-watching trace gap below) → **"Rewatch?"**
-— manual-drop and detected-completion collapse to the same display and the
-same underlying state, since both are genuinely the same situation from the
-user's side: reopening any episode naturally re-populates progress either
-way (§8), and this needs zero new persisted data to tell them apart — the
-display only checks "does a record exist, and what state is it in," never
-"why." A `paused` record must never be mislabeled "Rewatch?" — that word is
-specifically for a reset/dropped position, not a genuinely resumable one.
-Deliberately no fourth `completed` state was added — see "Completion
-detection has a real, permanent blind spot" below for why one wouldn't even
-be reliably detectable most of the time.
+**`start`'s listing has three distinct display words, one per state.**
+Never-started (no record) → **"Start."** Paused → **"Resume"** (real
+saved position). Dropped (manual, or the one detectable "finished the
+whole series" auto-signal) → **"Rewatch?"** — manual-drop and
+detected-completion collapse to the same display/state; the check is only
+"does a record exist and in what status," never why. A `paused` record
+must never show "Rewatch?". No fourth `completed` state exists — see next
+section for why one isn't reliably detectable most of the time.
 
 ### Completion detection has a real blind spot for `watch_later` alone — absence of a bookmark is never, by itself, proof of anything
-Absence of a `watch_later` entry for the series' currently-tracked episode
-must never be read as positive evidence of completion, full stop — no
-exceptions, no "but the record's old stored position was real" special
-case. This was a real, shipped bug, found by dogfooding: mpv's own
-`--resume-playback` (on by default, independent of anything Tsuzuki does
-or which program launched mpv) deletes a file's `watch_later` bookmark the
-instant that file is *loaded*, if one already exists for it — and mpv
-never rewrites a fresh one for a file left mid-playback via a playlist
-command (e.g. `playlist-next`) before it's ever quit while still loaded.
-The result: "no entry for the current episode" is produced *identically*
-by a genuine, played-to-true-EOF completion and by an ordinary abandon —
-open an already-bookmarked episode, skip ahead to a different one, quit
-having spent under `resume_seconds` there (or none at all). These two
-situations are provably indistinguishable from `watch_later` state alone.
-Treating "absence + the record's last stored position was real" as
-sufficient proof of completion (an earlier version of this rule did)
-silently discarded real progress on the abandoned episode and could even
-auto-`Drop` the whole series off a one-minute peek at its finale.
+mpv's own `--resume-playback` (on by default) deletes a file's bookmark
+the instant it's *loaded*, regardless of what happens next — and never
+rewrites one for a file left mid-playback via a playlist command before
+being quit while still loaded. So "no entry for the current episode" is
+produced *identically* by a genuine completion and an ordinary abandon
+(skip to a different episode, quit under `resume_seconds` there or none
+at all) — provably indistinguishable from `watch_later` state alone. An
+earlier rule ("absence + a real prior position ⇒ complete") silently
+discarded real abandoned-episode progress and could auto-`Drop` a whole
+series off a one-minute peek at its finale.
 
-**The only signals that ever justify moving the cursor or changing status:
-a real (≥`resume_seconds`) `Resume` position found anywhere forward in the
-series, or a `Completed` classification (see below) found anywhere
-forward** — both are positive readings taken from an entry that still
-exists, unaffected by the deletion-on-load problem. Absence contributes
-nothing to the decision either way; it's not weighed, corroborated, or
-treated as a tiebreaker — it simply fails to produce either signal. This
-does widen the already-accepted "clean binge leaves no trace" blind spot
-(mpv writes no entry at all for a file played straight through to a true,
-uninterrupted EOF): a series finished this way, with *nothing* else ever
-observed afterward, on any subsequent episode, no longer auto-resolves to
-`Dropped` — it stays exactly where it was until an explicit `tsuzuki drop`
-or genuine forward evidence appears. That's the honest tradeoff: the
-ordinary way people actually finish an episode — quitting on or near it,
-which mpv *does* capture as a `Completed` reading before anything gets a
-chance to delete it — is completely unaffected and keeps auto-advancing/
-auto-dropping exactly as before. Closing this gap completely from
-`watch_later` state alone (detecting a true, silent EOF with zero
-corroborating signal) would require real-time observation of playback,
-which is explicitly the thing this project chose not to build. This is not
-a failure to fix; it's the tool honestly reporting the boundary of what it
-can know from `watch_later` alone.
+**The only signals that ever justify moving the cursor or status: a real
+(≥`resume_seconds`) `Resume` position found anywhere forward, or a
+`Completed` classification found anywhere forward.** Both are positive
+readings from an entry that still exists. Absence contributes nothing —
+not weighed, not a tiebreaker. This widens the accepted "clean binge
+leaves no trace" blind spot: a series finished with zero further activity
+afterward no longer auto-resolves to `Dropped` — it stays put until an
+explicit `drop` or genuine forward evidence. The ordinary way people
+finish an episode (quitting on/near it) still produces a `Completed`
+reading before deletion can happen, so normal auto-advance/auto-drop is
+unaffected. Closing this from `watch_later` alone would require real-time
+playback observation, which this project chose not to build.
 
-**The gap is closable, not from `watch_later`, but from the optional
-companion script.** `contrib/mpv/tsuzuki.lua` observes the same `end-file`
-event `watch_later` never gets to write anything meaningful for on a clean
-EOF, and records a direct `reason=="eof"` signal instead of leaving
-absence to be interpreted. For anyone with the script installed, that
-signal is unioned into `reconcile.rs`'s candidate discovery (see "Optional
-mpv companion script" above) and treated as an unconditional `Completed` —
-so a clean binge genuinely does now auto-advance/auto-`Drop` correctly,
-closing exactly the blind spot this section describes. This doesn't
-weaken the rule above in any way: for a file with no script-log entry
-(script never installed, or played before the script existed), absence of
-a `watch_later` entry is still never, by itself, proof of anything — the
-script only ever adds a positive signal where one previously didn't
-exist; it never makes absence itself meaningful.
+**Closable, not from `watch_later`, but from the optional companion
+script:** its `reason=="eof"` signal (unioned into `reconcile.rs`) is
+treated as unconditional `Completed`, so a clean binge with the script
+installed now does auto-advance/auto-drop correctly. This doesn't weaken
+the base rule — for a file with no script-log entry, absence is still
+never proof of anything.
 
 ### When the CURRENT tracked episode itself completes: advance to the next one, or auto-`Dropped` if there is no next one
-**This is a real, previously-underspecified rule, not something already
-fully built — stated explicitly now because an earlier, too-brief mention
-of it (buried in the display-wording section below) was read too narrowly
-and produced a real, incorrect claim that nothing here is ever automatic.**
-It is automatic, in this one specific, narrow, evidence-based case — and
-this is not the fuzzy inference §2 rules out elsewhere, because it only
-ever fires on a direct, confirmed signal (the actual current tracked file,
-genuinely completing), never a guess.
+This is automatic in this one narrow, evidence-based case only — not the
+fuzzy inference §2 rules out, since it only fires on a direct, confirmed
+signal (the actual current tracked file genuinely completing).
 
-The rule, precisely: when a `Completed` classification (see "Completion
-detection has a real, permanent blind spot" above and "Cursor movement"
-below) is found anywhere in the forward scan from the current tracked
-episode on — confirming it, or a later episode, genuinely done — reconcile
-does not just record that fact and stop. It also resolves the cursor
-exactly one step further:
-- **If a next episode exists** (in natural-sort order, per the series'
-  actual files on disk) — the cursor advances to it, at position 0. This
-  is not a claim that the next episode was watched; it's the same
-  forward-looking default already used for a brand-new series (`start`
-  offers episode 1 without claiming anything about history) applied one
-  step later in the sequence. It has to work this way — leaving the
-  cursor pointed at a now-finished episode would mean the next resume
-  attempt walks straight back into the exact freeze/resume-at-the-end
-  problem already fixed once. If that next episode separately turns out to
-  already have its own real bookmark (a binge already happened), the
-  existing forward-scan/furthest-real-bookmark logic still applies from
-  there — this rule only supplies the *starting point* for that scan when
-  nothing else does.
-- **If there is no next episode** (the completed one was the actual last
-  file in the series) — the series transitions to `Dropped`, automatically,
-  no manual `tsuzuki drop` required. This is the "one detectable 'finished
-  the whole series' signal" already referenced in the display-wording
-  section below — that section only described the *display* consequence
-  ("Rewatch?"); this section is the actual mechanism producing it. No new
-  state or persisted marker is needed for this either — it's the same
-  `Dropped` state manual dropping already produces, reached automatically
-  instead of by command.
+When a `Completed` classification is found anywhere in the forward scan
+from the current tracked episode on, reconcile resolves the cursor one
+step further, not just records the fact:
+- **Next episode exists** → cursor advances to it at position 0 (not a
+  claim it was watched — same forward-looking default as a brand-new
+  series' episode 1). Leaving the cursor on a now-finished episode would
+  walk straight back into the freeze-at-the-end bug already fixed once.
+  If that next episode separately has its own real bookmark already
+  (binge), the ordinary forward-scan logic still applies from there.
+- **No next episode** (completed one was the actual last file) → series
+  auto-transitions to `Dropped`, no manual `drop` needed — this is the
+  mechanism behind `start`'s "Rewatch?" display.
 
-**This rule applies identically when no `state.toml` record exists yet.**
-Found by dogfooding the real binary during Phase 6, not by design ahead of
-time: a brand-new, never-before-tracked series whose only observed
-activity is a `Completed` classification — including a script `reason ==
-"eof"` reading, i.e. exactly the "clean binge, watched straight through
-the very first time, script installed" case this project's own companion-
-script rationale is about — used to produce **no record at all**, silently.
-The rule above was implemented as "advance the CURRENT tracked episode,"
-which implicitly assumed a tracked episode (an existing record) already
-had to exist; a series with no record yet has no cursor to advance, so the
-completion signal was simply dropped on the floor. The fix: a never-
-tracked series uses the exact same index-0 baseline `Dropped`/never-started
-records already share for the ordinary `Resume` forward-scan (see "Forward-
-scan is strictly forward" below) — a placeholder record is created purely
-as the landing spot this rule's own advance-or-`Drop` logic then resolves,
-so a brand-new single-episode series watched straight through correctly
-lands `Dropped` (not invisible), and a brand-new multi-episode series
-watched straight through episode 1 correctly lands `InProgress` at episode
-2. A genuinely `Dropped` record is **not** given this same treatment —
-it stays excluded here exactly as it already was, since `Dropped` is a
-deliberate dead end only a real `Resume` reactivates (no `dropped ->
-paused` transition exists), not something a stray `Completed` reading
-should auto-undo.
+**Applies identically when no `state.toml` record exists yet.** A
+never-tracked series whose only observed activity is a `Completed`
+reading (including script `eof` — exactly the "clean first-time binge,
+script installed" case) needs a cursor to advance; since none exists, a
+placeholder record at index-0 (the same baseline `Dropped`/never-started
+records already share) is created purely as the landing spot this rule
+then resolves — so a first-time single-episode binge correctly lands
+`Dropped`, and a multi-episode one lands `InProgress` at episode 2. A
+genuinely `Dropped` record is excluded from this — it stays a dead end
+only a real `Resume` reactivates.
 
 ### `pause`/`drop` never zero the stored position — reconcile's diffing depends on it
-Found by Phase 5's dogfood pass, not by design ahead of time — worth
-stating plainly so it isn't "cleaned up" by a later refactor that doesn't
-know why it's there. `drop` (and `pause`) must never zero or clear a
-record's stored position/path. Reconcile's whole mechanism is diffing
-"what's stored" against "what mpv currently says" to detect genuine new
-activity (see below) — but `drop` never touches mpv's own `watch_later`
-file, so the real bookmark is still sitting there unchanged after a drop.
-Zeroing the stored side manufactures a fake mismatch, which reconcile
-correctly (by its own logic) reads as new activity — silently undoing the
-drop on the very next invocation, with zero user action. The actual
-"start fresh" behavior for a dropped/paused-then-reactivated series is
-handled entirely separately, at playback-resolution time (index 0 for
-dropped/never-started, per the state's own rules below) — never by
-mutating what's stored. If a future change touches `pause`/`drop`, this
-must not regress; it already did once.
+`drop`/`pause` never touch mpv's own `watch_later` file, so the real
+bookmark is still there unchanged afterward. If they zeroed the stored
+position, reconcile's stored-vs-mpv diff would manufacture a fake
+mismatch and read it as new activity — silently undoing the drop on the
+next invocation with zero user action. "Start fresh" for a
+dropped/reactivated series is handled entirely at playback-resolution
+time (index 0), never by mutating what's stored.
 
 ### Forward-scan is strictly forward — a paused series doesn't reactivate from an earlier real bookmark
-A real (≥`resume_seconds`) bookmark appearing on an episode *earlier* than
-a series' current known position must never reactivate or move a `Paused`
-record — reconcile only ever scans forward from the last known position,
-never backward. This matters concretely: someone pauses a long series at
-episode 50, then months later rewatches an unrelated earlier episode (say
-episode 3) purely for nostalgia — if a backward bookmark could reactivate
-things, that unrelated rewatch would silently corrupt the paused position
-at episode 50. Forward-only prevents this by construction. `Dropped` and
-never-started records don't hit this at all — both use an index-0
-baseline (per "reappears exactly like never-started," design.md §8), so
-by definition nothing in the series counts as "behind" them; any real
-bookmark anywhere in a dropped/never-started series is forward from that
-baseline and correctly reactivates it.
+A real bookmark on an episode *earlier* than a series' known position
+must never reactivate or move a `Paused` record — reconcile only scans
+forward. Otherwise an unrelated nostalgic rewatch of an early episode
+could silently corrupt a paused position much further along. `Dropped`
+and never-started records use an index-0 baseline, so by definition
+nothing counts as "behind" them.
 
 ### Cursor movement: noise never touches saved state, completion check is per-series, a single run chains fully
-Settles the open question left after Phase 4 about how the cursor advances
-when the user manually skips ahead. The full mechanism, worked out by
-stress-testing scenarios rather than asserting it from feel:
-
-**A sub-`resume_seconds` reading is invisible to `state.toml`, not
-"treated as start-from-zero."** This is a sharper rule than it first
-sounds, for a concrete reason: mpv itself has no concept of Tsuzuki's noise
-threshold — if a series already has a real, saved position (say 15 minutes
-into an episode), and the user briefly reopens that same file and quits
-after 45 seconds, mpv's own `watch_later` file now physically says 45
-seconds, clobbering the real 15-minute mark that was there a moment ago. If
-Tsuzuki blindly propagated whatever it just read, one accidental short peek
-would silently erase real progress — the same category of mistake §2's MAL
-sync rule already exists to prevent ("never write a smaller number... has
-to hold even in edge cases"), just against local state instead of MAL. So:
-a sub-threshold reading never creates a new `state.toml` record, and —
-critically — never overwrites an existing real (≥`resume_seconds`) one
-either. Only another real observation can ever move a series' saved
-position, in either direction.
-
-**Completion has exactly one real signal — a duration-based near-the-end
-reading — and it's checked across the whole remaining forward scan, not
-just at the series' current episode.** `classify()`'s `Completed` result
-(built in Phase 4 — a real, ≥`resume_seconds` position with
-`duration - position ≤ completion_remaining_seconds`, e.g. quitting at
-58:30 of a 60:00 episode during the credits) is the only thing that
-confirms an episode done for cursor-advancement purposes. Absence is
-*not* a second, equally-weighted signal alongside it — see "Completion
-detection has a real, permanent blind spot" above for why: mpv deletes a
-file's own bookmark on load regardless of what happens next, so absence
-alone can't be trusted to mean completion rather than an ordinary abandon.
-Reconcile calls `classify()` (reusing Phase 4's `probe_duration`/
-`mpv::classify()` exactly as built — no new duration logic) on every entry
-in the scan that has a real position, from the current episode through the
-rest of the series; a `Completed` result found *anywhere* in that range is
-enough to enter completion-advance, because `apply_completion_advance`
-independently re-derives completion at each step it walks through using
-the same rule. `StartFromZero`/`Resume` results behave as an ordinary
-real/noise reading, unaffected. This costs nothing extra to worry about:
-duration probing only ever runs on entries that already have a real
-position, and Phase 4 already measured the actual cost directly — 212µs
-(release) to probe one file — negligible even across a full multi-step
-chain, not a caching concern.
-
-**The completion check is per-series, not "check the single
-globally-freshest file."** Phase 4's `most_recent_entry` only identifies
-one thing: the single most-recently-touched file across everything scanned.
-That's not sufficient on its own for Phase 5, because `state.toml` has to
-track multiple `in_progress` series simultaneously (design.md §8's resume
-picker exists specifically because more than one can be in progress at
-once) — a series watched Monday and one watched Tuesday are both still
-legitimately in progress today. So each run does two separate jobs, not
-one: (a) for every series already `in_progress`, forward-scan *that
-series' own* files for a `Completed` reading, independent of what's newest
-elsewhere; (b) separately, check whether any real (≥`resume_seconds`)
-`Resume` activity happened anywhere, which is what can move a cursor or
-start a new `in_progress` record.
-
-**A single invocation must resolve a full state transition, not just one
-step of one.** Binge-watching is a normal usage pattern, not an edge case:
-quit episode 1 near its end (a real `Completed` reading) and be several
-real minutes into episode 2 before `tsuzuki` is ever run again. One run
-must chain through the whole thing — recognize episode 1's completion,
-advance the cursor to episode 2, and pick up episode 2's already-real
-position — not stop after the first step and require a second invocation
-to "catch up." (If episode 2's own position is real enough to stand on its
-own — a `Resume` reading — the ordinary forward scan finds it directly,
-without ever needing to confirm episode 1's completion at all; either path
-must resolve in one call.) Don't implement this as a single comparison per
-run; it has to resolve however many steps actually happened since the last
-check.
-
-**An absent OS-default candidate directory stays silent — an explicit
-`watch_later_dir` override that doesn't resolve must be surfaced, not
-silent.** These are not the same situation and must not be treated
-identically. An OS-default candidate being missing (e.g. no Flatpak mpv
-installed) is normal and expected — silence is correct there. But
-`watch_later_dir` is something the user explicitly typed, asserting "look
-here instead" — if that path doesn't exist, it's almost certainly a
-mistake, and staying silent means the user has no way to discover why
-nothing is ever found, possibly indefinitely. The fix: when the override is
-set and doesn't resolve, the scan result carries a warning (the configured
-path, distinguishable from the "nothing found" case) rather than being
-indistinguishable from zero-bookmarks-anywhere — same "carry the reason
-forward, don't collapse to a bare empty result" pattern as
-`DurationOutcome::Unknown`. This still doesn't error or block any command —
-the daily one-command reflex must keep working even with a bad config value
-— but the warning must actually reach the user somewhere. Since this module
-has no command-facing output of its own (same as everything else in this
-phase), the warning is *returned as data*, not printed here; Phase 5 (the
-first phase with real command output) is responsible for actually
-displaying it once it exists. Don't let `doctor` (Phase 6) end up as the
-only place this ever surfaces — `doctor` is for catching setup problems
-proactively before they bite; a bad override should also be visible
-reactively, the moment it actually affects a real command.
+- **A sub-`resume_seconds` reading is invisible to `state.toml`, in both
+  directions** — never creates a record, never overwrites an existing
+  real one. mpv has no concept of Tsuzuki's threshold: if a series has a
+  real 15-minute position and the user briefly reopens and quits at 45s,
+  mpv's own file now says 45s. Blindly propagating that would let one
+  accidental short peek erase real progress — the same category of
+  mistake §2's MAL rule guards against, applied locally. Only another
+  real observation can move a position.
+- **Completion's one real signal — `classify()`'s duration-based
+  `Completed` result — is checked across the whole forward scan**, not
+  just the current episode; absence is never a second signal alongside it
+  (see above). Duration probing only runs on entries with a real
+  position and costs ~212µs release — not a caching concern even across
+  a multi-step chain.
+- **Per-series, not "check the single freshest file"** — multiple series
+  can be `in_progress` at once, so each is forward-scanned independently
+  for its own `Completed` reading.
+- **A single invocation resolves however many chained transitions
+  happened since the last check** — binge-watching (episode 1 completing
+  *and* the user already minutes into episode 3) must resolve in one
+  call, not one step per call.
+- **An absent OS-default candidate directory stays silent (normal); an
+  explicit `watch_later_dir` override that doesn't resolve must be
+  surfaced.** The override is something the user explicitly typed — if it
+  doesn't exist, silence would hide a likely mistake indefinitely. The
+  scan result carries a warning as data (this module has no
+  command-facing output of its own); the first real command layer is
+  responsible for displaying it — don't let `doctor` end up the only
+  place it ever surfaces.
 
 ### Completion threshold needs episode duration — mpv's watch_later files don't have it
-`completion_remaining_seconds` (§8) requires knowing how much of an episode is
-*left* — but mpv's `watch_later` entries only ever store the resume position
-(`start=`), never the file's total duration (verified directly against mpv's
-own option docs: `--watch-later-options` never includes anything duration-
-like, since duration isn't a settable "option" mpv tracks per-file). Tsuzuki
-has to get duration itself, from the video file's own container header — not
-from mpv.
-
-**No external program (no `ffprobe` shell-out).** Requiring a separately
-installed program contradicts local-first/no-moving-parts and Tsuzuki's own
-startup-latency rationale (§5/§10) — a Rust dependency compiled into the
-binary is strictly better here: works everywhere the binary works, no PATH
-lookup, no "is it installed" failure mode.
-
-**`symphonia` (pure Rust, MPL-2.0) reads the header, used for metadata/probe
-only — never asked to decode actual audio/video frames.** Confirmed directly
-against Symphonia's own docs: it has real demuxers for MKV/WebM and ISO/MP4
-(mp4/mov use the same box structure), covering most real libraries as one
-dependency. It does **not** support `avi`.
-
-**Dispatch is by content-probe, never by file extension.** Hand the file to
-Symphonia's own format-auto-detection first — never a hardcoded "if `.mkv`/
-`.webm`/`.mp4` use Symphonia, if `.avi` use X" branch. `video_extensions` is
-user-configurable and open-ended (§8) — an extension-keyed dispatch table
-would silently stop covering new formats the moment someone adds one to their
-config that Symphonia already supports. Only if Symphonia's probe fails to
-identify the file at all does a small hand-written fallback reader (for
-`avi`'s simple RIFF `avih` header — total-frames × microseconds-per-frame,
-no dependency needed for one legacy field) get tried as the next rung, not
-as an extension-gated special case.
-
-**Unreadable duration is surfaced, never silently dropped.** If neither
-Symphonia's probe nor the fallback reader can determine a file's duration,
-the completion-by-remaining-time check is skipped for that file only (the
-resume threshold still works fine from position alone — a real `Resume`
-reading is unaffected; only a `Completed` classification specifically
-needs duration, and per §3's "Completion detection has a real, permanent
-blind spot," absence is never an independent fallback for it). But the
-*reason* duration couldn't be read is preserved in the return value,
-not collapsed to a bare `None` — Phase 4 has no user-facing command of its
-own yet, so it's Phase 5 (or `doctor`, Phase 6) that decides where the user
-actually sees this, same pattern as Anitomy's parse-fallback in Phase 3:
-built correctly now, surfaced later, never silently discarded now.
+`watch_later` entries only ever store position, never duration. No
+external program (`ffprobe` shell-out contradicts local-first/startup-
+latency) — use a compiled-in Rust dependency instead. `symphonia` (pure
+Rust, MPL-2.0) reads the container header via content-probe for
+metadata/probe only, never decoding frames; covers MKV/WebM/MP4/MOV, not
+AVI. **Dispatch is by content-probe, never by file extension** —
+`video_extensions` is open-ended and user-configurable, so an
+extension-keyed table would silently stop covering new formats. Only if
+Symphonia's probe fails to identify the file at all does a small
+hand-written AVI `avih` RIFF-header fallback get tried, still not
+extension-gated. **Unreadable duration is surfaced with a reason, never
+silently dropped to `None`** — but only skips the completion check for
+that file (resume-from-position is unaffected).
 
 ### auto_pause_days defaults to 0 (never auto-pause)
-This is deliberate, not a placeholder. A nonzero default would be a guess
-about user intent (on a break vs. abandoned vs. waiting for episodes to
-air) — exactly the category of inference this project avoids everywhere
-else. Don't "helpfully" pick a nonzero default later; 0 is correct.
-
----
+Deliberate. A nonzero default would guess intent (break vs. abandoned vs.
+waiting for episodes to air) — the inference this project avoids
+everywhere else.
 
 ### `state.toml` record identity, root reference, and `updated_at`
-A series record is keyed by **both** its tracked root and its literal
-series name — never name alone. Composable roots (§3 above) mean the same
-series name can legitimately exist under more than one tracked root at
-once (`Anime/Monster` vs. `Anime/Rewatches/Monster`), and they must stay
-distinct records with independent progress, same as everywhere else this
-project handles composable roots. The root reference stores that root's own
-**persisted literal config form** — exactly the same mechanism exclusions
-already use (§3, "Exclusion persistence and disambiguation") — never a
-resolved absolute path or a synthesized ID; this preserves the same
-portability guarantee roots and exclusions already have (§3, "Roots are
-persisted in the form the user typed"). Each record also carries an
-`updated_at` timestamp, needed to give `auto_pause_days` any real meaning
-at all — nothing currently tracks how idle a series actually is.
-**`updated_at` only moves on a genuine, persisted state change** — never
-on a mere scan or invocation, and never on a sub-`resume_seconds`
-observation, since those are already explicitly forbidden from touching
-saved state at all (see "Cursor movement" above). It measures real idle
-time, not how often the command happened to run.
+Keyed by **both** tracked root and literal series name — never name
+alone, since composable roots allow the same name under two roots with
+independent progress. The root reference stores that root's own
+persisted literal config form (same mechanism as exclusions), never a
+resolved path. Each record carries `updated_at`, needed for
+`auto_pause_days` to mean anything — it **only moves on a genuine,
+persisted state change**, never on a mere scan or a sub-`resume_seconds`
+observation.
 
 ### `pause`/`drop`: root disambiguation, no-record errors, and the allowed transitions
-`pause <series>` and `drop <series>` use the exact same `--root`
-disambiguation mechanism `exclude` already established, when the same
-series name exists under more than one tracked root — not a new, second
-disambiguation UX.
-
-**Both error, rather than silently creating a record, when the target has
-no real progress to act on** — this covers two cases identically: a series
-with no `state.toml` record at all (never started), and one that's already
-`dropped` (progress already reset, nothing left to pause). `pause`/`drop`
-act on existing progress; they don't manufacture a starting point. This is
-one rule, not two special cases — "is there anything real to act on,"
-consistently applied.
-
-**Allowed transitions:** `in_progress → paused`, `in_progress → dropped`,
-`paused → in_progress`, `paused → dropped`. **`dropped → paused` does not
-exist** — dropped is a dead end reachable only by opening an episode
-directly, which (per §8) naturally re-populates progress and goes straight
-back to `in_progress`, never through `pause`. Re-invoking `pause` on an
-already-`paused` series, or `drop` on an already-`dropped` one, is
-idempotent — exit 0, no-op — same precedent as `add` re-registering an
-already-tracked root; a script re-running a harmless action shouldn't look
-like a failure.
+Same `--root` disambiguation as `exclude`. **Both error, rather than
+silently creating a record, when the target has no real progress to act
+on** — covers "never started" and "already dropped" identically, one
+rule not two. **Allowed transitions:** `in_progress → paused`,
+`in_progress → dropped`, `paused → in_progress`, `paused → dropped`.
+`dropped → paused` does not exist — dropped is a dead end reachable only
+by opening an episode directly (→ `in_progress`, never through `pause`).
+Re-invoking `pause`/`drop` on an already-`paused`/`dropped` series is
+idempotent (exit 0, no-op).
 
 ### Launching mpv: fire-and-forget, cheap existence check before spawn, install-method detection
-Resuming (`tsuzuki`/`resume`/`start` picking an episode) spawns
-`mpv <file> --start=<seconds>` and immediately lets go — it does not block
-waiting for mpv to exit, and it does not re-scan `watch_later` the moment
-mpv exits either. Consistent with the passive, after-the-fact
-`watch_later` architecture (§3, "mpv `watch_later` reading is
-launcher-independent"): state reconciliation happens the next time Tsuzuki
-is invoked, exactly like every other read of mpv's state, not as a special
-case tied to having just launched something.
-
-**Native vs. Flatpak mpv is resolved by a cheap existence check, never by
-attempting one and catching failure before trying the other.** A
-`PATH` lookup is a fast filesystem check, not a spawn — this must never
-become "try spawning native mpv, catch the failure, then try the Flatpak
-invocation," since a failed spawn attempt is real, wasted process-launch
-overhead directly against the tool's own startup-latency rationale (§5).
-Check existence once, spawn only the one that's actually there. A new
-`[mpv] command_override` config field (empty string default = auto-detect;
-same empty-means-default shape as `watch_later_dir`) lets a user with both
-installed pin the exact launch command explicitly (e.g.
-`"flatpak run io.mpv.Mpv"`), skipping detection entirely on every future
-invocation. If neither resolves, or the spawn itself still fails for some
-other reason, that's a plain, clear command error — never a panic, and
-`doctor` (Phase 6) checking mpv availability proactively doesn't make this
-the *only* place a launch failure is ever surfaced.
+Spawning doesn't block waiting for mpv to exit, and doesn't re-scan
+`watch_later` on exit — reconciliation happens on the next invocation
+like any other read. **Native vs. Flatpak is resolved by a cheap
+existence check (PATH lookup), never attempt-and-catch a failed spawn** —
+a failed spawn is real wasted process-launch overhead against the
+startup-latency rationale. `[mpv] command_override` (empty = auto-detect)
+lets a user with both installed pin the exact command, skipping detection
+entirely. Unresolvable or a failed spawn is a plain command error, never
+a panic.
 
 ### Every state-touching command reconciles against current mpv reality first, through one shared function
-`list`, `status`, `pause`, `drop`, and the resume/`start` picker must all
-run the same "resolve `state.toml` against what mpv currently says"
-step before doing anything else — through one shared function, not five
-commands each quietly implementing their own freshness check. This
-guarantees identical behavior by construction (e.g. `pause <series>`
-correctly sees a series that secretly already completed since the last
-check, before acting on stale info) rather than by every command happening
-to agree today and silently drifting apart later.
+`list`, `status`, `pause`, `drop`, and the resume/`start` picker all run
+the same "resolve `state.toml` against what mpv currently says" step
+first, through one shared function — guarantees identical behavior by
+construction rather than five commands agreeing today and drifting apart
+later.
 
 ### `list` ordering and episode-number display
-`list`'s ordering is fixed and deterministic, never "whatever iteration
-order falls out": grouped by status first — `in_progress`, then `paused`,
-then `dropped`, then never-started — alphabetical by series name within
-each group. Episode number shown in `list`/`start` (design.md §6/§9's
-"ep. 9" mockups) uses Anitomy's parsed episode number when available,
-falling back to ordinal position — same precedent as everywhere else
-Anitomy annotates without deciding order (§3), applied to display.
+Grouped by status — `in_progress`, `paused`, `dropped`, never-started —
+alphabetical within each group, never "whatever iteration order falls
+out." Episode number uses Anitomy's parsed number when available, falling
+back to ordinal position.
 
 ### Output convention: warnings on stderr, real output on stdout; non-completion exits non-zero
-Any surfaced warning (a `ScanWarning`, a `DurationOutcome::Unknown` reason,
-etc. — see Phase 4's decisions above) goes to stderr; normal command
-output goes to stdout — matches the ripgrep/cargo convention this project
-already follows elsewhere (§3, "CLI bare-invocation contract"), and keeps
-piping/scripting against stdout clean. A command that *informs* the user
-of something but doesn't *complete* the requested action exits non-zero —
-this isn't a new rule, it's the same precedent `exclude`'s ambiguity case
-already set (§3): a non-interactive picker listing choices without picking
-one falls in the same bucket, so a script chaining `tsuzuki && next-thing`
-correctly sees that nothing was actually resumed.
+Matches the ripgrep/cargo convention. A command that *informs* without
+*completing* the requested action (e.g. a non-interactive picker listing
+choices without picking one) exits non-zero, so `tsuzuki && next-thing`
+correctly sees nothing was resumed.
 
 ### Every phase needs at least one real-binary, real-XDG-path integration test
-Found during Phase 5's dogfood investigation, worth standing policy going
-forward: every existing test in this project, across every phase, validated
-internal functions against a redirected temp path (`tempdir().join(...)`)
-— none ever invoked the actual compiled binary against real
-`dirs::config_dir()`/`dirs::data_dir()` resolution. This is a real,
-standing blind spot: a genuine bug in real-path resolution (wrong env var,
-wrong directory, a swallowed error in the real write path) could pass every
-unit test while breaking 100% of real usage, and nothing would catch it
-short of a human running the actual binary by hand. It happened not to be
-hiding a real bug when this was investigated — but the gap itself was real,
-and it's cheap to close permanently: at least one test per phase that
-touches persistence should spawn the real binary (`env!
-("CARGO_BIN_EXE_tsuzuki")`) against a genuine temp `$HOME`/XDG environment,
-not just call internal functions with an injected path. Retrofit this for
-existing phases opportunistically; require it going forward for any new
-phase that reads or writes a real on-disk file.
+Every test validated internal functions against a redirected temp path —
+none invoked the compiled binary against real `dirs::config_dir()`/
+`dirs::data_dir()` resolution. A real bug in path resolution could pass
+every unit test while breaking 100% of real usage. At least one test per
+phase touching persistence spawns the real binary
+(`env!("CARGO_BIN_EXE_tsuzuki")`) against a genuine temp `$HOME`/XDG
+environment — required going forward for any phase reading/writing a
+real on-disk file.
 
 ### MAL `client_id` is a built-in, publicly committed credential — not a per-user registration requirement
-`mal::DEFAULT_CLIENT_ID` in `src/mal.rs` is Tsuzuki's own registered MAL
-`client_id`, committed to source in the clear on purpose. This reverses an
-earlier assumption made when Phase 8a was first built (that every user
-would need to register their own MAL API application before `sync login`
-could work at all) — that assumption was wrong, not merely superseded, and
-the corrected reasoning matters enough to state plainly so it isn't
-"fixed" back the other way by a future session that doesn't know why.
+`mal::DEFAULT_CLIENT_ID` in `src/mal.rs` is committed to source in the
+clear, on purpose. Tsuzuki's OAuth flow is Authorization Code + PKCE for
+a public/native-client app type — MAL doesn't treat `client_id` as
+confidential for this type, only `client_secret` is, and there is no
+`client_secret` field anywhere in this codebase (never will be — PKCE is
+chosen specifically so one isn't needed). A `client_id` alone can't
+authenticate the app; it only starts a flow that still needs a real user
+login/approval plus a fresh PKCE `code_verifier`. Precedent: Taiga
+(erengy/taiga) commits its own `client_id` the same way. **Never
+"helpfully" redact, rotate, or remove this as a leaked credential**
+without re-reading this section — that would regress to requiring every
+user to register their own MAL app, which is the wrong tradeoff this
+already corrected once. `[mal] client_id` in `config.toml` is an optional
+override (empty → `DEFAULT_CLIENT_ID` via the single `mal::resolve_
+client_id` seam every caller goes through); `sync login`/`doctor` work
+against a completely untouched config.
 
-**Why committing it is safe, not an oversight.** Tsuzuki's OAuth flow is
-Authorization Code + PKCE for a public/native-client app type (§7) — MAL
-does not treat `client_id` as confidential for this app type, only
-`client_secret` is, and there is no `client_secret` field anywhere in this
-codebase (`mal.rs` has never had one, and never will — PKCE is chosen
-specifically so one is never needed). A `client_id` alone, with no secret
-alongside it, cannot authenticate as the app on its own; it only starts an
-OAuth flow that still requires a real user to log in and approve on MAL's
-own site, plus a matching PKCE `code_verifier` generated fresh per attempt.
-Precedent: Taiga (erengy/taiga, `src/sync/myanimelist.h`), a long-running,
-widely-used open-source MAL client, commits its own `client_id` as a plain
-constant in public source the exact same way, with nothing alongside it to
-protect.
+If `DEFAULT_CLIENT_ID` is ever rotated, verify the new registration is
+genuinely secret-less before committing it — MAL's "web" app type demands
+a `client_secret` even when PKCE parameters are sent; only a properly
+registered secret-less app type works. See `DEFAULT_CLIENT_ID`'s doc
+comment in `mal.rs` for the exact (safe, no-account-risk) verification
+method.
 
-**Never "helpfully" redact, rotate, or remove this as a leaked credential**
-without first re-reading this section — a `client_id` for a PKCE/no-secret
-app type is not the same risk category as an API key or `client_secret`,
-and treating it as one here would be a regression back to the earlier,
-already-corrected mistake (requiring every user to register their own app
-just to run `tsuzuki sync login` once).
-
-**`[mal] client_id` in `config.toml` is an optional override, not a
-required field.** Empty (the shipped default) resolves to
-`DEFAULT_CLIENT_ID` via `mal::resolve_client_id` — the single function
-every caller goes through, so this decision is made in exactly one place.
-A non-empty value overrides it, for anyone running their own fork against
-their own registered MAL app. `tsuzuki sync login` and `tsuzuki doctor`'s
-MAL-auth check both work against a completely untouched `config.toml` —
-zero config edits required before first use.
-
-### MAL link storage, `mal_episode_awareness`, and the `num_watched_episodes`/`num_episodes_watched` field-name trap
-Three Phase 8b decisions worth protecting, all in `src/sync.rs` (module doc
-comment has the full reasoning; this is the summary a future session should
-read before touching any of this).
-
-**A series → MAL-id link lives in `state.toml`, not `config.toml`**, as a
-new `[[mal_links]]` array-of-tables (`state::MalLink`), keyed by the same
-`(root, name)` composite key `SeriesRecord` already uses. The deciding
-question isn't portability (a MAL id is globally stable, so it *could* live
-in either file) — it's authorship. Config is what a human hand-types and
-versions in a dotfiles repo (§3, "State vs. config are two separate
-files"); a MAL link is always Tsuzuki-derived/written, either by exact-match
-auto-linking during `sync` or by `sync link` recording its own result. It's
-in the same category as `SeriesRecord` itself, gets the same atomic-write
-guarantee for free by reusing `state::write`, and needs no third persisted
-file with its own write path.
-
-**`SeriesRecord.mal_episode_awareness` is deliberately a separate field
-from `episode_number`, never reused.** `reconcile.rs` unconditionally
-overwrites `episode_number` from the local file's own Anitomy/ordinal
-identity on every single reconcile pass — which runs before every
-state-touching command (§3, "every state-touching command reconciles
-first"). Writing a MAL-driven number into `episode_number` would make it
-vanish the very next time any command ran. The merge comparison's "local
-best-known episode number" is `max(episode_number, mal_episode_awareness)`
-(`sync::local_effective_episode`) — not raw `episode_number` alone — which
-is what actually makes the "never write a smaller number" invariant (§2)
-hold across repeated `sync` runs: without folding a prior pull back into
-the comparison, a later run could re-read a stale, lower local number and
-push it back down over a number MAL (or an earlier pull) already
-established.
-
-**MAL's `my_list_status` field name is asymmetric between reading and
-writing — this is a real trap, not a typo waiting to happen once.** A list/
-anime-details response reports the count as `num_episodes_watched`. The
-`PATCH /v2/anime/{id}/my_list_status` request body's own field is
-`num_watched_episodes` — words swapped. Confirmed independently against
-Taiga's (erengy/taiga) real request-building source and the unofficial MAL
-API specification, which explicitly documents the two names as different.
-Getting this wrong is silent: MAL doesn't error on an unrecognized field,
-it just never updates the episode count, so a naive implementation could
-look like it's working (200 OK) while doing nothing. If `push_episode_count`
-in `sync.rs` is ever touched, this field name is the one thing to re-verify
-first, not assume.
+### MAL link storage, `mal_episode_awareness`, and the field-name trap
+Three decisions, all in `src/sync.rs` (module doc comment has the full
+reasoning):
+- **A series → MAL-id link lives in `state.toml`, not `config.toml`**, as
+  `[[mal_links]]` keyed like `SeriesRecord`. The deciding question is
+  authorship, not portability — a link is always Tsuzuki-derived/written
+  (exact-match auto-link or `sync link`), same category as
+  `SeriesRecord` itself.
+- **`SeriesRecord.mal_episode_awareness` is a separate field from
+  `episode_number`, never reused** — `reconcile.rs` unconditionally
+  overwrites `episode_number` from local file identity on every pass, so
+  a MAL-driven number stored there would vanish next command. The merge
+  comparison's "local best-known" is `max(episode_number,
+  mal_episode_awareness)` (`sync::local_effective_episode`) — without
+  folding a prior pull back in, a later run could re-read a stale lower
+  local number and push it back down over a number MAL already has.
+- **MAL's `my_list_status` field name is asymmetric, a real trap**: a
+  list/anime response reports `num_episodes_watched`; the `PATCH
+  /v2/anime/{id}/my_list_status` request body field is
+  `num_watched_episodes` (words swapped, confirmed against Taiga's source
+  and the unofficial MAL API spec). Getting this wrong is silent — MAL
+  ignores an unrecognized field rather than erroring, so the episode
+  count would just never update. Re-verify this exact swap first if
+  `push_episode_count` is ever touched.
 
 ## 4. Dev environment
 
