@@ -43,6 +43,11 @@ protecting from regression has already been folded into `CLAUDE.md`.
   dotted-key settings-store CLI would duplicate what hand-editing already
   does better for a file that's meant to be versioned as a whole. See
   CLAUDE.md's "`tsuzuki config` is show/edit, not a settings-store CLI."
+- Same concise `✓`/`⚠`/`✗` output treatment extended to the remaining
+  commands: `add`, `exclude`, `list`, `status`, `pause`, `drop`,
+  `sync link`, plus the shared error/warning message helpers. Every
+  command's output is now consistent with the visual vocabulary `sync`/
+  `doctor` established — Phase 9 UX polish is done.
 
 **Test suite:** 399 passing + 4 `#[ignore]`d real-API tests (excluded
 from the default run). Both clippy gates (`-p tsuzuki --no-deps
@@ -158,9 +163,26 @@ from the default run). Both clippy gates (`-p tsuzuki --no-deps
 
 ## Next up
 
-Phase 9 (distribution & end-to-end tests, design.md §12) — blocked on
-the user running a real `tsuzuki sync`/`sync link` against their own MAL
-account first (Phase 8b's own dogfood checkpoint, not yet done).
+Phase 9 UX polish is done. What's left is the rest of Phase 9 — distribution
+& end-to-end tests (design.md §12), none of it started yet:
+
+- `cargo-dist` config (`cargo dist init` has never been run; no
+  `[workspace.metadata.dist]` in `Cargo.toml` yet, though `shell.nix`
+  already provisions the binary).
+- Install script (`curl ... | sh`), generated off the cargo-dist config
+  above.
+- GitHub Release CI (no `.github/workflows/` exists yet).
+- PyPI wheel via `maturin` (design.md §10's third distribution door).
+- `README.md` — doesn't exist anywhere in the repo yet; needed before any
+  of the above actually make the project installable by someone else.
+- `Cargo.toml` publish metadata (`description`/`license`/`repository`/
+  `readme` — currently only `name`/`version`/`edition`).
+- A dedicated end-to-end CLI test suite (`tests/cli.rs`, referenced but
+  not yet added per `COMMANDS.md`'s own "Distribution"/"End-to-end tests"
+  sections) — six real-binary integration tests already exist per-phase
+  (config/doctor/mal-login/mal-sync/script-log/state-persistence), so
+  this is about a comprehensive top-to-bottom CLI walkthrough, not a
+  correctness gap.
 
 ## Open questions blocking further work
 
