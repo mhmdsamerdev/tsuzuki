@@ -21,7 +21,7 @@ mod target;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 
 use cli::{Cli, Command, ConfigCommand, SyncCommand};
 use config::Config;
@@ -112,25 +112,15 @@ fn dispatch(
                 root,
             }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
         },
-        Command::Config { action } => {
-            match action {
-                None => print_config_help(),
-                Some(ConfigCommand::Get { .. }) => stub("config get"),
-                Some(ConfigCommand::Set { .. }) => stub("config set"),
-                Some(ConfigCommand::List) => stub("config list"),
-                Some(ConfigCommand::Edit) => stub("config edit"),
-            }
-            ExitCode::SUCCESS
-        }
+        Command::Config { action } => match action {
+            None => config_show_command(config, config_path),
+            Some(ConfigCommand::Edit) => config_edit_command(config_path),
+        },
         Command::Doctor {
             fix,
             forget_orphans,
         } => doctor_command(fix, forget_orphans, config, state_path, home),
     }
-}
-
-fn stub(name: &str) {
-    println!("not implemented: {name}");
 }
 
 /// `tsuzuki add <path>` — validates, checks idempotency, and persists a new
@@ -214,20 +204,56 @@ fn suggest_candidates_command(config: &Config) {
     }
 }
 
-/// `config` has no single default action (`get`/`set`/`list`/`edit` are all
-/// equally valid) — per CLAUDE.md's CLI bare-invocation contract, bare
-/// `tsuzuki config` prints help and exits 0 rather than clap's generic
-/// "subcommand required" error.
-fn print_config_help() {
-    let root = Cli::command();
-    let bin_name = root.get_name().to_string();
-    let mut config_cmd = root
-        .find_subcommand("config")
-        .expect("config subcommand is defined on Cli")
-        .clone()
-        .bin_name(format!("{bin_name} config"));
-    let _ = config_cmd.print_long_help();
+/// Bare `tsuzuki config` — CLAUDE.md's CLI bare-invocation contract: `config`
+/// *does* have a single default action, showing the resolved config, the
+/// same way bare `sync` runs the sync rather than printing a menu. Prints
+/// the real config.toml path as a `#` (valid-TOML) comment header, the
+/// fully resolved config — defaults filled in for anything missing from the
+/// file on disk, which `cat config.toml` can't show you — and a footer
+/// pointing at `config edit`, the one other action here.
+fn config_show_command(config: &Config, config_path: &Path) -> ExitCode {
+    println!("# {}", config_path.display());
     println!();
+    print!(
+        "{}",
+        toml::to_string_pretty(config).expect("Config always serializes")
+    );
+    println!();
+    println!("→ tsuzuki config edit");
+    ExitCode::SUCCESS
+}
+
+/// `tsuzuki config edit` — opens the real config.toml in `$EDITOR`,
+/// blocking until it exits (unlike `launch.rs`'s fire-and-forget mpv spawn,
+/// this one needs the real terminal and needs Tsuzuki to actually wait).
+/// No guessed fallback if `$EDITOR` is unset — this project only ever picks
+/// an external program from a curated, verified candidate list (mpv's
+/// native/Flatpak detection), never a blind guess, and there's no such list
+/// for editors. After the editor exits, re-reads the file through the same
+/// `config::read` every other invocation uses — a syntax error introduced
+/// by the edit is surfaced immediately, not left for the next command.
+fn config_edit_command(config_path: &Path) -> ExitCode {
+    let editor = match std::env::var("EDITOR") {
+        Ok(e) if !e.is_empty() => e,
+        _ => {
+            return fail("$EDITOR is not set — set it to open config.toml, e.g. export EDITOR=vim");
+        }
+    };
+
+    if let Err(e) = std::process::Command::new(&editor)
+        .arg(config_path)
+        .status()
+    {
+        return fail(&format!("could not launch $EDITOR (\"{editor}\"): {e}"));
+    }
+
+    match config::read(config_path) {
+        Ok(_) => {
+            println!("✓ config saved");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&format!("config.toml now has a syntax error: {e}")),
+    }
 }
 
 fn fail(message: &str) -> ExitCode {

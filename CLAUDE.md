@@ -253,12 +253,15 @@ list back to a smaller "starting guess" version.
 ### CLI bare-invocation contract
 Every command group with subcommands (`config`, `sync`) has an explicit,
 documented behavior for no-subcommand invocation — never clap's generic
-"subcommand required" error. A group with a specified default action
-(`sync` bare = run the sync) must keep that reachable without a
-subcommand. A group with no single default (`config`) prints help and
-exits 0. Malformed input (bad flags, unknown subcommands, missing
-required args) stays on clap's own error output — don't extend Tsuzuki's
-error layer beyond this one gap.
+"subcommand required" error. Both groups in this codebase turn out to have
+a real single default action, and bare invocation must keep it reachable
+without a subcommand: `sync` bare runs the sync; `config` bare shows the
+resolved config (see "`tsuzuki config` is show/edit, not a settings-store
+CLI" below — an earlier version of this rule used `config` as its own
+example of "no single default → print help," which didn't survive actually
+thinking through what `config` is for). Malformed input (bad flags,
+unknown subcommands, missing required args) stays on clap's own error
+output — don't extend Tsuzuki's error layer beyond this one gap.
 
 ### Video file filtering within a series tree
 The ordering tree only includes files matching `[roots] video_extensions`
@@ -718,6 +721,60 @@ attention" / "this is broken" across every command, not two.
   only `Fail` moves the exit code) — mirrors `sync`'s own run-end summary
   line, the same "diagnose, don't narrate" goal applied to the last line
   of output as much as every line above it.
+
+### `tsuzuki config` is show/edit, not a settings-store CLI
+Phase 9: `config get`/`set`/`list`/`edit` were Phase-0 stubs (`main.rs`'s
+`stub("config get")` etc.) that had never been implemented, and never
+assigned to any real phase — `docs/design.md` §12 only ever promised they'd
+print "not implemented." Implementing them finally forced the question
+design.md's original config example never actually answered: what is
+`config` *for*, given `config.toml` is already explicitly the human-
+hand-edited, dotfiles-versionable file (this section, "State vs. config are
+two separate files")? A `get`/`set` layer earns its place in tools where
+most users never touch the underlying file directly (git, npm) — that's
+not this tool. Reasoned from Tsuzuki's own actual usage pattern (one
+person, their own machine, values set once at setup and rarely revisited)
+instead of copying that shape, `get`/`set`/`list` didn't survive:
+
+- `roots.paths` and `exclusions` already have real owning commands
+  (`tsuzuki add`, `tsuzuki exclude`) with their own validation — a parallel
+  `config set` into the same fields would be a second, weaker write path
+  into something already correctly handled.
+- "Dotfiles-versionable" argues *against* a `set` command, not for one — the
+  reproducible unit when you version this file is the whole file (symlink
+  or copy it in), not a sequence of `config set` calls in a provisioning
+  script.
+- "Quick lookup without an editor" is real, but bare output already covers
+  it once it's plain, greppable TOML — `tsuzuki config | grep
+  resume_seconds` needs no dedicated `get`.
+
+**What shipped instead — two actions, not four:**
+- **Bare `tsuzuki config` shows the resolved config** — a `#`-prefixed real
+  file-path header (valid-TOML comment), then `toml::to_string_pretty` of
+  the already-loaded, already-defaulted `Config` (several fields —
+  `redirect_port`, `fuzzy_match_threshold`, `video_extensions` — have
+  non-obvious non-zero defaults per `config.rs`'s own "two defaulting
+  layers" comments, so this shows real effective values a `cat config.toml`
+  on an older file wouldn't), then a `→ tsuzuki config edit` footer reusing
+  the same action-line convention `doctor`/`sync` output already
+  established. This *is* config's real default action — see the "CLI
+  bare-invocation contract" correction above.
+- **`tsuzuki config edit`** opens `$EDITOR` on the real file and **blocks**
+  until it exits — the first command in this codebase to do that;
+  `launch.rs`'s only prior spawn precedent (mpv) is deliberately
+  fire-and-forget with nulled stdio, the wrong shape for an interactive
+  editor that needs the real terminal. `$EDITOR` is required, with no
+  guessed fallback (`vi`/`nano`/...) — every other "which external program"
+  problem in this codebase resolves from a curated, verified candidate list
+  (mpv's native/Flatpak detection, `watch_later`'s OS-candidate paths),
+  never a blind guess, and there's no such verified list for editors, so
+  an unset `$EDITOR` is a plain, immediate error instead. After the editor
+  exits (its own exit code is ignored — some editors exit non-zero for
+  reasons that aren't real failures), the file is re-read through the same
+  `config::read` every other invocation uses: still valid → `✓ config
+  saved`; now-broken TOML → a clear syntax error and a non-zero exit,
+  surfaced immediately rather than left for the next unrelated command to
+  trip over.
 
 ## 4. Dev environment
 

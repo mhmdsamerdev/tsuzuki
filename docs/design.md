@@ -290,12 +290,10 @@ redirect_port = 8734        # local OAuth-callback listener port used by `tsuzuk
 fuzzy_match_threshold = 0.8  # minimum title similarity (0.0-1.0) before `sync` suggests a "did you mean...?" — below this, no suggestion is shown at all
 ```
 
-**`tsuzuki config` is a thin CLI layer over the same file** — same relationship git has to `.gitconfig`:
+**`tsuzuki config` is show/edit, not a settings-store CLI.** Unlike tools where most users never open the underlying file (git, npm), this file is *designed* to be hand-edited — so the CLI layer over it is just two actions: bare `tsuzuki config` prints the resolved config (defaults filled in for anything missing from the file, with the real file's path as a header) plus a hint pointing at the one other action; `tsuzuki config edit` opens that file in `$EDITOR`, blocks until it exits, then re-validates it. No `get`/`set`/`list` — `roots.paths`/`exclusions` already have real owning commands (`add`/`exclude`), and "quick lookup" is already covered by piping the resolved output through `grep`. Full reasoning: CLAUDE.md's "`tsuzuki config` is show/edit, not a settings-store CLI."
 
 ```bash
-tsuzuki config get resume_seconds
-tsuzuki config set resume_seconds 90
-tsuzuki config list
+tsuzuki config
 tsuzuki config edit
 ```
 
@@ -345,24 +343,23 @@ A single flat TOML file — not sharded per-series (mpv shards because it tracks
 | `tsuzuki sync login` | One-time MAL OAuth authorization. |
 | `tsuzuki sync link <series> --mal-id <id> [--root <root>]` | Manually resolve a series-to-MAL-ID mapping when exact-title matching fails. The given id is verified against the user's own MAL list before being saved. |
 | `tsuzuki sync` | Run the two-way, non-destructive sync against MAL. |
-| `tsuzuki config get/set/list/edit` | Read or write config values, or open the config file directly. |
+| `tsuzuki config` | Show the resolved config (real file path, defaults filled in) and a hint pointing at `edit`. |
+| `tsuzuki config edit` | Open config.toml in `$EDITOR`, blocking until it exits, then re-validate it. |
 | `tsuzuki doctor [--fix] [--forget-orphans]` | Environment health checks — mpv-launch resolvability (native/Flatpak/configured override), the mpv.conf config flag, watch_later reachability (including a configured `watch_later_dir` override that doesn't resolve), Flatpak permissions, the tsuzuki.lua companion script's install/version status, its log directory's reachability, tracked-root validity, orphaned per-series `state.toml` records (a series deleted/moved/renamed out from under a still-tracked root), and MAL auth status. Each check reports OK/WARN/FAIL internally; exits non-zero only if at least one FAIL is present. `--fix` applies every currently-safe, non-destructive fix (installing/updating tsuzuki.lua) — never edits mpv.conf. `--forget-orphans` (requires `--fix`) permanently clears every currently-confirmed orphaned record in one pass, printing exactly what it deletes first; there is no separate, per-series, or standalone cleanup command. **Output is a concise, scannable report, not a narration of every internal check**: one `✓`/`⚠`/`✗` line per conceptual check (install-scoped checks like mpv.conf or the companion script are folded across every detected mpv install into one row), an indented `→ <command>` line only when there's a concrete next step, and a closing summary ("All checks passed." or "`N` issue(s) found."). Raw paths, candidate-directory counts, and token-expiration seconds are left out of this default report — see CLAUDE.md's "Doctor output is a concise health report" for the full reasoning and what's reserved for a future verbose mode. |
 
 **CLI invocation contract.** Every command group with subcommands
 (`config`, `sync`) must have an explicit, documented behavior for being
 invoked with no subcommand — never left to clap's generic "subcommand
 required" error, which is accurate but reads as an accident rather than a
-decision. Two cases:
-
-- **The group already has a specified default action** — `tsuzuki sync`
-  with no subcommand *is* "run the two-way sync" (above); `login` and
-  `link <series>` are additional subcommands alongside that default, not
-  the only valid ways to invoke `sync`. The bare form must remain
-  reachable in the CLI structure, not accidentally blocked by requiring
-  a subcommand.
-- **The group has no single default meaning** — `tsuzuki config` bare
-  (none of `get`/`set`/`list`/`edit` is "the" default) prints help and
-  exits 0.
+decision. Both nested-subcommand groups in this codebase turn out to have
+a real single default action, which bare invocation must keep reachable
+without a subcommand: `tsuzuki sync` bare *is* "run the two-way sync"
+(`login` and `link <series>` are additional subcommands alongside that
+default, not the only valid ways to invoke `sync`); `tsuzuki config` bare
+shows the resolved config (an earlier version of this doc used `config` as
+an example of a group with "no single default → print help instead" —
+that didn't survive actually working out what `config` is for; see
+CLAUDE.md's "`tsuzuki config` is show/edit, not a settings-store CLI").
 
 This does not extend to malformed input — unknown flags, missing
 required positional arguments, unknown subcommand names all keep clap's

@@ -30,8 +30,21 @@ protecting from regression has already been folded into `CLAUDE.md`.
   levels and exit-code logic are unchanged — display only. See CLAUDE.md's
   "Doctor output is a concise health report, not a narration of every
   internal check."
+- `tsuzuki config get/set/list/edit` turned out to have never actually
+  been implemented — a Phase-0 stub (`not implemented: config get`, etc.)
+  never assigned to a real phase. Rather than just fill in that shape,
+  restudied what `config` is actually for on this tool specifically (one
+  person, their own machine, a file already designed to be hand-edited)
+  and cut it down to two real actions: bare `tsuzuki config` shows the
+  resolved config (real path, defaults filled in, a footer pointing at
+  `edit`); `tsuzuki config edit` opens it in `$EDITOR`, blocks, and
+  re-validates on exit. `get`/`set`/`list` are gone — `roots.paths`/
+  `exclusions` already have owning commands (`add`/`exclude`), and a
+  dotted-key settings-store CLI would duplicate what hand-editing already
+  does better for a file that's meant to be versioned as a whole. See
+  CLAUDE.md's "`tsuzuki config` is show/edit, not a settings-store CLI."
 
-**Test suite:** 395 passing + 4 `#[ignore]`d real-API tests (excluded
+**Test suite:** 399 passing + 4 `#[ignore]`d real-API tests (excluded
 from the default run). Both clippy gates (`-p tsuzuki --no-deps
 --all-targets -D warnings`) and `cargo fmt -p tsuzuki --check` clean.
 `vendor/anitomy` untouched throughout.

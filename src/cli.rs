@@ -93,11 +93,12 @@ pub enum Command {
         action: Option<SyncCommand>,
     },
 
-    /// Read or write config values, or open the config file directly
+    /// Show the resolved config, or open config.toml directly
     ///
-    /// `get`/`set`/`list`/`edit` are all equally valid — there's no single
-    /// default action, so bare `tsuzuki config` prints this help instead of
-    /// guessing one.
+    /// Bare `tsuzuki config` prints the config Tsuzuki is actually running
+    /// with (defaults filled in for anything missing from the file) plus
+    /// where that file lives — config.toml is meant to be hand-edited
+    /// directly, so `edit` is the only other action here.
     Config {
         #[command(subcommand)]
         action: Option<ConfigCommand>,
@@ -148,23 +149,6 @@ pub enum SyncCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Print a single config value
-    Get {
-        /// Dotted key, e.g. `thresholds.resume_seconds`
-        key: String,
-    },
-
-    /// Set a single config value
-    Set {
-        /// Dotted key, e.g. `thresholds.resume_seconds`
-        key: String,
-        /// New value
-        value: String,
-    },
-
-    /// Print the full resolved config
-    List,
-
-    /// Open the config file in `$EDITOR`
+    /// Open config.toml in $EDITOR, then re-validate it
     Edit,
 }
