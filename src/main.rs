@@ -128,7 +128,7 @@ fn dispatch(
 fn add_command(path: &Path, config: &mut Config, config_path: &Path) -> ExitCode {
     match roots::add_root(config, path) {
         Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
-            println!("already tracked: {}", as_typed.display());
+            confirm(&as_typed.display().to_string(), "already tracked");
             ExitCode::SUCCESS
         }
         Ok(roots::AddOutcome::Added(as_typed)) => {
@@ -138,7 +138,7 @@ fn add_command(path: &Path, config: &mut Config, config_path: &Path) -> ExitCode
                     config_path.display()
                 ));
             }
-            println!("added tracked root: {}", as_typed.display());
+            confirm(&as_typed.display().to_string(), "added");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
@@ -161,7 +161,10 @@ fn exclude_command(
             root,
             relative_path,
         }) => {
-            println!("already excluded: \"{relative_path}\" under {root}");
+            confirm(
+                &format!("\"{relative_path}\""),
+                &format!("already excluded (under {root})"),
+            );
             ExitCode::SUCCESS
         }
         Ok(exclude::ExcludeOutcome::Excluded {
@@ -174,8 +177,18 @@ fn exclude_command(
                     config_path.display()
                 ));
             }
-            println!("excluded: \"{relative_path}\" under {root}");
+            confirm(
+                &format!("\"{relative_path}\""),
+                &format!("excluded (under {root})"),
+            );
             ExitCode::SUCCESS
+        }
+        Err(exclude::ExcludeError::Ambiguous {
+            relative_path,
+            matches,
+        }) => {
+            let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();
+            print_ambiguous(&relative_path, "exclude", &roots)
         }
         Err(e) => fail(&e.to_string()),
     }
@@ -198,9 +211,8 @@ fn suggest_candidates_command(config: &Config) {
     println!("Anitomy-suggested candidates (not yet excluded):");
     println!();
     for candidate in &candidates {
-        println!("  {}", candidate.relative_path);
-        println!("    tsuzuki exclude \"{}\"", candidate.relative_path);
-        println!();
+        println!("⚠ {}", candidate.relative_path);
+        println!("  → tsuzuki exclude \"{}\"", candidate.relative_path);
     }
 }
 
@@ -261,6 +273,13 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// `✓ <subject> — <result>` — the one-shot confirmation shape shared by
+/// `add`, `exclude`, `pause`, `drop`, and `sync link`, matching the same
+/// `✓`/`⚠`/`✗` vocabulary `doctor`/`sync` already established.
+fn confirm(subject: &str, result: &str) {
+    println!("✓ {subject} — {result}");
+}
+
 // --- Phase 5: state machine & core commands ---
 
 /// Reads `state.toml`, runs the shared `reconcile` pass, and — only if it
@@ -300,7 +319,7 @@ fn print_scan_warning(warning: &mpv::ScanWarning) {
     match warning {
         mpv::ScanWarning::WatchLaterDirNotFound(p) => {
             eprintln!(
-                "warning: configured [mpv] watch_later_dir \"{}\" does not exist",
+                "⚠ configured [mpv] watch_later_dir \"{}\" does not exist",
                 p.display()
             );
         }
@@ -417,11 +436,11 @@ fn play_series(
             ) {
                 Ok(()) => {
                     println!(
-                        "{verb} \"{name}\" — episode {} ({}) — {}",
+                        "✓ {verb} \"{name}\" — episode {} ({})",
                         target.episode_number,
                         format_timestamp(target.position_seconds),
-                        target.file.display()
                     );
+                    println!("  → {}", target.file.display());
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail(&e.to_string()),
@@ -454,19 +473,28 @@ fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode
         target::TargetError::NotFound(name) => fail(&format!("no tracked series named \"{name}\"")),
         target::TargetError::RootNotFound(r) => fail(&format!("not a tracked root: {r}")),
         target::TargetError::Ambiguous { series, roots } => {
-            eprintln!("Ambiguous: \"{series}\" exists under more than one tracked root:");
-            eprintln!();
-            for (i, r) in roots.iter().enumerate() {
-                eprintln!("  {}. {r}", i + 1);
-            }
-            eprintln!();
-            eprintln!("Re-run with --root to specify which one:");
-            for r in roots {
-                eprintln!("  tsuzuki {command_name} \"{series}\" --root {r}");
-            }
-            ExitCode::FAILURE
+            print_ambiguous(series, command_name, roots)
         }
     }
+}
+
+/// Shared rendering for "`subject` exists under more than one tracked root" —
+/// used by both `print_target_error` (`resume`/`start`/`pause`/`drop`/`sync
+/// link`'s `--root` resolution) and `exclude_command` (a previously separate,
+/// independently-drifted implementation). Drops the numbered
+/// resolved-path enumeration the two previous implementations disagreed on
+/// showing — the exact `--root` re-invocation *is* the actionable content,
+/// same "detail that's neither the result nor a next step is dropped"
+/// reasoning `doctor`'s report already established.
+fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitCode {
+    eprintln!(
+        "✗ \"{subject}\" is ambiguous — tracked under {} roots",
+        roots.len()
+    );
+    for r in roots {
+        eprintln!("  → tsuzuki {command_name} \"{subject}\" --root {r}");
+    }
+    ExitCode::FAILURE
 }
 
 /// `tsuzuki` / `tsuzuki resume [series] [--root <root>]` — design.md §6's
@@ -562,6 +590,7 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
 
     if in_progress.is_empty() {
         println!("Nothing in progress.");
+        println!("→ tsuzuki start");
         return ExitCode::SUCCESS;
     }
 
@@ -593,21 +622,36 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
     let overviews = overview::sorted_for_list(overview::all_series(config, &state, home));
     if overviews.is_empty() {
         println!("No tracked series.");
+        println!("→ tsuzuki add <path>");
         return ExitCode::SUCCESS;
     }
 
-    for o in &overviews {
-        let status_label = match o.status {
-            Some(Status::InProgress) => "in progress",
-            Some(Status::Paused) => "paused",
-            Some(Status::Dropped) => "dropped",
-            None => "never started",
-        };
-        let ep = o
-            .episode_number
-            .map(|e| format!(", ep. {e}"))
-            .unwrap_or_default();
-        println!("{} — {status_label}{ep} ({} files)", o.name, o.file_count);
+    const GROUPS: [(Option<Status>, &str); 4] = [
+        (Some(Status::InProgress), "In progress"),
+        (Some(Status::Paused), "Paused"),
+        (Some(Status::Dropped), "Dropped"),
+        (None, "Never started"),
+    ];
+
+    let mut first_group = true;
+    for (status, header) in GROUPS {
+        let items: Vec<_> = overviews.iter().filter(|o| o.status == status).collect();
+        if items.is_empty() {
+            continue;
+        }
+        if !first_group {
+            println!();
+        }
+        first_group = false;
+
+        println!("{header}:");
+        for o in items {
+            let ep = o
+                .episode_number
+                .map(|e| format!(" — ep. {e}"))
+                .unwrap_or_default();
+            println!("  {}{ep} ({} files)", o.name, o.file_count);
+        }
     }
     ExitCode::SUCCESS
 }
@@ -709,11 +753,11 @@ fn pause_command(
                     state_path.display()
                 ));
             }
-            println!("paused: \"{series}\"");
+            confirm(&format!("\"{series}\""), "paused");
             ExitCode::SUCCESS
         }
         Ok(pause_drop::Outcome::NoOp) => {
-            println!("already paused: \"{series}\"");
+            confirm(&format!("\"{series}\""), "already paused");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
@@ -749,11 +793,11 @@ fn drop_command(
                     state_path.display()
                 ));
             }
-            println!("dropped: \"{series}\"");
+            confirm(&format!("\"{series}\""), "dropped");
             ExitCode::SUCCESS
         }
         Ok(pause_drop::Outcome::NoOp) => {
-            println!("already dropped: \"{series}\"");
+            confirm(&format!("\"{series}\""), "already dropped");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
@@ -1034,7 +1078,7 @@ fn sync_link_command(
                     state_path.display()
                 ));
             }
-            println!("linked \"{series}\" to MAL #{mal_id}");
+            confirm(&format!("\"{series}\""), &format!("linked to MAL #{mal_id}"));
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),

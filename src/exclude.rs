@@ -85,6 +85,12 @@ impl fmt::Display for ExcludeError {
                 "path must be relative to a tracked root, not absolute: {}",
                 p.display()
             ),
+            // `exclude_command` in main.rs matches this variant directly and
+            // renders it via the shared `print_ambiguous` (same shape
+            // `target::TargetError::Ambiguous` uses) instead of printing
+            // this `Display` output — this text only remains as a total,
+            // reasonable fallback for any other caller (e.g. tests calling
+            // `.to_string()` directly). Don't "fix" only this copy.
             ExcludeError::Ambiguous {
                 relative_path,
                 matches,

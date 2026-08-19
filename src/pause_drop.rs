@@ -38,7 +38,12 @@ impl fmt::Display for ActionError {
                 "no progress to act on for this series — it was never started"
             ),
             ActionError::InvalidTransition { from, action } => {
-                write!(f, "cannot {action} a series that's currently {from:?}")
+                let from = match from {
+                    Status::InProgress => "in progress",
+                    Status::Paused => "paused",
+                    Status::Dropped => "dropped",
+                };
+                write!(f, "cannot {action} a series that's currently {from}")
             }
         }
     }

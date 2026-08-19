@@ -107,7 +107,7 @@ updated_at = 1700000000
     );
     let list_stdout = String::from_utf8_lossy(&list.stdout);
     assert!(
-        list_stdout.contains("dropped"),
+        list_stdout.contains("Dropped"),
         "expected the script-only eof reading on the series' last episode to auto-Drop it, \
          got: {list_stdout}"
     );
@@ -171,7 +171,7 @@ fn an_entry_only_at_the_flatpak_remapped_path_is_still_found() {
     );
     let list_stdout = String::from_utf8_lossy(&list.stdout);
     assert!(
-        list_stdout.contains("in progress"),
+        list_stdout.contains("In progress"),
         "an entry only reachable via the Flatpak-remapped candidate must still be found, \
          got: {list_stdout}"
     );

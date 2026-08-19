@@ -179,5 +179,5 @@ fn list_and_status_read_back_the_same_real_persisted_state() {
     let list = run(home, &["list"]);
     assert!(list.status.success());
     let list_stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(list_stdout.contains("in progress"), "got: {list_stdout}");
+    assert!(list_stdout.contains("In progress"), "got: {list_stdout}");
 }
