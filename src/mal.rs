@@ -2,10 +2,12 @@
 //! `doctor`'s MAL-auth check needs (design.md §7, CLAUDE.md's "Scope
 //! boundary: episode progress only").
 //!
-//! Phase 8a scope only: authorization, token exchange/refresh, and
-//! `~/.local/share/tsuzuki/mal_token.toml` persistence. Linking, matching,
-//! and the two-way episode-progress merge are Phase 8b — nothing in this
-//! module fetches a user's MAL list or pushes/pulls episode numbers.
+//! Authorization, token exchange/refresh, `~/.local/share/tsuzuki/mal_token.toml`
+//! persistence, and the small authenticated-HTTP surface (`get`/`patch_form`
+//! on [`MalHttpClient`], [`ensure_access_token`]) that Phase 8b's `sync.rs`
+//! builds on. Linking, matching, and the two-way episode-progress merge
+//! themselves live in `sync.rs`, not here — this module never fetches a
+//! user's MAL list or pushes/pulls episode numbers on its own.
 //!
 //! **Never print or log a full token/secret value anywhere.** `TokenRecord`
 //! hand-writes its own `Debug` to redact both token fields even under an
@@ -430,13 +432,36 @@ impl fmt::Display for HttpError {
     }
 }
 
-/// A form-POST-capable HTTP client — the only capability MAL's token
-/// endpoint needs (both authorization-code exchange and refresh are
-/// `application/x-www-form-urlencoded` POSTs). Injectable so every caller
-/// above this trait (PKCE, URL building, token-status logic) is testable
-/// without a real network call.
+/// The MAL HTTP surface Tsuzuki needs, end to end: `post_form` for the
+/// unauthenticated OAuth token endpoint (client_id-only, both authorization-
+/// code exchange and refresh are `application/x-www-form-urlencoded`
+/// POSTs — Phase 8a), plus `get`/`patch_form` for the authenticated data API
+/// (`sync.rs`, Phase 8b) — fetching the user's anime list, looking up one
+/// anime's list status, and pushing an episode count. One trait, one real
+/// implementation ([`UreqClient`]), so every caller above it (PKCE, URL
+/// building, token-status logic, linking, merge decisions) is testable
+/// against a fabricated client with zero real network calls.
 pub trait MalHttpClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError>;
+
+    /// An authenticated `GET`, `Authorization: Bearer {bearer_token}`, with
+    /// `query` appended as query-string parameters. Used for both the
+    /// paginated anime-list fetch and a single anime's list status.
+    fn get(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        query: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError>;
+
+    /// An authenticated `PATCH` with a form-encoded body — MAL's
+    /// `.../my_list_status` update endpoint is the only user of this.
+    fn patch_form(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        params: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError>;
 }
 
 /// The real client, backed by `ureq` — a blocking-only HTTP client with no
@@ -464,26 +489,70 @@ pub trait MalHttpClient {
 /// TLS-connector setup cost here is a complete non-issue.
 pub struct UreqClient;
 
+/// Builds a fresh `Agent` with the explicit native-tls connector every
+/// `UreqClient` method needs (see the doc comment above) — factored out
+/// once `get`/`patch_form` joined `post_form` in needing it, so the setup
+/// exists in exactly one place rather than three copies.
+fn build_agent() -> Result<ureq::Agent, HttpError> {
+    let connector = native_tls::TlsConnector::new()
+        .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
+    Ok(ureq::AgentBuilder::new()
+        .tls_connector(std::sync::Arc::new(connector))
+        .build())
+}
+
+/// Maps a `ureq` call result to `HttpResponse`/`HttpError` — a non-2xx
+/// status is still `Ok(HttpResponse { status, .. })` (the caller decides
+/// what a given status means; this layer only distinguishes "got a real
+/// HTTP response" from "never reached the server at all").
+fn map_ureq_result(result: Result<ureq::Response, ureq::Error>) -> Result<HttpResponse, HttpError> {
+    match result {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.into_string().unwrap_or_default();
+            Ok(HttpResponse { status, body })
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Ok(HttpResponse { status: code, body })
+        }
+        Err(e) => Err(HttpError(e.to_string())),
+    }
+}
+
 impl MalHttpClient for UreqClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
-        let connector = native_tls::TlsConnector::new()
-            .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
-        let agent = ureq::AgentBuilder::new()
-            .tls_connector(std::sync::Arc::new(connector))
-            .build();
+        let agent = build_agent()?;
+        map_ureq_result(agent.post(url).send_form(params))
+    }
 
-        match agent.post(url).send_form(params) {
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse { status, body })
-            }
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse { status: code, body })
-            }
-            Err(e) => Err(HttpError(e.to_string())),
+    fn get(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        query: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError> {
+        let agent = build_agent()?;
+        let mut req = agent
+            .get(url)
+            .set("Authorization", &format!("Bearer {bearer_token}"));
+        for (key, value) in query {
+            req = req.query(key, value);
         }
+        map_ureq_result(req.call())
+    }
+
+    fn patch_form(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        params: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError> {
+        let agent = build_agent()?;
+        let req = agent
+            .patch(url)
+            .set("Authorization", &format!("Bearer {bearer_token}"));
+        map_ureq_result(req.send_form(params))
     }
 }
 
@@ -633,28 +702,108 @@ pub fn token_status(
     if client_id.is_empty() {
         return TokenStatus::NotConfigured;
     }
+    match ensure_token(client, token_path, client_id, now) {
+        EnsureOutcome::Valid(t) => TokenStatus::Valid {
+            expires_in_secs: t.expires_at - now,
+        },
+        EnsureOutcome::Refreshed(t) => TokenStatus::Refreshed {
+            expires_in_secs: t.expires_at.saturating_sub(now),
+        },
+        EnsureOutcome::NotLoggedIn => TokenStatus::NotLoggedIn,
+        EnsureOutcome::RefreshRejected(msg) => TokenStatus::RefreshRejected(msg),
+        EnsureOutcome::NetworkError(msg) => TokenStatus::NetworkError(msg),
+    }
+}
 
+/// Shared refresh-if-needed outcome — the one place the "is the stored
+/// token expiring; if so, refresh and persist" logic lives. Both
+/// `token_status` (doctor's OK/WARN/FAIL summary) and `ensure_access_token`
+/// (Phase 8b's actual bearer-token accessor, below) resolve through this
+/// single function, so a future change to refresh behavior can't drift
+/// between the two callers.
+enum EnsureOutcome {
+    Valid(TokenRecord),
+    Refreshed(TokenRecord),
+    NotLoggedIn,
+    RefreshRejected(String),
+    NetworkError(String),
+}
+
+fn ensure_token(
+    client: &dyn MalHttpClient,
+    token_path: &Path,
+    client_id: &str,
+    now: u64,
+) -> EnsureOutcome {
     let token = match read_token(token_path) {
         Ok(Some(t)) => t,
-        Ok(None) => return TokenStatus::NotLoggedIn,
-        Err(_) => return TokenStatus::NotLoggedIn,
+        Ok(None) => return EnsureOutcome::NotLoggedIn,
+        Err(_) => return EnsureOutcome::NotLoggedIn,
     };
 
     if token.expires_at > now + EXPIRY_SAFETY_MARGIN_SECS {
-        return TokenStatus::Valid {
-            expires_in_secs: token.expires_at - now,
-        };
+        return EnsureOutcome::Valid(token);
     }
 
     match refresh_with_token(client, client_id, &token.refresh_token, now) {
         Ok(refreshed) => {
-            let expires_in_secs = refreshed.expires_at.saturating_sub(now);
             let _ = write_token(token_path, &refreshed);
-            TokenStatus::Refreshed { expires_in_secs }
+            EnsureOutcome::Refreshed(refreshed)
         }
-        Err(TokenExchangeError::Rejected(msg)) => TokenStatus::RefreshRejected(msg),
-        Err(TokenExchangeError::Transport(msg)) => TokenStatus::NetworkError(msg),
-        Err(TokenExchangeError::Parse(msg)) => TokenStatus::NetworkError(msg),
+        Err(TokenExchangeError::Rejected(msg)) => EnsureOutcome::RefreshRejected(msg),
+        Err(TokenExchangeError::Transport(msg)) => EnsureOutcome::NetworkError(msg),
+        Err(TokenExchangeError::Parse(msg)) => EnsureOutcome::NetworkError(msg),
+    }
+}
+
+/// Why a usable access token couldn't be produced — `sync.rs`'s top-level
+/// error for "can't even start," distinct from a per-series sync failure.
+#[derive(Debug)]
+pub enum AccessTokenError {
+    NotLoggedIn,
+    RefreshRejected(String),
+    NetworkError(String),
+}
+
+impl fmt::Display for AccessTokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AccessTokenError::NotLoggedIn => {
+                write!(
+                    f,
+                    "not logged in to MyAnimeList — run `tsuzuki sync login` first"
+                )
+            }
+            AccessTokenError::RefreshRejected(msg) => write!(
+                f,
+                "MyAnimeList rejected the stored refresh token — run `tsuzuki sync login` again ({msg})"
+            ),
+            AccessTokenError::NetworkError(msg) => {
+                write!(f, "network error contacting MyAnimeList: {msg}")
+            }
+        }
+    }
+}
+
+/// Resolves a real, currently-valid access token — refreshing and
+/// persisting first if the stored one is expiring, exactly like
+/// `token_status` does, via the same shared `ensure_token`. This is what
+/// `sync.rs` calls once at the start of a `sync`/`sync link` run to get the
+/// bearer token every authenticated list/anime/PATCH request needs.
+pub fn ensure_access_token(
+    client: &dyn MalHttpClient,
+    token_path: &Path,
+    client_id: &str,
+    now: u64,
+) -> Result<String, AccessTokenError> {
+    if client_id.is_empty() {
+        return Err(AccessTokenError::NotLoggedIn);
+    }
+    match ensure_token(client, token_path, client_id, now) {
+        EnsureOutcome::Valid(t) | EnsureOutcome::Refreshed(t) => Ok(t.access_token),
+        EnsureOutcome::NotLoggedIn => Err(AccessTokenError::NotLoggedIn),
+        EnsureOutcome::RefreshRejected(msg) => Err(AccessTokenError::RefreshRejected(msg)),
+        EnsureOutcome::NetworkError(msg) => Err(AccessTokenError::NetworkError(msg)),
     }
 }
 
@@ -928,6 +1077,33 @@ mod tests {
                 }),
                 Err(msg) => Err(HttpError(msg.clone())),
             }
+        }
+
+        // Every test in this module only ever exercises the token
+        // endpoint (`post_form`) — `get`/`patch_form` exist to satisfy the
+        // trait, deliberately panicking so a test that starts needing the
+        // authenticated data API fails loudly instead of silently getting
+        // a wrong/empty response.
+        fn get(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+            _query: &[(&str, &str)],
+        ) -> Result<HttpResponse, HttpError> {
+            unimplemented!(
+                "FakeClient (mal.rs tests) does not support get — see sync.rs's own fakes"
+            )
+        }
+
+        fn patch_form(
+            &self,
+            _url: &str,
+            _bearer_token: &str,
+            _params: &[(&str, &str)],
+        ) -> Result<HttpResponse, HttpError> {
+            unimplemented!(
+                "FakeClient (mal.rs tests) does not support patch_form — see sync.rs's own fakes"
+            )
         }
     }
 

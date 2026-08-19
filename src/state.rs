@@ -54,12 +54,48 @@ pub struct SeriesRecord {
     /// `auto_pause_days` real meaning later; nothing in this phase acts on
     /// it yet beyond keeping it accurate.
     pub updated_at: u64,
+    /// Phase 8b: the highest episode number a MAL sync merge has confirmed
+    /// either side already knows about for this series — set only by
+    /// `sync.rs`'s merge step, never by `reconcile.rs`. Deliberately
+    /// **separate** from `episode_number`: `reconcile.rs` unconditionally
+    /// overwrites `episode_number` from the local file's own Anitomy/
+    /// ordinal identity on every single reconcile pass (which runs before
+    /// every state-touching command, CLAUDE.md's "every state-touching
+    /// command reconciles first") — reusing that field for a MAL-driven
+    /// number would silently lose it the very next time any command ran.
+    /// `None` means no sync merge has ever touched this series. Never
+    /// implies a real playback position — a merge action never writes
+    /// `current_relative_path`/`position_seconds` (design.md §7: "No
+    /// timestamp/position is implied for episodes Tsuzuki never actually
+    /// observed playback of").
+    #[serde(default)]
+    pub mal_episode_awareness: Option<u32>,
+}
+
+/// One series' link to a MyAnimeList anime ID (design.md §7's linking
+/// section). Stored here in `state.toml`, not `config.toml` — Phase 8b's
+/// judgment call (see `sync.rs`'s module doc for the full reasoning): a
+/// link is Tsuzuki-derived/written identity data, populated either by
+/// exact-match auto-linking or by the explicit `sync link` command, the
+/// same category as `SeriesRecord` itself (which already lives here) —
+/// not hand-typed human configuration a user would maintain in a dotfiles
+/// repo the way tracked roots or exclusions are. Keyed by the same
+/// `(root, name)` composite key as `SeriesRecord`, for the same composable-
+/// roots reason (CLAUDE.md §3): the same series name can exist under more
+/// than one tracked root, each with its own independent MAL link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MalLink {
+    pub root: String,
+    pub name: String,
+    pub mal_id: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub series: Vec<SeriesRecord>,
+    #[serde(default)]
+    pub mal_links: Vec<MalLink>,
 }
 
 impl State {
@@ -73,6 +109,18 @@ impl State {
         self.series
             .iter_mut()
             .find(|r| r.root == root && r.name == name)
+    }
+
+    pub fn find_mal_link(&self, root: &str, name: &str) -> Option<&MalLink> {
+        self.mal_links
+            .iter()
+            .find(|l| l.root == root && l.name == name)
+    }
+
+    pub fn find_mal_link_mut(&mut self, root: &str, name: &str) -> Option<&mut MalLink> {
+        self.mal_links
+            .iter_mut()
+            .find(|l| l.root == root && l.name == name)
     }
 }
 
@@ -174,7 +222,9 @@ mod tests {
                 position_seconds: 340.5,
                 episode_number: Some(27),
                 updated_at: 1_700_000_000,
+                mal_episode_awareness: None,
             }],
+            mal_links: Vec::new(),
         }
     }
 
@@ -273,6 +323,7 @@ mod tests {
                     position_seconds: 100.0,
                     episode_number: Some(5),
                     updated_at: 1,
+                    mal_episode_awareness: None,
                 },
                 SeriesRecord {
                     root: "~/Anime/Rewatches".to_string(),
@@ -282,8 +333,11 @@ mod tests {
                     position_seconds: 50.0,
                     episode_number: Some(2),
                     updated_at: 2,
+                    mal_episode_awareness: None,
                 },
             ],
+
+            mal_links: Vec::new(),
         };
 
         write(&path, &state).unwrap();
@@ -369,5 +423,90 @@ episode_number = 27
         let config = Config::default();
         let resolved = resolve_root_arg(&config, Path::new("/not/tracked"), None);
         assert_eq!(resolved, None);
+    }
+
+    // --- Phase 8b: mal_episode_awareness / MalLink migration + lookups ---
+
+    #[test]
+    fn a_pre_phase_8b_series_record_missing_mal_episode_awareness_still_parses() {
+        // A real state.toml written by any Phase 5-8a build has no
+        // `mal_episode_awareness` key under `[[series]]` at all — must
+        // still read cleanly, defaulting to `None`, not fail to parse.
+        let old_format = r#"
+[[series]]
+root = "~/Anime"
+name = "One Piece"
+status = "in_progress"
+current_relative_path = "One Piece/ep01.mkv"
+position_seconds = 340.5
+episode_number = 27
+updated_at = 1700000000
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        fs::write(&path, old_format).unwrap();
+
+        let state = read(&path).unwrap();
+        assert_eq!(state.series.len(), 1);
+        assert_eq!(state.series[0].mal_episode_awareness, None);
+        assert!(
+            state.mal_links.is_empty(),
+            "a state.toml with no [[mal_links]] table at all must default to empty, not fail"
+        );
+    }
+
+    #[test]
+    fn mal_links_round_trip_through_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+
+        let mut state = sample_state();
+        state.mal_links.push(MalLink {
+            root: "~/Anime".to_string(),
+            name: "One Piece".to_string(),
+            mal_id: 21,
+        });
+
+        write(&path, &state).unwrap();
+        let reread = read(&path).unwrap();
+        assert_eq!(reread.mal_links, state.mal_links);
+    }
+
+    #[test]
+    fn find_mal_link_and_find_mal_link_mut_look_up_by_composite_key() {
+        let mut state = State {
+            series: Vec::new(),
+            mal_links: vec![
+                MalLink {
+                    root: "~/Anime".to_string(),
+                    name: "Monster".to_string(),
+                    mal_id: 19,
+                },
+                MalLink {
+                    root: "~/Anime/Rewatches".to_string(),
+                    name: "Monster".to_string(),
+                    mal_id: 19,
+                },
+            ],
+        };
+
+        assert!(state.find_mal_link("~/Anime", "Monster").is_some());
+        assert!(state.find_mal_link("~/Elsewhere", "Monster").is_none());
+        assert!(state.find_mal_link("~/Anime", "Nonexistent").is_none());
+
+        let link = state.find_mal_link_mut("~/Anime", "Monster").unwrap();
+        link.mal_id = 20;
+        assert_eq!(
+            state.find_mal_link("~/Anime", "Monster").unwrap().mal_id,
+            20
+        );
+        assert_eq!(
+            state
+                .find_mal_link("~/Anime/Rewatches", "Monster")
+                .unwrap()
+                .mal_id,
+            19,
+            "the identically-named link under the OTHER root must be untouched"
+        );
     }
 }

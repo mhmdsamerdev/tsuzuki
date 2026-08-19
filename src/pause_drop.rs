@@ -116,6 +116,7 @@ mod tests {
             position_seconds: 500.0,
             episode_number: Some(1),
             updated_at: 100,
+            mal_episode_awareness: None,
         }
     }
 
@@ -123,6 +124,8 @@ mod tests {
     fn pause_transitions_in_progress_to_paused() {
         let mut state = State {
             series: vec![record(Status::InProgress)],
+
+            mal_links: Vec::new(),
         };
         let outcome = pause(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::Changed);
@@ -141,6 +144,8 @@ mod tests {
         let before = record(Status::InProgress);
         let mut state = State {
             series: vec![before.clone()],
+
+            mal_links: Vec::new(),
         };
         pause(&mut state, "~/Anime", "Monster").unwrap();
         let after = state.find("~/Anime", "Monster").unwrap();
@@ -153,6 +158,8 @@ mod tests {
     fn pause_on_already_paused_is_idempotent() {
         let mut state = State {
             series: vec![record(Status::Paused)],
+
+            mal_links: Vec::new(),
         };
         let outcome = pause(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::NoOp);
@@ -164,6 +171,8 @@ mod tests {
     fn pause_on_dropped_is_an_invalid_transition_error() {
         let mut state = State {
             series: vec![record(Status::Dropped)],
+
+            mal_links: Vec::new(),
         };
         let err = pause(&mut state, "~/Anime", "Monster").unwrap_err();
         assert_eq!(
@@ -194,6 +203,8 @@ mod tests {
         let before = record(Status::InProgress);
         let mut state = State {
             series: vec![before.clone()],
+
+            mal_links: Vec::new(),
         };
         let outcome = drop_series(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::Changed);
@@ -208,6 +219,8 @@ mod tests {
     fn drop_transitions_paused_to_dropped() {
         let mut state = State {
             series: vec![record(Status::Paused)],
+
+            mal_links: Vec::new(),
         };
         let outcome = drop_series(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::Changed);
@@ -221,6 +234,8 @@ mod tests {
     fn drop_on_already_dropped_is_idempotent_not_an_error() {
         let mut state = State {
             series: vec![record(Status::Dropped)],
+
+            mal_links: Vec::new(),
         };
         let outcome = drop_series(&mut state, "~/Anime", "Monster").unwrap();
         assert_eq!(outcome, Outcome::NoOp);
@@ -244,6 +259,8 @@ mod tests {
         // documents the invariant by exhaustively trying both functions.
         let mut state = State {
             series: vec![record(Status::Dropped)],
+
+            mal_links: Vec::new(),
         };
         assert!(pause(&mut state, "~/Anime", "Monster").is_err());
         assert_eq!(
@@ -265,6 +282,8 @@ mod tests {
                     ..record(Status::Paused)
                 },
             ],
+
+            mal_links: Vec::new(),
         };
 
         pause(&mut state, "~/Anime", "Monster").unwrap();

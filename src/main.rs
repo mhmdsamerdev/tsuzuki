@@ -15,6 +15,7 @@ mod roots;
 mod script_log;
 mod series;
 mod state;
+mod sync;
 mod target;
 
 use std::path::{Path, PathBuf};
@@ -103,15 +104,13 @@ fn dispatch(
             root,
         } => exclude_command(&path, root.as_deref(), config, config_path),
         Command::Sync { action } => match action {
-            None => {
-                stub("sync");
-                ExitCode::SUCCESS
-            }
+            None => sync_command(config, state_path, home),
             Some(SyncCommand::Login) => sync_login_command(config),
-            Some(SyncCommand::Link { .. }) => {
-                stub("sync link");
-                ExitCode::SUCCESS
-            }
+            Some(SyncCommand::Link {
+                series,
+                mal_id,
+                root,
+            }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
         },
         Command::Config { action } => {
             match action {
@@ -808,6 +807,196 @@ fn sync_login_command(config: &Config) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+// --- Phase 8b: MAL linking and the two-way merge ---
+
+/// Resolves a real, usable bearer token for `sync`/`sync link` — the one
+/// top-level failure mode that aborts before touching any series at all
+/// (no token, no possible sync), distinct from a per-series failure inside
+/// the loop.
+fn ensure_sync_access_token(
+    client: &dyn mal::MalHttpClient,
+    config: &Config,
+) -> Result<String, ExitCode> {
+    let token_path = mal::mal_token_path()
+        .map_err(|e| fail(&format!("could not resolve MAL token path: {e}")))?;
+    mal::ensure_access_token(
+        client,
+        &token_path,
+        mal::resolve_client_id(config),
+        state::now_unix(),
+    )
+    .map_err(|e| fail(&e.to_string()))
+}
+
+/// `tsuzuki sync` (bare) — design.md §7 + this phase's own instructions:
+/// every tracked series with real progress (a `state.toml` record at all —
+/// a never-started series has none, so it's never in `targets` to begin
+/// with), attempt linking first if not already linked, then merge if
+/// linked. One series failing never aborts the run.
+fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    if let Some(w) = &warning {
+        print_scan_warning(w);
+    }
+
+    let client = mal::UreqClient;
+    let access_token = match ensure_sync_access_token(&client, config) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    let targets: Vec<(String, String)> = state
+        .series
+        .iter()
+        .map(|r| (r.root.clone(), r.name.clone()))
+        .collect();
+
+    if targets.is_empty() {
+        println!("Nothing tracked with real progress to sync.");
+        return ExitCode::SUCCESS;
+    }
+
+    let before = state.clone();
+    let outcomes = sync::run_sync(
+        &client,
+        &access_token,
+        &mut state,
+        &targets,
+        sync::API_CALL_DELAY,
+    );
+
+    if state != before
+        && let Err(e) = state::write(state_path, &state)
+    {
+        return fail(&format!(
+            "could not write state at {}: {e}",
+            state_path.display()
+        ));
+    }
+
+    let mut failed = 0;
+    let mut needs_linking = 0;
+    let mut merged = 0;
+    for outcome in &outcomes {
+        print_sync_outcome(outcome);
+        match &outcome.kind {
+            sync::OutcomeKind::Merged { .. } => merged += 1,
+            sync::OutcomeKind::NoExactMatch { .. } | sync::OutcomeKind::EmptyList => {
+                needs_linking += 1;
+            }
+            sync::OutcomeKind::Failed(_) => failed += 1,
+        }
+    }
+
+    println!();
+    println!(
+        "{merged} synced, {needs_linking} need manual linking, {failed} failed ({} total)",
+        outcomes.len()
+    );
+
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn print_sync_outcome(outcome: &sync::SeriesOutcome) {
+    let name = &outcome.name;
+    match &outcome.kind {
+        sync::OutcomeKind::Merged {
+            mal_id,
+            action: sync::MergeAction::Push(n),
+        } => println!("{name}: linked to MAL #{mal_id} — pushed episode {n} to MyAnimeList"),
+        sync::OutcomeKind::Merged {
+            mal_id,
+            action: sync::MergeAction::Pull(n),
+        } => println!(
+            "{name}: linked to MAL #{mal_id} — MAL ahead, local awareness updated to episode {n}"
+        ),
+        sync::OutcomeKind::Merged {
+            mal_id,
+            action: sync::MergeAction::NoOp,
+        } => println!("{name}: linked to MAL #{mal_id} — already in sync"),
+        sync::OutcomeKind::NoExactMatch { candidates } => {
+            println!("{name}: no exact match on your MAL list.");
+            if candidates.is_empty() {
+                println!("  No close candidates found either.");
+            } else {
+                println!("  Closest matches:");
+                for c in candidates {
+                    println!(
+                        "    \"{}\" (MAL #{}, {:.0}% similar)",
+                        c.title,
+                        c.mal_id,
+                        c.similarity * 100.0
+                    );
+                }
+            }
+            println!("  Run `tsuzuki sync link \"{name}\" --mal-id <id>` to link manually.");
+        }
+        sync::OutcomeKind::EmptyList => {
+            println!("{name}: nothing on your MyAnimeList list yet.");
+            println!(
+                "  Add it on MAL, or run `tsuzuki sync link \"{name}\" --mal-id <id>` to link manually."
+            );
+        }
+        sync::OutcomeKind::Failed(msg) => println!("{name}: sync failed — {msg}"),
+    }
+}
+
+/// `tsuzuki sync link <series> --mal-id <id> [--root <root>]` — design.md
+/// §7's manual override, for when exact-title matching fails. Verifies
+/// `mal_id` actually appears on the user's MAL list before persisting the
+/// link (see `sync.rs`'s `manual_link` doc comment for the reasoning).
+fn sync_link_command(
+    series: &str,
+    mal_id: u32,
+    root_arg: Option<&Path>,
+    config: &Config,
+    state_path: &Path,
+    home: Option<&Path>,
+) -> ExitCode {
+    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    if let Some(w) = &warning {
+        print_scan_warning(w);
+    }
+
+    // Cheap, local validation first — same "check before spawn" ordering
+    // `launch.rs` already follows — so an unresolvable/ambiguous series
+    // name fails immediately, with no network call attempted at all.
+    let root = match target::resolve_series_root(config, series, root_arg, home) {
+        Ok(r) => r,
+        Err(e) => return print_target_error(&e, "sync link"),
+    };
+
+    let client = mal::UreqClient;
+    let access_token = match ensure_sync_access_token(&client, config) {
+        Ok(t) => t,
+        Err(code) => return code,
+    };
+
+    match sync::manual_link(&client, &access_token, &mut state, &root, series, mal_id) {
+        Ok(()) => {
+            if let Err(e) = state::write(state_path, &state) {
+                return fail(&format!(
+                    "could not write state at {}: {e}",
+                    state_path.display()
+                ));
+            }
+            println!("linked \"{series}\" to MAL #{mal_id}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
 // --- Phase 7: doctor ---
 
 /// `tsuzuki doctor [--fix] [--forget-orphans]` — CLAUDE.md's Phase 7 full
@@ -1011,6 +1200,7 @@ mod tests {
             position_seconds: 200.0,
             episode_number: Some(1),
             updated_at: 1,
+            mal_episode_awareness: None,
         }
     }
 
@@ -1072,6 +1262,8 @@ mod tests {
                 record(&root_a, "Monster", Status::InProgress),
                 record(&root_b, "Monster", Status::InProgress),
             ],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &state).unwrap();
 
@@ -1115,6 +1307,8 @@ mod tests {
                 record(&root_a, "Monster", Status::InProgress),
                 record(&root_b, "Monster", Status::InProgress),
             ],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &state).unwrap();
 
@@ -1157,6 +1351,8 @@ mod tests {
                 record(&root_a, "Monster", Status::InProgress),
                 record(&root_b, "Monster", Status::InProgress),
             ],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &state).unwrap();
 
@@ -1167,6 +1363,57 @@ mod tests {
         assert_eq!(
             after, state,
             "an ambiguous pause must mutate neither record"
+        );
+    }
+
+    // --- Phase 8b: sync_link_command's --root disambiguation ---
+    //
+    // `sync_link_command` resolves `--root` (a cheap, local, no-network
+    // check) before ever touching the network, mirroring pause/drop's own
+    // ordering — so the ambiguous-without-`--root` case is fully testable
+    // here without a real MAL token. A "root disambiguates AND completes a
+    // real link" test is not attempted at this level: past target
+    // resolution, `sync_link_command` hardcodes the real `mal::UreqClient`
+    // and needs a genuine access token, which is exactly what the
+    // `#[ignore]`d real-API integration test (`tests/mal_sync_integration.rs`)
+    // covers instead — `sync.rs`'s own `manual_link` unit tests already
+    // exhaustively cover the actual linking/persistence logic via a fake
+    // client, so nothing about *that* is untested, just not re-verified a
+    // second time through this real-network-dependent entry point.
+
+    #[test]
+    fn sync_link_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing() {
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("Anime");
+        let root_b = dir.path().join("AltAnime");
+        touch(&root_a.join("Monster").join("ep01.mkv"));
+        touch(&root_b.join("Monster").join("ep01.mkv"));
+
+        let mut config = tracked_config(&[&root_a, &root_b]);
+        let watch_later = dir.path().join("watch_later");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
+        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
+        let state_path = dir.path().join("state.toml");
+        let state = State {
+            series: vec![
+                record(&root_a, "Monster", Status::InProgress),
+                record(&root_b, "Monster", Status::InProgress),
+            ],
+            mal_links: Vec::new(),
+        };
+        state::write(&state_path, &state).unwrap();
+
+        let exit = sync_link_command("Monster", 42, None, &config, &state_path, None);
+        assert_eq!(
+            exit,
+            ExitCode::FAILURE,
+            "ambiguous --root resolution must fail before any network call is attempted"
+        );
+
+        let after = state::read(&state_path).unwrap();
+        assert_eq!(
+            after, state,
+            "an ambiguous sync link must mutate nothing — no mal_links entry, no series changes"
         );
     }
 
@@ -1247,6 +1494,8 @@ mod tests {
                 record(&root, "Monster", Status::InProgress),
                 record(&root, "One Piece", Status::InProgress),
             ],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &state).unwrap();
 
@@ -1302,6 +1551,7 @@ mod tests {
     fn state_with_orphan(root: &Path) -> State {
         State {
             series: vec![record(root, "GoneSeries", Status::InProgress)],
+            mal_links: Vec::new(),
         }
     }
 
@@ -1370,6 +1620,8 @@ mod tests {
                 record(&root, "GoneSeries", Status::InProgress),
                 record(&root, "StillHere", Status::InProgress),
             ],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &before).unwrap();
 
@@ -1403,6 +1655,8 @@ mod tests {
         let state_path = dir.path().join("state.toml");
         let before = State {
             series: vec![record(&root, "Monster", Status::InProgress)],
+
+            mal_links: Vec::new(),
         };
         state::write(&state_path, &before).unwrap();
 

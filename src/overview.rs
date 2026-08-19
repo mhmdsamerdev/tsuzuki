@@ -304,7 +304,10 @@ mod tests {
                 position_seconds: 100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         let overviews = all_series(&config, &state, None);
@@ -345,7 +348,10 @@ mod tests {
             .paths
             .push(rewatches_root.to_string_lossy().into_owned());
 
-        let state = State { series: vec![] };
+        let state = State {
+            series: vec![],
+            mal_links: Vec::new(),
+        };
         let overviews = all_series(&config, &state, None);
 
         let names: Vec<_> = overviews.iter().map(|o| o.name.as_str()).collect();
@@ -369,6 +375,7 @@ mod tests {
             position_seconds: 200.0,
             episode_number: Some(2), // ordinal fallback position, not a parsed number
             updated_at: 1,
+            mal_episode_awareness: None,
         };
         let o = overview_for("~/Anime", "No Numbers", Some(&record), 3);
         assert_eq!(o.episode_number, Some(2));

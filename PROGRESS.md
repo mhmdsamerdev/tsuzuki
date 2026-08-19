@@ -3,12 +3,13 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 8a — MAL OAuth login, token storage/refresh, and
-`doctor`'s MAL-auth check (implemented, and now fully verified against the
-live MAL API — a real `sync login` run by the user succeeded end to end,
-closing every "unverified against the real API" caveat this feature
-carried. Paused before Phase 8b (linking/matching/two-way merge), per this
-task's own explicit "do not proceed automatically" instruction)
+**Current phase:** Phase 8b — MAL linking (exact-match + manual `sync
+link`) and the two-way, non-destructive episode-progress merge
+(implemented, unit-tested against a fake HTTP client — zero real network
+calls in the default `cargo test` run). This is the last piece of Phase 8.
+**Not yet dogfooded against a real MAL account** — paused for the user to
+run `tsuzuki sync`/`sync link` for real, same stop-and-confirm precedent as
+the Phase 5 dogfood checkpoint, before Phase 9 (distribution) starts.
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -1449,11 +1450,143 @@ task's own explicit "do not proceed automatically" instruction)
     default genuinely delivers on Phase 8a-correction's "zero-config login"
     goal for a fresh install.
 
+- Phase 8b — MAL linking + the two-way, non-destructive merge. Builds
+  directly on Phase 8a's plumbing; no OAuth/PKCE/token-refresh internals
+  touched.
+  - `src/mal.rs`: `MalHttpClient` trait extended with `get`/`patch_form`
+    (authenticated, bearer-token) alongside the existing `post_form`
+    (unauthenticated, OAuth token endpoint only) — one real impl
+    (`UreqClient`), deduplicated via `build_agent`/`map_ureq_result`
+    helpers now shared across all three methods. Added
+    `ensure_access_token`, refactored out of `token_status`'s own
+    refresh-if-needed logic (`ensure_token`, shared by both) rather than
+    duplicating it — `token_status`'s own observable behavior/tests are
+    unchanged, confirmed by the full pre-existing mal.rs suite still
+    passing byte-for-byte.
+  - `src/state.rs`: `SeriesRecord.mal_episode_awareness: Option<u32>`
+    (`#[serde(default)]`, migration-tested against a pre-Phase-8b
+    `[[series]]` table) — deliberately **not** a reuse of `episode_number`,
+    since `reconcile.rs` unconditionally overwrites that field from local
+    file position on every reconcile pass (would silently lose a MAL pull
+    the very next command). New `state::MalLink` +
+    `State.mal_links: Vec<MalLink>` (`[[mal_links]]`, same `(root, name)`
+    composite-key pattern as `SeriesRecord`), `find_mal_link`/
+    `find_mal_link_mut`. See CLAUDE.md's new §3 section for the storage
+    judgment call (state.toml, not config.toml — authorship, not
+    portability, is the deciding question) and full reasoning.
+  - `src/sync.rs` (new, ~700 lines incl. tests): `normalize_title`
+    (case/brackets/whitespace), `find_exact_match` (never fuzzy),
+    hand-written Levenshtein `title_similarity`/`rank_candidates`
+    (display-only, never decides a link — no new fuzzy-matching
+    dependency for one display feature), `fetch_anime_list` (paginated,
+    `fields=alternative_titles,my_list_status`, capped at 200 pages
+    defensively), `fetch_anime_status` (single-anime lookup — used for
+    both `sync link`'s validation and an already-linked series' merge
+    comparison, never re-fetching/re-scanning the whole list),
+    `push_episode_count` (PATCH, **`num_watched_episodes`** field — see
+    below), `decide_merge` (pure three-way comparison, the actual §2
+    invariant), `local_effective_episode` (`max(episode_number,
+    mal_episode_awareness)` — see CLAUDE.md for why), `manual_link`,
+    `run_sync` (the bare-`sync` orchestration: link-if-needed then merge,
+    one shared list fetch per run not per series, one series failing
+    never aborts the rest, a light `API_CALL_DELAY` throttle between
+    calls).
+  - **Real, load-bearing bug caught before it shipped, not after:**
+    researched MAL's actual PATCH request-body field name (cross-checked
+    against Taiga's real source and the unofficial MAL API spec, since
+    design.md's own text just said "field `num_episodes_watched`") and
+    found MAL's API is asymmetric — the response field is
+    `num_episodes_watched`, but the PATCH body field is
+    `num_watched_episodes` (words swapped, MAL's own doc explicitly notes
+    the discrepancy). Using the response field name in the request would
+    have silently never updated MAL (no error, MAL just ignores an
+    unrecognized field) — corrected in `push_episode_count` and in
+    design.md §7 before this was ever tested against the real API.
+  - `src/cli.rs`: `sync link` gained `--mal-id <id>` (required) and
+    `--root <root>` (same disambiguation precedent as `exclude`/`pause`/
+    `drop`).
+  - `src/main.rs`: `sync_command` (bare `tsuzuki sync`) and
+    `sync_link_command` wired in, replacing both stubs.
+    `sync_link_command` resolves `--root`/target *before* touching the
+    network (cheap-check-first, mirroring `launch.rs`'s own ordering) —
+    both so an unresolvable series name never wastes a network call and
+    so the ambiguous-without-`--root` case is fully testable without a
+    real MAL token (new test:
+    `sync_link_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing`).
+    A "root disambiguates AND completes a real link" test isn't attempted
+    at the `main.rs` level — past target resolution this hardcodes the
+    real `UreqClient` and needs a genuine access token; that's exactly
+    what the new `#[ignore]`d integration test covers instead, and
+    `sync.rs`'s own `manual_link` unit tests already exhaustively cover
+    the actual linking logic via a fake client.
+  - **Judgment call (flagged per this phase's own instructions, not
+    silently resolved): `sync link --mal-id` verifies the given id against
+    the user's real MAL list before persisting it** — one extra GET
+    (`fetch_anime_status`, checking `my_list_status` is present) at link
+    time. Matches this project's existing precedent for explicit user
+    input (`tsuzuki add` validates a path exists at add-time rather than
+    deferring to `doctor`) — a typo'd id would otherwise persist silently
+    and only surface later as a confusing per-series merge failure, or
+    worse, a real PATCH against a wrong, unrelated anime. This is a rare,
+    manual-override path, not the daily reflex command, so one extra call
+    is a fair price for a link the merge step can then trust
+    unconditionally forever after.
+  - Verification item 5 (the non-destructive invariant), done two ways:
+    a direct unit test
+    (`never_pushes_a_smaller_number_when_a_stale_local_read_is_lower_than_established_awareness`)
+    fabricating exactly the case a naive implementation gets wrong (a
+    stale raw `episode_number` of 15 below an already-established
+    `mal_episode_awareness` of 20 — proving the *effective* local number
+    used for comparison is 20, never regressing to 15), and an end-to-end
+    `run_sync` test
+    (`run_sync_never_patches_a_smaller_number_than_mal_already_has`) whose
+    fake client's PATCH call log is asserted empty — proving the push path
+    is genuinely never reached when MAL is already ahead, not just that
+    the pure decision function returns the right enum value in isolation.
+  - Partial-failure continuation verified two ways: one already-linked
+    series among several failing its own anime-status lookup doesn't
+    abort or corrupt the others
+    (`one_series_failing_does_not_abort_or_corrupt_the_rest_of_the_run`),
+    and a failure in the *shared* bulk-list fetch itself correctly fails
+    every not-yet-linked series with that reason while leaving
+    already-linked series' independent per-anime lookups completely
+    unaffected
+    (`list_fetch_failure_fails_every_unlinked_series_but_never_touches_already_linked_ones`).
+  - A genuine no-op merge (local already equals MAL) touches zero bytes of
+    `state.toml` — no `updated_at` bump, no write at all — matching this
+    project's "never touch saved state on a no-op" precedent
+    (`a_genuine_noop_merge_touches_no_state_at_all`).
+  - New `#[ignore]`d real-API integration test,
+    `tests/mal_sync_integration.rs` — link + one merge direction, fully
+    isolated (fresh temp `$HOME`, its own real login, never touches real
+    production state), documented setup steps (needs
+    `TSUZUKI_TEST_MAL_ANIME_ID`, a real anime id the tester owns on MAL).
+    Genuinely never run this session — flagged explicitly, same as every
+    other real-API caveat in this project. Cannot assert a specific merge
+    direction ahead of time (doesn't know the tester's real MAL count for
+    an arbitrary id), so it asserts completion + persistence and prints
+    the actual outcome for manual inspection.
+  - Docs: design.md §7's PATCH field-name line corrected (`num_watched_episodes`,
+    not `num_episodes_watched`) and its `sync link` mentions gained
+    `--mal-id`; §9's commands table updated to match. CLAUDE.md gained a
+    new §3 section covering all three load-bearing decisions above (link
+    storage location, why `mal_episode_awareness` is a separate field, the
+    field-name asymmetry trap) so a future session doesn't have to
+    re-derive or accidentally regress any of them.
+  - 381 tests passing (up from 348 pre-Phase-8b — 33 new: 29 in `sync.rs`,
+    3 in `state.rs` migration/`MalLink` tests, 1 in `main.rs`), plus 4
+    `#[ignore]`d real-API tests total excluded from the default run (2
+    pre-existing in `mal.rs` from earlier Phase 8a fixes, Phase 8a's own
+    login test, and this phase's new link+sync test). Both clippy
+    (`-p tsuzuki --no-deps --all-targets -D warnings`) and fmt gates clean.
+    `vendor/anitomy` untouched.
+
 **Next up:**
-- Phase 8b: exact-match linking against the user's own MAL list, the
-  two-way non-destructive episode-progress merge (never a status push —
-  see design.md §7's scope-boundary line). Builds directly on Phase 8a's
-  `MalHttpClient`/token-refresh plumbing.
+- Phase 9 (distribution & end-to-end tests) is next per design.md §11 —
+  but not automatically: this session's own instructions were explicit
+  that Phase 8b needs a real dogfood pass first (a genuine `tsuzuki sync`/
+  `sync link` run against a real MAL account), the same way Phase 5 got a
+  dedicated checkpoint. Wait for that before starting Phase 9.
 
 **Open questions blocking further work:**
 - cleared

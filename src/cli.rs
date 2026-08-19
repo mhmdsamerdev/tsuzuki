@@ -132,6 +132,17 @@ pub enum SyncCommand {
     Link {
         /// Series name (a tracked root's immediate child directory name)
         series: String,
+
+        /// The MyAnimeList anime ID to link this series to. Verified
+        /// against your MAL list before being saved — a bad id is
+        /// rejected, never silently linked.
+        #[arg(long = "mal-id")]
+        mal_id: u32,
+
+        /// Tracked root to resolve `series` against, when it exists under
+        /// more than one
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 

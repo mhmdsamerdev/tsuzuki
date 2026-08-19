@@ -1016,6 +1016,51 @@ their own registered MAL app. `tsuzuki sync login` and `tsuzuki doctor`'s
 MAL-auth check both work against a completely untouched `config.toml` —
 zero config edits required before first use.
 
+### MAL link storage, `mal_episode_awareness`, and the `num_watched_episodes`/`num_episodes_watched` field-name trap
+Three Phase 8b decisions worth protecting, all in `src/sync.rs` (module doc
+comment has the full reasoning; this is the summary a future session should
+read before touching any of this).
+
+**A series → MAL-id link lives in `state.toml`, not `config.toml`**, as a
+new `[[mal_links]]` array-of-tables (`state::MalLink`), keyed by the same
+`(root, name)` composite key `SeriesRecord` already uses. The deciding
+question isn't portability (a MAL id is globally stable, so it *could* live
+in either file) — it's authorship. Config is what a human hand-types and
+versions in a dotfiles repo (§3, "State vs. config are two separate
+files"); a MAL link is always Tsuzuki-derived/written, either by exact-match
+auto-linking during `sync` or by `sync link` recording its own result. It's
+in the same category as `SeriesRecord` itself, gets the same atomic-write
+guarantee for free by reusing `state::write`, and needs no third persisted
+file with its own write path.
+
+**`SeriesRecord.mal_episode_awareness` is deliberately a separate field
+from `episode_number`, never reused.** `reconcile.rs` unconditionally
+overwrites `episode_number` from the local file's own Anitomy/ordinal
+identity on every single reconcile pass — which runs before every
+state-touching command (§3, "every state-touching command reconciles
+first"). Writing a MAL-driven number into `episode_number` would make it
+vanish the very next time any command ran. The merge comparison's "local
+best-known episode number" is `max(episode_number, mal_episode_awareness)`
+(`sync::local_effective_episode`) — not raw `episode_number` alone — which
+is what actually makes the "never write a smaller number" invariant (§2)
+hold across repeated `sync` runs: without folding a prior pull back into
+the comparison, a later run could re-read a stale, lower local number and
+push it back down over a number MAL (or an earlier pull) already
+established.
+
+**MAL's `my_list_status` field name is asymmetric between reading and
+writing — this is a real trap, not a typo waiting to happen once.** A list/
+anime-details response reports the count as `num_episodes_watched`. The
+`PATCH /v2/anime/{id}/my_list_status` request body's own field is
+`num_watched_episodes` — words swapped. Confirmed independently against
+Taiga's (erengy/taiga) real request-building source and the unofficial MAL
+API specification, which explicitly documents the two names as different.
+Getting this wrong is silent: MAL doesn't error on an unrecognized field,
+it just never updates the episode count, so a naive implementation could
+look like it's working (200 OK) while doing nothing. If `push_episode_count`
+in `sync.rs` is ever touched, this field name is the one thing to re-verify
+first, not assume.
+
 ## 4. Dev environment
 
 **All build/test/lint commands run inside `nix-shell`**, not against the

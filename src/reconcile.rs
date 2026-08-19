@@ -508,6 +508,7 @@ fn reconcile_one_series(
                         .get(start_index)
                         .map(|id| id.episode_number),
                     updated_at: now_unix(),
+                    mal_episode_awareness: None,
                 });
                 state.series.len() - 1
             }
@@ -566,6 +567,7 @@ fn reconcile_one_series(
                 position_seconds: position,
                 episode_number,
                 updated_at: now,
+                mal_episode_awareness: None,
             });
         }
     }
@@ -766,7 +768,10 @@ mod tests {
                 position_seconds: 900.0,
                 episode_number: Some(1),
                 updated_at: 12345,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         // mpv's own watch_later file now says 45s — a brief accidental
@@ -833,7 +838,10 @@ mod tests {
                 position_seconds: 1100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -865,9 +873,12 @@ mod tests {
             position_seconds: 400.0,
             episode_number: Some(5),
             updated_at: 999,
+            mal_episode_awareness: None,
         };
         let mut state = State {
             series: vec![original.clone()],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -969,7 +980,10 @@ mod tests {
                 position_seconds: 300.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         // Two reconcile calls in a row, mpv's own file never touched again.
@@ -1004,7 +1018,10 @@ mod tests {
                 position_seconds: 0.0,
                 episode_number: None,
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1041,7 +1058,10 @@ mod tests {
                 position_seconds: 400.0,
                 episode_number: Some(1),
                 updated_at: 42,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1087,7 +1107,10 @@ mod tests {
                 position_seconds: 200.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1258,7 +1281,10 @@ mod tests {
                 position_seconds: 1100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1302,7 +1328,10 @@ mod tests {
                 position_seconds: 600.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1344,7 +1373,10 @@ mod tests {
                 position_seconds: 1100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1395,7 +1427,10 @@ mod tests {
                 position_seconds: 1100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1456,7 +1491,10 @@ mod tests {
                 position_seconds: 3.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -1964,7 +2002,10 @@ mod tests {
                 position_seconds: 0.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(
@@ -2023,7 +2064,10 @@ mod tests {
                 position_seconds: 900.0,
                 episode_number: Some(2),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(
@@ -2078,7 +2122,10 @@ mod tests {
                 position_seconds: 1100.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         reconcile_with_script_log_dirs(
@@ -2278,7 +2325,10 @@ mod tests {
                 position_seconds: 300.0,
                 episode_number: Some(1),
                 updated_at: 1,
+                mal_episode_awareness: None,
             }],
+
+            mal_links: Vec::new(),
         };
 
         // Two reconcile calls in a row, the script-log entry never touched

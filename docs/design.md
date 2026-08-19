@@ -234,14 +234,14 @@ Sync is optional — nothing about core tracking or resuming depends on MAL bein
 2. Normalize both sides (case, brackets, whitespace) and check for an **exact match** between the local folder name and *any* of an entry's known titles — not fuzzy similarity against one title.
 3. **Match found** → link automatically, cache the ID locally.
 4. **No exact match** → show the closest candidates by title (similarity ranks what's *displayed*, never decides a match) — user picks one. That folder name is saved as a new synonym, so it's an exact match next time.
-5. **Nothing on the list** → tell the user plainly; they add it on MAL, or use `tsuzuki sync link <series>` as a manual override.
+5. **Nothing on the list** → tell the user plainly; they add it on MAL, or use `tsuzuki sync link <series> --mal-id <id>` as a manual override.
 
 **Two-way, non-destructive merge.** A push-only sync is harmful — if the user watched ahead elsewhere and updated MAL directly, a naive push would overwrite MAL *backward*. The rule:
 
 > **Take the higher episode number, in either direction. Never overwrite down.**
 
 - MAL ahead of local → local awareness updates to match. No timestamp/position is implied for episodes Tsuzuki never observed.
-- Local ahead of MAL → push via `PATCH /v2/anime/{id}/my_list_status`, field `num_episodes_watched`.
+- Local ahead of MAL → push via `PATCH /v2/anime/{id}/my_list_status`. **Request-body field is `num_watched_episodes`** — MAL's API is asymmetric here: reading a list/anime response reports the count as `num_episodes_watched` (inside `my_list_status`), but the update endpoint's own request body expects `num_watched_episodes` (words swapped). Verified against Taiga's (erengy/taiga) own real request-building code and the unofficial MAL API specification, which explicitly documents the two field names as different. Easy to get wrong silently: sending `num_episodes_watched` in the PATCH body wouldn't error, MAL would just ignore the unrecognized field and the episode count would silently never update.
 - Equal → no-op.
 
 The pushed number uses Anitomy-parsed episode identity when available (§5), ordinal position otherwise — keeping sync accurate for series with numbering gaps.
@@ -341,7 +341,7 @@ A single flat TOML file — not sharded per-series (mpv shards because it tracks
 | `tsuzuki drop <series> [--root <root>]` | Reset progress; series reappears in `start` as if new (labeled "Rewatch?" either way). Same no-record-to-act-on error as `pause`. |
 | `tsuzuki exclude [path]` | Exclude a file or directory from ordering. Bare invocation surfaces Anitomy-suggested candidates for confirmation. |
 | `tsuzuki sync login` | One-time MAL OAuth authorization. |
-| `tsuzuki sync link <series>` | Manually resolve a series-to-MAL-ID mapping when exact-title matching fails. |
+| `tsuzuki sync link <series> --mal-id <id> [--root <root>]` | Manually resolve a series-to-MAL-ID mapping when exact-title matching fails. The given id is verified against the user's own MAL list before being saved. |
 | `tsuzuki sync` | Run the two-way, non-destructive sync against MAL. |
 | `tsuzuki config get/set/list/edit` | Read or write config values, or open the config file directly. |
 | `tsuzuki doctor [--fix] [--forget-orphans]` | Environment health checks — mpv-launch resolvability (native/Flatpak/configured override), the mpv.conf config flag, watch_later reachability (including a configured `watch_later_dir` override that doesn't resolve), Flatpak permissions, the tsuzuki.lua companion script's install/version status, its log directory's reachability, tracked-root validity, and orphaned per-series `state.toml` records (a series deleted/moved/renamed out from under a still-tracked root). MAL auth status is excluded — Phase 8 doesn't exist yet. Each check reports OK/WARN/FAIL; exits non-zero only if at least one FAIL is present. `--fix` applies every currently-safe, non-destructive fix (installing/updating tsuzuki.lua) — never edits mpv.conf. `--forget-orphans` (requires `--fix`) permanently clears every currently-confirmed orphaned record in one pass, printing exactly what it deletes first; there is no separate, per-series, or standalone cleanup command. |

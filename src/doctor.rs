@@ -1174,6 +1174,7 @@ mod tests {
             position_seconds: 100.0,
             episode_number: Some(1),
             updated_at: 1,
+            mal_episode_awareness: None,
         }
     }
 
@@ -1187,6 +1188,8 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         let state = State {
             series: vec![orphan_record(&root, "Monster")],
+
+            mal_links: Vec::new(),
         };
 
         let orphans = find_orphans(
@@ -1209,6 +1212,8 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         let state = State {
             series: vec![orphan_record(&root, "Monster")],
+
+            mal_links: Vec::new(),
         };
 
         let orphans = find_orphans(
@@ -1232,6 +1237,8 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         let state = State {
             series: vec![orphan_record(&root, "Monster")],
+
+            mal_links: Vec::new(),
         };
 
         // Caller passes an EMPTY valid_roots list, since check_tracked_roots
@@ -1275,6 +1282,8 @@ mod tests {
                 orphan_record(Path::new("~/Anime"), "Monster"),
                 orphan_record(Path::new("~/Anime"), "One Piece"),
             ],
+
+            mal_links: Vec::new(),
         };
         let orphans = vec![Orphan {
             root: "~/Anime".to_string(),
