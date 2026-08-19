@@ -385,7 +385,23 @@ unintentional rather than as a real design decision.
 
 ---
 
-## 11. Build Plan
+## 11. CLI UX 
+
+**Signal over noise**: only show information that helps the user understand the result or take action.
+
+**Actionable output**: whenever user intervention is needed, show the exact command they can run (minimize noise as much as possible).
+
+**Clear status at a glance**: use concise, consistent success/warning states (✓, ⚠) so the result is scannable.
+
+**Concise success paths**: successful operations should take up as little space as possible.
+
+**No implementation details**: e.g.: similarity percentages, “closest matches,” and internal matching behavior aren't useful unless they affect the user's decision.
+
+**Consistent structure**: each result follows a predictable pattern: status → result → action if needed.
+
+**Useful summary**: end with a compact aggregate result rather than making the user count individual outcomes.
+
+## 12. Build Plan
 
 **Phase 0 — Scaffolding & data model**
 Cargo project, clap CLI skeleton with all subcommands stubbed (even if they just print "not implemented"), the two config/state files: config.toml (read/write, defaults, XDG path) and state.toml (atomic write via temp-file-then-rename). This is boring but everything else hangs off it, and it's small enough to verify in one pass.
@@ -414,11 +430,11 @@ Full environment checks (mpv config flag, watch_later reachability, Flatpak perm
 **Phase 8 — MAL sync**
 OAuth login, exact-match linking against the user's own list, manual sync link, the two-way non-destructive merge. This is the highest-risk phase (network, external API, auth) — isolating it means a flaky OAuth flow can't destabilize everything you already validated.
 
-**Phase 9 — Distribution & end-to-end tests**
-cargo-dist config, install script, assert_cmd end-to-end tests against the compiled binary, PyPI wheel via maturin. Genuinely last — there's no point packaging a binary that's still changing shape.
+**Phase 9 — Polishment, Distribution, end-to-end tests**
+CLI UX Polish, cargo-dist config, install script, assert_cmd end-to-end tests against the compiled binary, PyPI wheel via maturin. Genuinely last — there's no point packaging a binary that's still changing shape.
 
 ---
 
-## 12. Open Questions
+## 13. Open Questions
 
 *(none currently — resolved as they came up)*
