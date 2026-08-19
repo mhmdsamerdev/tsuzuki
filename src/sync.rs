@@ -21,20 +21,27 @@
 //!
 //! ## The non-destructive invariant (CLAUDE.md §2)
 //!
-//! "Local best-known episode number" for the merge comparison is
-//! `max(episode_number, mal_episode_awareness)`
-//! ([`local_effective_episode`]), not the raw, local-file-derived
-//! `episode_number` alone. This matters concretely: `reconcile.rs`
-//! unconditionally overwrites `episode_number` from local file position on
-//! every reconcile pass, so a MAL-driven pull has to be remembered
-//! somewhere `reconcile.rs` never touches (`SeriesRecord::mal_episode_awareness`)
-//! — and that remembered number has to keep counting as "local" in every
-//! future comparison, or a merge could re-read a stale, lower local number
-//! and silently push it back down over a higher number MAL (or a previous
-//! pull) already established. [`decide_merge`] itself is a pure three-way
-//! comparison with no special cases — the safety comes entirely from never
-//! feeding it a number that regresses what's already been confirmed on
-//! either side.
+//! "Local best-known episode number" for the merge comparison
+//! ([`local_effective_episode`]) is **not** the raw, `reconcile.rs`-owned
+//! `episode_number` alone, for two separate reasons:
+//!
+//! - `episode_number` is a cursor (the episode currently being watched, or
+//!   just-advanced-to at position 0), not a watched count — MAL's field
+//!   means "episodes already watched," so the number fed into the merge is
+//!   `episode_number - 1` in the ordinary case (see
+//!   [`local_effective_episode`]'s own doc comment for the one narrow
+//!   exception, a `Dropped` record left sitting on a just-completed finale).
+//! - `reconcile.rs` unconditionally overwrites `episode_number` from local
+//!   file position on every reconcile pass, so a MAL-driven pull has to be
+//!   remembered somewhere `reconcile.rs` never touches
+//!   (`SeriesRecord::mal_episode_awareness`) — and that remembered number
+//!   has to keep counting as "local" in every future comparison, or a merge
+//!   could re-read a stale, lower local number and silently push it back
+//!   down over a higher number MAL (or a previous pull) already established.
+//!
+//! [`decide_merge`] itself is a pure three-way comparison with no special
+//! cases — the safety comes entirely from never feeding it a number that
+//! regresses what's already been confirmed on either side.
 
 use std::fmt;
 use std::time::Duration;
@@ -42,7 +49,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::mal::{HttpResponse, MalHttpClient};
-use crate::state::{MalLink, SeriesRecord, State, now_unix};
+use crate::state::{MalLink, SeriesRecord, State, Status, now_unix};
 
 pub const API_BASE: &str = "https://api.myanimelist.net/v2";
 
@@ -438,13 +445,38 @@ pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
 }
 
 /// The local side of a merge comparison — see this module's own doc comment
-/// for why this is `max(episode_number, mal_episode_awareness)`, not the
-/// raw, `reconcile.rs`-owned `episode_number` alone.
+/// for why this folds in `mal_episode_awareness`, not just the raw,
+/// `reconcile.rs`-owned `episode_number` alone.
+///
+/// **`episode_number` is a cursor, not a watched count.** It names the
+/// episode a record is currently sitting on — the one being watched (a real
+/// mid-episode position), or the one just advanced to at position 0 after
+/// the previous episode completed (CLAUDE.md's "When the CURRENT tracked
+/// episode itself completes") — not an episode confirmed finished. MAL's own
+/// field means "episodes already watched," so pushing the raw cursor number
+/// overstates progress by exactly one: the cursor's own episode hasn't been
+/// counted as watched yet. The fix is the episode immediately before it,
+/// `episode_number.saturating_sub(1)`.
+///
+/// **One exception:** `apply_completion_advance` (`reconcile.rs`) has no
+/// next episode to advance a completed series to, so it leaves the cursor
+/// sitting on the finale it just confirmed complete and transitions straight
+/// to `Dropped` — the only case where the cursor's own episode genuinely
+/// *is* the watched count, not one short of it. That state is identifiable
+/// without guessing: `Dropped` with a real (nonzero) `position_seconds`, the
+/// same nonzero near-the-end position `classify()` used to confirm
+/// completion. A `Dropped` record with `position_seconds == 0.0` never
+/// touched its cursor episode at all (advanced to a fresh next episode by
+/// completion, then dropped before opening it — or dropped right at the
+/// index-0 baseline) and still gets the ordinary `-1`.
 pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
-    record
-        .episode_number
-        .unwrap_or(0)
-        .max(record.mal_episode_awareness.unwrap_or(0))
+    let cursor = record.episode_number.unwrap_or(0);
+    let watched = if record.status == Status::Dropped && record.position_seconds > 0.0 {
+        cursor
+    } else {
+        cursor.saturating_sub(1)
+    };
+    watched.max(record.mal_episode_awareness.unwrap_or(0))
 }
 
 /// Runs the decision and, only for `Push`, the actual PATCH — a merge that
@@ -710,7 +742,6 @@ pub fn run_sync(
 mod tests {
     use super::*;
     use crate::mal::HttpError;
-    use crate::state::Status;
     use std::cell::RefCell;
 
     // --- Title normalization ---
@@ -885,13 +916,15 @@ mod tests {
     }
 
     #[test]
-    fn local_effective_uses_episode_number_when_no_prior_mal_awareness() {
+    fn local_effective_uses_episode_number_minus_one_when_no_prior_mal_awareness() {
+        // base_record is InProgress, cursor = episode 9 — that episode
+        // itself is still being watched, so only 8 count as watched.
         let record = base_record();
-        assert_eq!(local_effective_episode(&record), 9);
+        assert_eq!(local_effective_episode(&record), 8);
     }
 
     #[test]
-    fn local_effective_uses_the_higher_of_episode_number_and_mal_awareness() {
+    fn local_effective_uses_the_higher_of_episode_number_minus_one_and_mal_awareness() {
         let mut record = base_record();
         record.mal_episode_awareness = Some(20);
         assert_eq!(
@@ -899,6 +932,37 @@ mod tests {
             20,
             "a prior MAL-driven pull must not be forgotten just because the local file position is lower"
         );
+    }
+
+    #[test]
+    fn local_effective_subtracts_one_for_a_paused_cursor_too() {
+        let mut record = base_record();
+        record.status = Status::Paused;
+        assert_eq!(local_effective_episode(&record), 8);
+    }
+
+    #[test]
+    fn local_effective_uses_cursor_as_is_when_dropped_on_a_completed_finale() {
+        // The apply_completion_advance terminal case: no next episode, so
+        // reconcile leaves the cursor sitting on the finale it just
+        // confirmed complete (a real, nonzero position) and transitions
+        // straight to Dropped. That finale genuinely was watched in full.
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.position_seconds = 1380.0; // near-the-end position, not 0
+        assert_eq!(local_effective_episode(&record), 9);
+    }
+
+    #[test]
+    fn local_effective_still_subtracts_one_when_dropped_at_a_fresh_untouched_cursor() {
+        // Dropped right after an auto-advance to the next (unwatched)
+        // episode, or dropped before ever really opening the cursor episode
+        // — position_seconds == 0.0 means the cursor episode was never
+        // touched, so it still doesn't count as watched.
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.position_seconds = 0.0;
+        assert_eq!(local_effective_episode(&record), 8);
     }
 
     // --- THE non-destructive invariant test (verification item 5) ---
@@ -1118,7 +1182,7 @@ mod tests {
         );
 
         let mut record = base_record();
-        record.episode_number = Some(9); // local ahead of MAL's 3
+        record.episode_number = Some(9); // cursor 9, still in progress -> watched 8, ahead of MAL's 3
         let mut state = State {
             series: vec![record],
             mal_links: Vec::new(),
@@ -1136,7 +1200,7 @@ mod tests {
             outcomes[0].kind,
             OutcomeKind::Merged {
                 mal_id: 7,
-                action: MergeAction::Push(9)
+                action: MergeAction::Push(8)
             }
         );
         assert_eq!(
@@ -1282,7 +1346,7 @@ mod tests {
         );
 
         let mut record = base_record();
-        record.episode_number = Some(9);
+        record.episode_number = Some(10); // cursor 10, still in progress -> watched 9
         record.mal_episode_awareness = Some(3); // irrelevant: max(9,3) == 9 == mal
         let before = record.clone();
         let mut state = State {

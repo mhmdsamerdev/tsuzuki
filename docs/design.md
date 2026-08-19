@@ -244,6 +244,8 @@ Sync is optional — nothing about core tracking or resuming depends on MAL bein
 
 The pushed number uses Anitomy-parsed episode identity when available (§5), ordinal position otherwise — keeping sync accurate for series with numbering gaps.
 
+**The pushed/compared number is the last *watched* episode, not the tracked cursor.** A `state.toml` record's episode number names whatever episode Tsuzuki is currently sitting on — mid-watch, or just-advanced-to at position 0 — not one confirmed finished. MAL's field means episodes already watched, so the number fed into the merge is the cursor's episode number minus one, with one narrow exception documented in `sync::local_effective_episode`'s own doc comment (CLAUDE.md's "MAL push number is the last watched episode, not the tracked cursor").
+
 **This directly answers "forced to click through episodes."** If MAL says episode 12 but local history only knows up to 9, Tsuzuki doesn't make the user play through 10–11 to catch up — it trusts the higher number and treats 13 as next. If the user wants to actually rewatch 10–11, they open those files directly in mpv, already a fully legitimate way to interact with the system.
 
 **Known unsolved edge case:** local and MAL numbering can still diverge beyond what Anitomy catches — split-cour renumbering, dub/sub differences. The local-to-MAL correspondence is fixed at link time; further drift is a manual re-link.

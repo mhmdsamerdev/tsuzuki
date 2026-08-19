@@ -572,10 +572,13 @@ reasoning):
   `episode_number`, never reused** — `reconcile.rs` unconditionally
   overwrites `episode_number` from local file identity on every pass, so
   a MAL-driven number stored there would vanish next command. The merge
-  comparison's "local best-known" is `max(episode_number,
-  mal_episode_awareness)` (`sync::local_effective_episode`) — without
-  folding a prior pull back in, a later run could re-read a stale lower
-  local number and push it back down over a number MAL already has.
+  comparison's "local best-known" (`sync::local_effective_episode`) takes
+  the higher of `mal_episode_awareness` and the *watched* count derived
+  from `episode_number` (see "MAL push number is the last watched
+  episode, not the tracked cursor" below — it's not the raw
+  `episode_number` itself) — without folding a prior pull back in, a
+  later run could re-read a stale lower local number and push it back
+  down over a number MAL already has.
 - **MAL's `my_list_status` field name is asymmetric, a real trap**: a
   list/anime response reports `num_episodes_watched`; the `PATCH
   /v2/anime/{id}/my_list_status` request body field is
@@ -584,6 +587,42 @@ reasoning):
   ignores an unrecognized field rather than erroring, so the episode
   count would just never update. Re-verify this exact swap first if
   `push_episode_count` is ever touched.
+
+### MAL push number is the last watched episode, not the tracked cursor
+Found in Phase 9 dogfooding: `SeriesRecord.episode_number` is a *cursor* —
+the episode currently being watched (a real mid-episode position), or the
+one just advanced to at position 0 after the previous episode completed
+(see "When the CURRENT tracked episode itself completes" above) — never
+a confirmed-finished count. MAL's own field means "episodes already
+watched," so pushing the raw cursor number overstated progress by one:
+mid-episode 9 was reported to MAL as 9 watched, not 8.
+`sync::local_effective_episode` now feeds the merge
+`episode_number.saturating_sub(1)` in the ordinary case, before folding
+in `mal_episode_awareness` as before.
+
+**One narrow, evidence-based exception, not a special case bolted on:**
+`apply_completion_advance` (`reconcile.rs`) has no next episode to
+advance a just-completed series to, so it leaves the cursor sitting on
+the finale it just confirmed complete and transitions straight to
+`Dropped` — the one state where the cursor's own episode genuinely *is*
+the watched count already, not one short of it. This is identifiable
+without guessing, from data already on the record: `Dropped` with a real
+(nonzero) `position_seconds` is exactly that path's own signature — the
+same nonzero near-the-end position `classify()` used to confirm
+completion in the first place. A `Dropped` record with `position_seconds
+== 0.0` never touched its cursor episode at all (auto-advanced to a
+fresh next episode, then dropped before opening it — or dropped at the
+index-0 baseline) and still gets the ordinary `-1`. `Paused` gets the
+ordinary `-1` unconditionally — pausing never implies the paused-on
+episode finished.
+
+This still doesn't perfectly resolve every case (e.g. a manual
+`tsuzuki drop` moments after quitting meaningfully-but-not-fully into an
+episode still reads as "watched" under the `Dropped`-with-nonzero-position
+rule) — an accepted, narrow edge case in the same spirit as §7's already-
+documented local/MAL numbering-drift gap in `docs/design.md`, not
+something worth a new persisted "was this episode actually completed"
+field for.
 
 ## 4. Dev environment
 

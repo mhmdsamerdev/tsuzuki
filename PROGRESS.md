@@ -6,13 +6,15 @@ narrative, bug-hunt traces, and dogfood step-by-steps are not kept here
 once a fix lands; git history has that story, and any decision worth
 protecting from regression has already been folded into `CLAUDE.md`.
 
-**Current phase:** Phase 8b (MAL linking + two-way merge) is implemented
-and unit-tested, but **not yet dogfooded against a real MAL account**.
-Paused for the user to run a real `tsuzuki sync` / `sync link`, same
-stop-and-confirm precedent as the Phase 5 checkpoint, before Phase 9
-(distribution) starts.
+**Current phase:** Phase 9 dogfooding is underway. A real bug surfaced:
+`sync` was pushing the tracked cursor's raw episode number to MAL instead
+of the last actually-watched episode (off by one in the common case) —
+fixed in `sync::local_effective_episode`; see CLAUDE.md's "MAL push
+number is the last watched episode, not the tracked cursor" for the full
+reasoning, including the one narrow exception for a `Dropped` record left
+on a just-completed finale.
 
-**Test suite:** 381 passing + 4 `#[ignore]`d real-API tests (excluded
+**Test suite:** 384 passing + 4 `#[ignore]`d real-API tests (excluded
 from the default run). Both clippy gates (`-p tsuzuki --no-deps
 --all-targets -D warnings`) and `cargo fmt -p tsuzuki --check` clean.
 `vendor/anitomy` untouched throughout.
