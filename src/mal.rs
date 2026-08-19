@@ -53,7 +53,25 @@ pub const TOKEN_URL: &str = "https://myanimelist.net/v1/oauth2/token";
 /// override for anyone running their own fork against their own
 /// registration (`resolve_client_id`, below) — this default only removes
 /// the *requirement* to do that before `sync login` works at all.
-pub(crate) const DEFAULT_CLIENT_ID: &str = "ef3b1252d151e7a0ef248753dab34551";
+///
+/// **This is the second value used here, not the first — the swap matters.**
+/// The original app was registered under MAL's "web" app type, which turned
+/// out to issue a real `client_secret` MAL's token endpoint then requires;
+/// every real token exchange failed with `invalid_client` regardless of
+/// auth scheme tried (body param, HTTP Basic with an empty password, an
+/// explicit empty `client_secret=`), confirmed live via a direct
+/// `curl … -d client_id=… -d code=fake` request that failed at client
+/// authentication itself, before the (deliberately fake) code was ever
+/// evaluated. The app was recreated and this value verified the same way —
+/// the same fake-code `curl` request against *this* client_id fails one
+/// step later, at `"Cannot decrypt the authorization code"` (`invalid_request`,
+/// not `invalid_client`), proving client authentication succeeds without any
+/// secret. If this value is ever rotated again, verify it the same
+/// zero-browser, zero-account-risk way before trusting it: a fake-code POST
+/// to `TOKEN_URL` must fail with `invalid_request`/`invalid_grant`, never
+/// `invalid_client` — `invalid_client` means the new registration also
+/// issued a secret this flow doesn't send.
+pub(crate) const DEFAULT_CLIENT_ID: &str = "1c0e2546c3b0f9e8cfd215ba17fd0b15";
 
 /// Resolves the `client_id` to actually use: the user's own `[mal]
 /// client_id` override when set, `DEFAULT_CLIENT_ID` otherwise. The single
@@ -427,11 +445,34 @@ pub trait MalHttpClient {
 /// async executor pulled in for one on-demand code path would work directly
 /// against the reason this project is Rust). This is the only place in the
 /// whole binary that ever makes a real network call.
+///
+/// **Must use an explicit `Agent` with `.tls_connector(...)` set, never the
+/// bare `ureq::post(...)`/`ureq::get(...)` shortcut functions.** Found the
+/// hard way, against the real MAL API: `ureq`'s `native-tls` feature is
+/// never picked up automatically by those shortcuts — per `ureq`'s own
+/// source (`lib.rs`'s `default_tls_config`), only the `tls` (rustls)
+/// feature wires a default TLS backend into them. With `default-features =
+/// false` and only `native-tls` enabled (Cargo.toml, chosen to use the
+/// pkg-config+openssl `shell.nix` already provisions), the shortcuts had
+/// *no* TLS backend at all — every request failed with "Unknown Scheme:
+/// cannot make HTTPS request because no TLS backend is configured". No unit
+/// test in this module caught it: every one of them goes through the
+/// injectable `MalHttpClient` trait's fake, never this real impl. Building
+/// the connector fresh per call (rather than caching it) is deliberate
+/// simplicity, not an oversight — this is an on-demand, low-frequency path
+/// (a login once, a refresh roughly hourly at most), so the tiny, one-time
+/// TLS-connector setup cost here is a complete non-issue.
 pub struct UreqClient;
 
 impl MalHttpClient for UreqClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
-        match ureq::post(url).send_form(params) {
+        let connector = native_tls::TlsConnector::new()
+            .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
+        let agent = ureq::AgentBuilder::new()
+            .tls_connector(std::sync::Arc::new(connector))
+            .build();
+
+        match agent.post(url).send_form(params) {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.into_string().unwrap_or_default();
@@ -705,7 +746,7 @@ mod tests {
         );
         println!("real, zero-config default authorize URL:\n{url}");
 
-        assert!(url.contains("client_id=ef3b1252d151e7a0ef248753dab34551"));
+        assert!(url.contains("client_id=1c0e2546c3b0f9e8cfd215ba17fd0b15"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8734%2Fcallback"));
     }
 
@@ -1066,5 +1107,104 @@ mod tests {
         assert!(!debug.contains("super-secret-access-token"));
         assert!(!debug.contains("super-secret-refresh-token"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    // --- Real network smoke test: UreqClient's TLS backend is actually wired up ---
+
+    /// Regression test for a real bug hit dogfooding `sync login` against
+    /// the live MAL API: `ureq`'s bare `ureq::post(...)` shortcut never
+    /// picks up the `native-tls` feature (only `AgentBuilder::tls_connector`
+    /// does — see `UreqClient`'s doc comment), so every real request failed
+    /// with a transport-level "Unknown Scheme: no TLS backend configured"
+    /// error before ever reaching MAL. No other test in this module could
+    /// catch this class of bug — everything else goes through the
+    /// injectable `MalHttpClient` trait's fake, never this real impl.
+    ///
+    /// Deliberately harmless: garbage credentials, no browser, no login
+    /// attempt, no real account action — just proves the TLS handshake
+    /// completes and a real HTTP response comes back from MAL (almost
+    /// certainly a 4xx rejection of the bogus code/verifier), which is only
+    /// possible if the TLS backend actually works. `#[ignore]`d since it's
+    /// still a real network call — run with:
+    /// `cargo test real_ureq_client_actually_reaches_mal_over_https --
+    /// -- --ignored --nocapture`
+    #[test]
+    #[ignore = "makes a real (but harmless — garbage credentials, no login) network call to MyAnimeList"]
+    fn real_ureq_client_actually_reaches_mal_over_https() {
+        let client = UreqClient;
+        let result = client.post_form(
+            TOKEN_URL,
+            &[
+                ("client_id", "not-a-real-client-id"),
+                ("grant_type", "authorization_code"),
+                ("code", "not-a-real-code"),
+                ("code_verifier", "not-a-real-verifier"),
+                ("redirect_uri", &redirect_uri(8734)),
+            ],
+        );
+        match result {
+            Ok(resp) => {
+                println!("real MAL response: HTTP {} — {}", resp.status, resp.body);
+                assert!(
+                    resp.status >= 400,
+                    "expected MAL to reject garbage credentials, got HTTP {}",
+                    resp.status
+                );
+            }
+            Err(e) => panic!(
+                "expected a real HTTP response (even a rejection) from MAL, got a \
+                 transport-level failure instead — the TLS backend may be broken again: {e}"
+            ),
+        }
+    }
+
+    /// Regression test for the real, live-diagnosed root cause of a second
+    /// failure hit dogfooding `sync login`: the *original* `DEFAULT_CLIENT_ID`
+    /// was registered as a MAL "web" app, which turned out to carry a real
+    /// `client_secret` that MAL's token endpoint requires — every real token
+    /// exchange failed with `invalid_client` ("Client authentication
+    /// failed"), regardless of auth scheme tried, confirmed live via `curl`
+    /// against the real API with a deliberately fake code. This test encodes
+    /// that exact zero-account-risk diagnostic permanently: POST a fake
+    /// code/verifier to the real token endpoint using `DEFAULT_CLIENT_ID`.
+    /// Client authentication happens *before* the code is evaluated, so a
+    /// fake code still proves the point either way — if authentication
+    /// succeeds, MAL gets as far as trying to decrypt the fake code and
+    /// fails there instead (`invalid_request`/`invalid_grant`), never
+    /// `invalid_client`. Seeing `invalid_client` here means whatever value
+    /// `DEFAULT_CLIENT_ID` currently holds needs a `client_secret` this
+    /// PKCE-only flow deliberately doesn't send — see its own doc comment
+    /// for how to re-diagnose and replace it the same way.
+    #[test]
+    #[ignore = "makes a real (but harmless — fake code, no login) network call to MyAnimeList"]
+    fn default_client_id_authenticates_without_a_client_secret() {
+        let client = UreqClient;
+        let result = client
+            .post_form(
+                TOKEN_URL,
+                &[
+                    ("client_id", DEFAULT_CLIENT_ID),
+                    ("grant_type", "authorization_code"),
+                    ("code", "deliberately-fake-code-value"),
+                    (
+                        "code_verifier",
+                        "deliberately-fake-verifier-value-1234567890123",
+                    ),
+                    ("redirect_uri", &redirect_uri(8734)),
+                ],
+            )
+            .expect("expected a real HTTP response from MAL, not a transport failure");
+
+        println!(
+            "real MAL response: HTTP {} — {}",
+            result.status, result.body
+        );
+        assert!(
+            !result.body.contains("invalid_client"),
+            "DEFAULT_CLIENT_ID was rejected at client authentication (invalid_client) — it \
+             likely has a client_secret assigned that this PKCE-only flow doesn't send; see \
+             DEFAULT_CLIENT_ID's own doc comment for how to re-diagnose and fix this. Got: {}",
+            result.body
+        );
     }
 }

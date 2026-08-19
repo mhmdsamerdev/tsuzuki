@@ -4,9 +4,11 @@ Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
 **Current phase:** Phase 8a — MAL OAuth login, token storage/refresh, and
-`doctor`'s MAL-auth check (implemented, verified — paused before Phase 8b
-(linking/matching/two-way merge), per this task's own explicit "do not
-proceed automatically" instruction)
+`doctor`'s MAL-auth check (implemented, and now fully verified against the
+live MAL API — a real `sync login` run by the user succeeded end to end,
+closing every "unverified against the real API" caveat this feature
+carried. Paused before Phase 8b (linking/matching/two-way merge), per this
+task's own explicit "do not proceed automatically" instruction)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -1342,6 +1344,110 @@ proceed automatically" instruction)
     credential — not a per-user registration requirement") stating the
     reversal and its reasoning explicitly, specifically so a future session
     doesn't "fix" this back the other way without the context.
+
+- Phase 8a-fix — a real, live-dogfooded bug: the actual `sync login` flow
+  (redirect → MAL login → approve → redirected back correctly) failed at
+  the token-exchange step with `error: network error contacting
+  MyAnimeList: ... Unknown Scheme: cannot make HTTPS request because no TLS
+  backend is configured`. Root cause, confirmed by reading `ureq` 2.12.1's
+  own source (`lib.rs`'s `default_tls_config`): the bare shortcut functions
+  (`ureq::post(...)`, what `UreqClient::post_form` used) only pick up a
+  default TLS backend when the `tls` (rustls) feature is enabled —
+  `native-tls` (Cargo.toml's actual choice, `default-features = false`)
+  is **never** auto-wired into them, only into an explicitly-built
+  `AgentBuilder::tls_connector(...)`. Every one of Phase 8a's own unit
+  tests went through the injectable `MalHttpClient` trait's fake, so none
+  of them ever exercised `UreqClient` against a real HTTPS URL — this class
+  of bug was structurally invisible to that test suite, exactly the "no
+  real, registered client_id to test against" gap flagged explicitly in
+  both prior reports.
+  - **Fix** (`src/mal.rs`'s `UreqClient::post_form`): builds a
+    `native_tls::TlsConnector` and an explicit `ureq::AgentBuilder`, calling
+    `.tls_connector(...)` before `.build()`, then uses `agent.post(...)`
+    instead of the bare `ureq::post(...)`. Added `native-tls = "0.2"` as a
+    direct (not just transitive-via-`ureq`) dependency in `Cargo.toml`,
+    since constructing the connector directly requires it. Built fresh per
+    call, deliberately — this is an on-demand, low-frequency path (login
+    once, refresh roughly hourly), so there's no real cost to not caching
+    it.
+  - New permanent regression test,
+    `mal::tests::real_ureq_client_actually_reaches_mal_over_https`
+    (`#[ignore]`d — real network call, but harmless: garbage credentials,
+    no browser, no login/account action). Actually run this session against
+    the live MAL API and confirmed the fix: a real `HTTP 401
+    {"error":"invalid_client",...}` response now comes back from MAL
+    (proving the TLS handshake completes and MAL genuinely responds) where
+    it previously failed transport-level before ever reaching the network.
+  - 348 passing / 2 ignored (350 total, up from 349 — the 1 new regression
+    test above; both it and the pre-existing real-login-flow test stay
+    `#[ignore]`d, so the default `cargo test` run is still 348 passing / 0
+    real network calls, unchanged). Both clippy and fmt gates clean.
+    Verified against both the `dev` and
+    `--release` profiles — the bug the user hit was specifically in a
+    `--release` binary, so a dev-only rebuild wasn't sufficient confirmation
+    on its own.
+  - **Verified end to end** in Phase 8a-fix2, below — the TLS bug this
+    entry fixed was a real blocker, but not the last one.
+
+- Phase 8a-fix2 — a second real bug, found live with the user's own MAL
+  account (redirected correctly, approved in-browser, then failed at token
+  exchange): `error: MyAnimeList rejected the request: HTTP 401:
+  {"error":"invalid_client","message":"Client authentication failed"}`, for
+  two different accounts. Root cause, confirmed live and safely (no browser,
+  no account risk): the original `DEFAULT_CLIENT_ID`
+  (`ef3b1252d151e7a0ef248753dab34551`) had been registered as a MAL "web"
+  app, which the user confirmed had a real `client_secret` generated for it.
+  MAL's token endpoint requires that secret for a "web"-type app even though
+  its PKCE `code_challenge`/`code_verifier` are also present and the
+  authorize step succeeds without it — contradicting the Taiga-precedent
+  assumption Phase 8a-correction was built on, which held for a
+  genuinely-secretless app type but not this one.
+  - **Diagnosis method, safe and zero-account-risk, worth keeping as
+    standard practice for verifying any future client_id swap:** POST a
+    deliberately fake `code`/`code_verifier` to the real
+    `https://myanimelist.net/v1/oauth2/token` using the real `client_id`.
+    Client authentication happens *before* MAL ever evaluates the code, so
+    the response distinguishes the two failure modes cleanly:
+    `{"error":"invalid_client",...}` means the client itself was rejected
+    (secret required and missing); `{"error":"invalid_request",...,"hint":
+    "Cannot decrypt the authorization code"}` means client authentication
+    succeeded and only the (deliberately fake) code failed, exactly as
+    expected. Tried three auth shapes against the old client_id — body
+    `client_id` (what Tsuzuki sends), HTTP Basic with an empty password, and
+    an explicit empty `client_secret=` — all three failed identically with
+    `invalid_client`, ruling out "wrong auth scheme" and confirming it's the
+    app's own registration, not Tsuzuki's request shape.
+  - User recreated the app and provided a new client_id,
+    `1c0e2546c3b0f9e8cfd215ba17fd0b15` (same registered redirect URL,
+    `http://127.0.0.1:8734/callback`). Verified the same way before
+    committing it: the identical fake-code `curl` request now returns
+    `invalid_request`/"Cannot decrypt the authorization code" — client
+    authentication succeeds with zero secret sent, confirming this
+    registration is genuinely PKCE-only.
+  - **Fix**: swapped `DEFAULT_CLIENT_ID` in `src/mal.rs` to the new value;
+    updated the one test asserting on the literal client_id in a generated
+    URL. `DEFAULT_CLIENT_ID`'s own doc comment now records this history
+    directly (CLAUDE.md §7 discipline — corrected in place, not appended as
+    a separate note) and states the verification method to use if this
+    value is ever rotated again.
+  - New permanent regression test,
+    `mal::tests::default_client_id_authenticates_without_a_client_secret`
+    (`#[ignore]`d, real but harmless — fake code, no login) — encodes this
+    exact diagnostic permanently: fails loudly with a clear message
+    pointing back at `DEFAULT_CLIENT_ID`'s doc comment if a future
+    client_id swap reintroduces a secret requirement. Run and confirmed
+    passing against the real API this session.
+  - **Full end-to-end confirmation, immediately after this fix landed:** the
+    user re-ran the real `tsuzuki sync login` flow against the rebuilt
+    release binary — browser redirect, MAL login, approval, callback,
+    token exchange, `mal_token.toml` written — and confirmed it succeeded.
+    This is the first time the *complete* real login path, not just client
+    authentication in isolation, has been verified against the live API.
+    Closes every "unverified against the real MAL API" caveat this feature
+    has carried since Phase 8a's original report: the auth path is real and
+    working, `DEFAULT_CLIENT_ID` needs no `client_secret`, and the built-in
+    default genuinely delivers on Phase 8a-correction's "zero-config login"
+    goal for a fresh install.
 
 **Next up:**
 - Phase 8b: exact-match linking against the user's own MAL list, the

@@ -1358,6 +1358,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "dirs",
+ "native-tls",
  "natord",
  "rand",
  "serde",
