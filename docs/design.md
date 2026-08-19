@@ -281,6 +281,7 @@ watch_later_dir = ""                 # empty = use OS-default candidate list
 
 [mal]
 client_id = ""
+redirect_port = 8734        # local OAuth-callback listener port used by `tsuzuki sync login`
 ```
 
 **`tsuzuki config` is a thin CLI layer over the same file** — same relationship git has to `.gitconfig`:

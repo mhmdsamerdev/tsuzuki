@@ -124,8 +124,9 @@ updated_at = 1
         "a series whose folder still exists must never be reported as orphaned, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("MAL auth status"),
-        "must leave a visible trace that MAL auth status is a future addition, got:\n{stdout}"
+        stdout.contains("mal-auth") && stdout.contains("not configured"),
+        "Phase 8a: an empty [mal] client_id must report the real mal-auth check as \
+         not-configured (WARN), not the old Phase-7 placeholder line, got:\n{stdout}"
     );
 
     if any_mpv_install_detected() {

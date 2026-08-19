@@ -122,11 +122,35 @@ pub struct Mpv {
     pub command_override: String,
 }
 
-/// `client_id`'s correct default is also `""` — same reasoning as `Mpv`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// `8734`, the local OAuth-callback listener's port (`tsuzuki sync login`,
+/// Phase 8a) — arbitrary but fixed, matching this project's "every tunable
+/// is genuinely configurable" rule for the case where the default happens to
+/// collide with something else already running on the user's machine.
+fn default_mal_redirect_port() -> u16 {
+    8734
+}
+
+/// `client_id`'s correct default is `""`, same reasoning as `Mpv`.
+/// `redirect_port` needs the same two-defaulting-layers treatment
+/// `Thresholds` uses — its correct default (`8734`) isn't `u16::default()`
+/// (`0`, which isn't even a valid listener port), so a bare
+/// `#[serde(default)]` would be silently wrong the same way it would for
+/// `resume_seconds`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mal {
     #[serde(default)]
     pub client_id: String,
+    #[serde(default = "default_mal_redirect_port")]
+    pub redirect_port: u16,
+}
+
+impl Default for Mal {
+    fn default() -> Self {
+        Mal {
+            client_id: String::new(),
+            redirect_port: default_mal_redirect_port(),
+        }
+    }
 }
 
 /// One `tsuzuki exclude`d file or directory (CLAUDE.md's "Exclusion
@@ -304,6 +328,7 @@ mod tests {
         assert_eq!(config.mpv.watch_later_dir, "");
         assert_eq!(config.mpv.command_override, "");
         assert_eq!(config.mal.client_id, "");
+        assert_eq!(config.mal.redirect_port, 8734);
         assert!(config.exclusions.is_empty());
     }
 
@@ -468,5 +493,39 @@ client_id = ""
 
         let config = read(&path).unwrap();
         assert_eq!(config.mpv.command_override, "");
+    }
+
+    #[test]
+    fn missing_redirect_port_key_defaults_to_8734_not_zero() {
+        // Same defaulting-layer bug class as `resume_seconds`/
+        // `completion_remaining_seconds`: a config.toml written before Phase
+        // 8a has no `redirect_port` key under `[mal]` at all — a bare
+        // `#[serde(default)]` would silently produce `0`, not a valid
+        // listener port.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[thresholds]
+resume_seconds = 120
+completion_remaining_seconds = 180
+auto_pause_days = 0
+
+[roots]
+paths = []
+video_extensions = ["mkv"]
+
+[mpv]
+watch_later_dir = ""
+
+[mal]
+client_id = ""
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert_eq!(config.mal.redirect_port, 8734);
     }
 }

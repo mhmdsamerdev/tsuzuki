@@ -3,10 +3,10 @@
 Status file, not a spec. Decisions and reasoning live in `CLAUDE.md` and
 `docs/design.md` — this just tracks where the build currently stands.
 
-**Current phase:** Phase 7 — `doctor` (implemented, verified — paused for
-user review before Phase 8 (MAL sync), per the same stop-and-confirm
-precedent as the Phase 5 dogfood checkpoint; this phase adds a new
-file-writing `--fix` path and a destructive `--forget-orphans` path)
+**Current phase:** Phase 8a — MAL OAuth login, token storage/refresh, and
+`doctor`'s MAL-auth check (implemented, verified — paused before Phase 8b
+(linking/matching/two-way merge), per this task's own explicit "do not
+proceed automatically" instruction)
 
 **Done:**
 - Phase 0 — Scaffolding & data model: Cargo binary crate (edition 2024),
@@ -1208,13 +1208,83 @@ file-writing `--fix` path and a destructive `--forget-orphans` path)
     unreadable: Permission denied (os error 13)" instead of "does not
     exist."
 
+- Phase 8a — MAL OAuth login, token storage/refresh, `doctor`'s MAL-auth
+  check (`src/mal.rs`, new; `src/doctor.rs`'s `check_mal_auth`; `src/main.rs`'s
+  `sync_login_command` and `doctor_command` wiring; `src/state.rs`'s `write`
+  refactored to share a new `atomic_write` helper; `[mal] redirect_port`
+  added to `config.rs`, default `8734`):
+  - `tsuzuki sync login`: PKCE (RFC 7636, `plain` method — MAL doesn't
+    support S256), a CSRF `state` value, a local `127.0.0.1`-only callback
+    listener (never `0.0.0.0`) that accepts exactly one *valid* callback
+    then shuts down, a 120s timeout with no hang, and code-for-token
+    exchange. The listener's CSRF guard is real, not just asserted: a
+    state-mismatched callback is rejected and listening continues; only a
+    matching `state` resolves it.
+  - Token storage: `~/.local/share/tsuzuki/mal_token.toml`, same XDG data
+    dir as `state.toml`, written atomically via the same shared
+    `state::atomic_write` helper (no second temp-file-then-rename path),
+    `0600` permissions on Unix.
+  - Automatic refresh: any check of token status looks at `expires_at` with
+    a 60s safety margin first and only refreshes (a real network call) when
+    actually needed — a valid, non-expiring token triggers zero network
+    calls, confirmed by a unit test using a client that errors if ever
+    invoked. A rejected refresh (dead `refresh_token`) is distinguished from
+    a transport-level failure (offline, DNS, ...) — the former is `doctor`'s
+    only path to FAIL on this check; the latter stays WARN, matching the
+    existing Flatpak-permissions check's own "connectivity noise never
+    fails the whole run" precedent.
+  - `doctor`'s 1i (MAL auth status) is real: `crate::mal::token_status`
+    resolves the real state (file read + conditional refresh), `doctor.rs`'s
+    `check_mal_auth` does the pure OK/WARN/FAIL mapping over it — same
+    "pure function over already-resolved inputs" shape every other check in
+    that module already follows. Never-configured/never-logged-in → WARN
+    (expected initial state, same category as "Flatpak mpv not detected").
+    Rejected refresh → FAIL (confirmed, actionable). Network error → WARN
+    (best-effort, never escalates on pure connectivity noise). No `--fix`
+    action for this check — `sync login` is the only remedy, same
+    diagnostic-only precedent as the Flatpak-permission check (1d).
+  - HTTP client: `ureq` (blocking-only, no async runtime/tokio — matters
+    directly against CLAUDE.md §5's "MAL calls must stay lazy/on-demand"),
+    `native-tls` feature so it actually uses the pkg-config+openssl
+    `shell.nix` already provisions, instead of pulling in rustls as a
+    second, unused TLS stack. Every function above the HTTP layer (PKCE,
+    URL building, the callback listener, token-status logic) goes through
+    the injectable `MalHttpClient` trait — real network access is isolated
+    to one `UreqClient` impl, never touched by the default test run.
+  - Security: no real/"known" client_id or client_secret anywhere in source,
+    comments, or tests (grepped, confirmed clean — see this task's own
+    report). `client_id` only ever comes from the user's own `config.toml`
+    (never committed). `mal_token.toml` lives outside the repo (XDG data
+    dir), never touched by version control. `TokenRecord` hand-writes its
+    own `Debug` impl to redact both token fields, so even an accidental
+    `{:?}` can't leak a real credential — verified by a unit test. No code
+    path prints or logs a raw token/code value; `doctor`/error output only
+    ever shows redacted state (configured/not-configured/expiry seconds) or
+    opaque error strings.
+  - Judgment call, flagged per this task's own instructions rather than
+    silently resolved: whether MAL's token endpoint genuinely requires no
+    `client_secret` for this PKCE flow is *unverified* — this session has no
+    real, registered `client_id` to test against. Implemented per
+    design.md/CLAUDE.md's stated assumption (a public/native-client PKCE
+    flow needs none) and left unconfirmed; the `#[ignore]`d integration test
+    (`tests/mal_login_integration.rs`) is exactly where this would surface
+    the first time someone runs it for real.
+  - 346 tests passing (up from 310 — 36 new: 30 in `src/mal.rs`, 6 in
+    `doctor.rs`'s new `check_mal_auth` suite), plus one `#[ignore]`d
+    real-API integration test (documented setup steps at the top of its own
+    file, genuinely never run this session — flagged explicitly, not
+    claimed as verified). Both clippy (`-p tsuzuki --no-deps --all-targets
+    -D warnings`) and fmt gates clean. `vendor/anitomy` untouched. One
+    existing test (`tests/doctor_integration.rs`'s orphan-detection test)
+    updated: it asserted on the old Phase-7 "MAL auth status: not checked"
+    placeholder line, now asserts on the real `mal-auth: ... not configured`
+    WARN output instead.
+
 **Next up:**
-- Phase 8 (MAL sync) is next: OAuth login, exact-match linking against the
-  user's own MAL list, the two-way non-destructive merge, pause/drop
-  mirroring. This is the highest-risk phase (network, external API, auth) —
-  per design.md §11, isolating it means a flaky OAuth flow can't destabilize
-  everything already validated. Also the point where 1i (MAL auth status)
-  finally gets a real `doctor` check instead of the placeholder note.
+- Phase 8b: exact-match linking against the user's own MAL list, the
+  two-way non-destructive episode-progress merge (never a status push —
+  see design.md §7's scope-boundary line). Builds directly on Phase 8a's
+  `MalHttpClient`/token-refresh plumbing.
 
 **Open questions blocking further work:**
 - cleared

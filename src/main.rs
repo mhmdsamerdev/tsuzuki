@@ -5,6 +5,7 @@ mod doctor;
 mod duration;
 mod exclude;
 mod launch;
+mod mal;
 mod mpv;
 mod overview;
 mod pause_drop;
@@ -101,14 +102,17 @@ fn dispatch(
             path: Some(path),
             root,
         } => exclude_command(&path, root.as_deref(), config, config_path),
-        Command::Sync { action } => {
-            match action {
-                None => stub("sync"),
-                Some(SyncCommand::Login) => stub("sync login"),
-                Some(SyncCommand::Link { .. }) => stub("sync link"),
+        Command::Sync { action } => match action {
+            None => {
+                stub("sync");
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
+            Some(SyncCommand::Login) => sync_login_command(config),
+            Some(SyncCommand::Link { .. }) => {
+                stub("sync link");
+                ExitCode::SUCCESS
+            }
+        },
         Command::Config { action } => {
             match action {
                 None => print_config_help(),
@@ -731,6 +735,90 @@ fn drop_command(
     }
 }
 
+// --- Phase 8a: MAL OAuth login ---
+
+/// `tsuzuki sync login` — design.md §7's one-time OAuth authorization,
+/// Authorization Code grant with PKCE (`code_challenge_method=plain`, MAL
+/// doesn't support S256). Orchestration lives here, matching this project's
+/// existing convention (`doctor_command` does the same): `mal.rs` exposes
+/// small, individually-testable building blocks; the actual sequencing and
+/// all user-facing output happen in `main.rs`.
+fn sync_login_command(config: &Config) -> ExitCode {
+    if config.mal.client_id.is_empty() {
+        return fail(
+            "no [mal] client_id configured — register an app on MyAnimeList and set client_id \
+             in config.toml first (see docs/design.md §7)",
+        );
+    }
+
+    let token_path = match mal::mal_token_path() {
+        Ok(p) => p,
+        Err(e) => return fail(&format!("could not resolve MAL token path: {e}")),
+    };
+
+    let pkce = mal::generate_pkce();
+    let state = mal::generate_state();
+    let port = config.mal.redirect_port;
+
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            return fail(&format!(
+                "could not bind local callback listener on 127.0.0.1:{port}: {e} — is another \
+                 process using this port? [mal] redirect_port in config.toml can be changed"
+            ));
+        }
+    };
+
+    let url = mal::authorize_url(&config.mal.client_id, port, &pkce.code_challenge, &state);
+    println!("Open this URL to authorize Tsuzuki with MyAnimeList:");
+    println!();
+    println!("  {url}");
+    println!();
+    match webbrowser::open(&url) {
+        Ok(()) => println!("(opening in your browser...)"),
+        Err(_) => {
+            println!("(could not open a browser automatically — open the URL above manually)")
+        }
+    }
+    println!(
+        "Waiting for the callback (up to {}s)...",
+        mal::LOGIN_TIMEOUT.as_secs()
+    );
+
+    let code = match mal::listen_for_callback(&listener, &state, mal::LOGIN_TIMEOUT) {
+        Ok(mal::CallbackOutcome::Code(code)) => code,
+        Ok(mal::CallbackOutcome::Denied(reason)) => {
+            return fail(&format!("authorization was not granted: {reason}"));
+        }
+        Err(e) => return fail(&e.to_string()),
+    };
+
+    let client = mal::UreqClient;
+    let now = state::now_unix();
+    let token = match mal::exchange_code(
+        &client,
+        &config.mal.client_id,
+        &code,
+        &pkce.code_verifier,
+        port,
+        now,
+    ) {
+        Ok(t) => t,
+        Err(e) => return fail(&e.to_string()),
+    };
+
+    if let Err(e) = mal::write_token(&token_path, &token) {
+        return fail(&format!(
+            "authorized, but could not save the token to {}: {e}",
+            token_path.display()
+        ));
+    }
+
+    println!("Logged in to MyAnimeList.");
+    ExitCode::SUCCESS
+}
+
 // --- Phase 7: doctor ---
 
 /// `tsuzuki doctor [--fix] [--forget-orphans]` — CLAUDE.md's Phase 7 full
@@ -865,11 +953,28 @@ fn doctor_command(
         }
     }
 
+    match mal::mal_token_path() {
+        Ok(token_path) => {
+            let mal_client = mal::UreqClient;
+            let status = mal::token_status(
+                &mal_client,
+                &token_path,
+                &config.mal.client_id,
+                state::now_unix(),
+            );
+            results.push(doctor::check_mal_auth(&status));
+        }
+        Err(e) => {
+            results.push(doctor::CheckResult::fail(
+                "mal-auth",
+                format!("could not resolve MAL token path: {e}"),
+            ));
+        }
+    }
+
     for r in &results {
         println!("{}", r.render());
     }
-    println!();
-    println!("MAL auth status: not checked — Phase 8 (MAL sync) doesn't exist yet.");
 
     if results.iter().any(|r| r.level == doctor::Level::Fail) {
         ExitCode::FAILURE

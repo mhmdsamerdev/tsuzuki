@@ -11,10 +11,14 @@
 //! check here testable against a fabricated environment without ever
 //! touching the real system's mpv.conf or scripts directory.
 //!
-//! MAL auth status is deliberately excluded from this phase's check list —
-//! Phase 8 (MAL sync) doesn't exist yet. `main.rs`'s `doctor_command` prints
-//! a one-line note saying so, rather than silently omitting it without a
-//! trace.
+//! MAL auth status (1i, Phase 8a) is checked via [`check_mal_auth`] — the one
+//! check in this module that doesn't take a plain fabricated value directly,
+//! since the real work (reading `mal_token.toml`, refreshing an expiring
+//! token) has to happen somewhere; `crate::mal::token_status` does that and
+//! hands back a [`crate::mal::TokenStatus`], which this module's own
+//! `check_mal_auth` maps to a `CheckResult` exactly like every other check
+//! here — pure, and testable against a fabricated `TokenStatus` with no real
+//! file or network access.
 
 use std::collections::HashSet;
 use std::fs;
@@ -590,6 +594,63 @@ pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
     state
         .series
         .retain(|r| !orphans.iter().any(|o| o.root == r.root && o.name == r.name));
+}
+
+// --- 1i. MAL auth status ---
+
+/// Maps an already-resolved [`crate::mal::TokenStatus`] to a `CheckResult`.
+/// No `--fix` action exists for this check (same diagnostic-only precedent
+/// as 1d's Flatpak-permission check) — `sync login` is the one, explicit
+/// remedy, never something `--fix` performs on the user's behalf (that would
+/// mean silently opening a browser and blocking on OAuth mid-`doctor`-run).
+///
+/// Severity, justified against this module's existing precedents:
+/// - **Never configured / never logged in → WARN, not FAIL.** MAL sync is
+///   optional (design.md §7's own opening line) — an unconfigured or
+///   not-yet-linked account is an expected, unbroken initial state, the same
+///   category as "Flatpak mpv not detected" (1d) or "no mpv install
+///   detected" (1b/1e), both WARN, not "no native mpv on PATH" (1a, FAIL,
+///   since mpv itself is *not* optional to this tool).
+/// - **A rejected refresh → FAIL.** This is a confirmed, actionable break —
+///   the stored `refresh_token` is dead and every future MAL call will fail
+///   until the user re-runs `sync login` — the same severity `mpv.conf`'s
+///   missing flag (1b) gets for an equally concrete, fixable problem.
+/// - **A network error while verifying → WARN, not FAIL.** Mirrors 1d's own
+///   reasoning exactly: an unreachable API right now (offline, transient DNS
+///   failure) isn't evidence the *token* itself is broken, so escalating to
+///   FAIL on pure connectivity noise would make `doctor` exit non-zero every
+///   time this machine happens to be offline — a false positive, not a real
+///   auth problem.
+pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
+    use crate::mal::TokenStatus;
+    match status {
+        TokenStatus::NotConfigured => CheckResult::warn(
+            "mal-auth",
+            "not configured — [mal] client_id is empty. Register an app on MyAnimeList and set \
+             client_id in config.toml, then run `tsuzuki sync login`",
+        ),
+        TokenStatus::NotLoggedIn => {
+            CheckResult::warn("mal-auth", "not logged in — run `tsuzuki sync login`")
+        }
+        TokenStatus::Valid { expires_in_secs } => CheckResult::ok(
+            "mal-auth",
+            format!("token valid (expires in {expires_in_secs}s)"),
+        ),
+        TokenStatus::Refreshed { expires_in_secs } => CheckResult::ok(
+            "mal-auth",
+            format!("token refreshed (expires in {expires_in_secs}s)"),
+        ),
+        TokenStatus::RefreshRejected(msg) => CheckResult::fail(
+            "mal-auth",
+            format!(
+                "refresh_token rejected by MyAnimeList — run `tsuzuki sync login` again ({msg})"
+            ),
+        ),
+        TokenStatus::NetworkError(msg) => CheckResult::warn(
+            "mal-auth",
+            format!("could not verify — network error while refreshing: {msg}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1264,5 +1325,53 @@ mod tests {
             None,
         );
         assert!(installs.is_empty());
+    }
+
+    // --- 1i: MAL auth status ---
+
+    use crate::mal::TokenStatus;
+
+    #[test]
+    fn mal_auth_not_configured_is_warn() {
+        let r = check_mal_auth(&TokenStatus::NotConfigured);
+        assert_eq!(r.level, Level::Warn);
+    }
+
+    #[test]
+    fn mal_auth_not_logged_in_is_warn() {
+        let r = check_mal_auth(&TokenStatus::NotLoggedIn);
+        assert_eq!(r.level, Level::Warn);
+    }
+
+    #[test]
+    fn mal_auth_valid_token_is_ok() {
+        let r = check_mal_auth(&TokenStatus::Valid {
+            expires_in_secs: 1800,
+        });
+        assert_eq!(r.level, Level::Ok);
+        assert!(r.message.contains("1800"));
+    }
+
+    #[test]
+    fn mal_auth_refreshed_token_is_ok() {
+        let r = check_mal_auth(&TokenStatus::Refreshed {
+            expires_in_secs: 3600,
+        });
+        assert_eq!(r.level, Level::Ok);
+    }
+
+    #[test]
+    fn mal_auth_refresh_rejected_is_fail() {
+        let r = check_mal_auth(&TokenStatus::RefreshRejected("invalid_grant".to_string()));
+        assert_eq!(r.level, Level::Fail);
+        assert!(r.message.contains("sync login"));
+    }
+
+    #[test]
+    fn mal_auth_network_error_is_warn_not_fail() {
+        // Connectivity noise must never fail the whole doctor run — same
+        // "best-effort, never escalates past WARN" precedent as 1d.
+        let r = check_mal_auth(&TokenStatus::NetworkError("connection refused".to_string()));
+        assert_eq!(r.level, Level::Warn);
     }
 }

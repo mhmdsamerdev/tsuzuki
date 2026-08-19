@@ -126,19 +126,36 @@ pub fn read(path: &Path) -> io::Result<State> {
 /// the same directory as `path`, then rename over it. A kill mid-write
 /// leaves either the old file or the new one, never a half-written one.
 pub fn write(path: &Path, state: &State) -> io::Result<()> {
+    let contents =
+        toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, contents.as_bytes(), None)
+}
+
+/// The shared temp-file-then-rename primitive behind every atomic write in
+/// this project (CLAUDE.md §3: "Any new state-writing code path must go
+/// through the same atomic-write helper; don't add a second write path that
+/// writes in place 'just this once.'"). `unix_mode`, when given, restricts
+/// the written file's permissions on Unix (e.g. `0o600` for `mal_token.toml`,
+/// which holds live credentials) — set on the temp file before the rename so
+/// the final path is never briefly world-readable.
+pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: Option<u32>) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "state path has no parent directory",
-        )
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
     fs::create_dir_all(parent)?;
 
-    let contents =
-        toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    io::Write::write_all(&mut temp, contents.as_bytes())?;
+    io::Write::write_all(&mut temp, contents)?;
+
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
