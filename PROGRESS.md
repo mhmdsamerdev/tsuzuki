@@ -6,8 +6,7 @@ narrative, bug-hunt traces, and dogfood step-by-steps are not kept here
 once a fix lands; git history has that story, and any decision worth
 protecting from regression has already been folded into `CLAUDE.md`.
 
-**Current phase:** Phase 9 dogfooding is underway. Two real issues
-surfaced and are fixed:
+**Current phase:** Dogfooding is done; Phase 9 is now UX polish. Fixed so far:
 - `sync` was pushing the tracked cursor's raw episode number to MAL
   instead of the last actually-watched episode (off by one in the common
   case) — fixed in `sync::local_effective_episode`; see CLAUDE.md's "MAL
@@ -20,8 +19,19 @@ surfaced and are fixed:
   `0.8`), and a summary line that omits zero-count categories — see
   CLAUDE.md's "Sync output only ever suggests a confident fuzzy match,
   and stays one line per series."
+- `doctor` terminal output was even noisier: one `[OK]`/`[WARN]`/`[FAIL]`
+  row per internal check function (two mpv.conf rows, two tsuzuki.lua
+  rows, up to three mpv-log rows), full of raw paths, candidate-directory
+  counts, and token-expiration seconds. Redesigned to one `✓`/`⚠`/`✗` row
+  per conceptual check — install-scoped checks folded across every
+  detected mpv install via a new `doctor::combine` helper — an indented
+  `→ <command>` line only when there's a concrete next step, and a
+  closing "All checks passed." / "`N` issue(s) found." summary. Severity
+  levels and exit-code logic are unchanged — display only. See CLAUDE.md's
+  "Doctor output is a concise health report, not a narration of every
+  internal check."
 
-**Test suite:** 389 passing + 4 `#[ignore]`d real-API tests (excluded
+**Test suite:** 395 passing + 4 `#[ignore]`d real-API tests (excluded
 from the default run). Both clippy gates (`-p tsuzuki --no-deps
 --all-targets -D warnings`) and `cargo fmt -p tsuzuki --check` clean.
 `vendor/anitomy` untouched throughout.

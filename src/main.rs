@@ -1021,13 +1021,19 @@ fn sync_link_command(
 /// check list (1a-1i). Reconciles against mpv reality first, per the same
 /// "every state-touching command reconciles first" rule every other
 /// state-touching command already follows — `--fix --forget-orphans` is a
-/// real mutation of `state.toml`, so this counts. Prints every check's
-/// result to stdout (this report *is* the command's real output, not an
-/// incidental warning about something else — CLAUDE.md's stderr convention
-/// is for warnings a command surfaces about achieving some other goal, and
-/// doctor's entire goal is exactly this report). Exits non-zero only if at
-/// least one check is FAIL after any `--fix`/`--forget-orphans` mutation is
-/// applied — never on WARN alone.
+/// real mutation of `state.toml`, so this counts. Prints one concise,
+/// scannable line per conceptual check to stdout (this report *is* the
+/// command's real output, not an incidental warning about something else —
+/// CLAUDE.md's stderr convention is for warnings a command surfaces about
+/// achieving some other goal, and doctor's entire goal is exactly this
+/// report). Several install-scoped checks (mpv config, the companion
+/// script) fold multiple per-install results into one row via
+/// `doctor::combine` — CLAUDE.md's "doctor groups related checks
+/// conceptually rather than one row per internal artifact"; a check with
+/// nothing to check against (no mpv install detected at all) is omitted
+/// entirely rather than printed as a hollow "skipped" row. Exits non-zero
+/// only if at least one check is FAIL after any `--fix`/`--forget-orphans`
+/// mutation is applied — never on WARN alone.
 fn doctor_command(
     fix: bool,
     forget_orphans: bool,
@@ -1057,69 +1063,63 @@ fn doctor_command(
     ));
 
     let installs = doctor::detected_mpv_installs(presence, home);
-    if installs.is_empty() {
-        results.push(doctor::CheckResult::warn(
-            "mpv.conf",
-            "skipped — no mpv install detected",
+    if !installs.is_empty() {
+        let mpv_conf_checks: Vec<_> = installs.iter().map(doctor::check_mpv_conf).collect();
+        results.push(doctor::combine(
+            "mpv config",
+            "watch-later tracking enabled",
+            &mpv_conf_checks,
         ));
-    } else {
-        for install in &installs {
-            results.push(doctor::check_mpv_conf(install));
-        }
     }
 
     results.push(doctor::check_watch_later(config, home));
 
-    let flatpak_cli_present = launch::program_on_path("flatpak");
-    let permissions_output = if presence.flatpak && flatpak_cli_present {
-        std::process::Command::new("flatpak")
-            .args(["info", "--show-permissions", "io.mpv.Mpv"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    } else {
-        None
-    };
-    results.push(doctor::check_flatpak_permissions(
-        presence.flatpak,
-        flatpak_cli_present,
-        permissions_output.as_deref(),
-    ));
-
-    if installs.is_empty() {
-        results.push(doctor::CheckResult::warn(
-            "tsuzuki.lua",
-            "skipped — no mpv install detected",
+    if presence.flatpak {
+        let flatpak_cli_present = launch::program_on_path("flatpak");
+        let permissions_output = if flatpak_cli_present {
+            std::process::Command::new("flatpak")
+                .args(["info", "--show-permissions", "io.mpv.Mpv"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        } else {
+            None
+        };
+        results.push(doctor::check_flatpak_permissions(
+            presence.flatpak,
+            flatpak_cli_present,
+            permissions_output.as_deref(),
         ));
-    } else {
+    }
+
+    if !installs.is_empty() {
+        let mut script_checks = Vec::new();
         for install in &installs {
             let scripts_dir = install.config_dir.join("scripts");
             let mut outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
             if fix && outcome.needs_fix.is_some() {
                 match doctor::install_script(&scripts_dir) {
                     Ok(()) => {
-                        println!(
-                            "fixed: installed/updated tsuzuki.lua for {} at {}",
-                            install.label,
-                            scripts_dir.join("tsuzuki.lua").display()
-                        );
+                        println!("✓ fixed: companion script installed for {}", install.label);
                         outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
                     }
                     Err(e) => {
                         eprintln!(
-                            "warning: failed to install tsuzuki.lua for {}: {e}",
+                            "warning: failed to install companion script for {}: {e}",
                             install.label
                         );
                     }
                 }
             }
-            results.push(outcome.result);
+            script_checks.push(outcome.result);
         }
-    }
-
-    for r in doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)) {
-        results.push(r);
+        script_checks.extend(doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)));
+        results.push(doctor::combine(
+            "companion script",
+            "up to date",
+            &script_checks,
+        ));
     }
 
     let root_checks = doctor::check_tracked_roots(config, home);
@@ -1128,18 +1128,18 @@ fn doctor_command(
         .filter(|c| c.valid)
         .map(|c| c.root.clone())
         .collect();
-    for c in root_checks {
-        results.push(c.result);
-    }
+    results.push(doctor::summarize_tracked_roots(&root_checks));
 
     let orphans = doctor::find_orphans(config, &state, &valid_roots, home);
     results.push(doctor::orphan_check_result(&orphans));
 
     if forget_orphans && !orphans.is_empty() {
-        println!("forgetting {} orphaned record(s):", orphans.len());
-        for o in &orphans {
-            println!("  \"{}\" (under {})", o.name, o.root);
-        }
+        let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+        println!(
+            "✓ removed {} orphaned record(s): {}",
+            orphans.len(),
+            names.join(", ")
+        );
         doctor::forget_orphans(&mut state, &orphans);
         if let Err(e) = state::write(state_path, &state) {
             return fail(&format!(
@@ -1162,8 +1162,8 @@ fn doctor_command(
         }
         Err(e) => {
             results.push(doctor::CheckResult::fail(
-                "mal-auth",
-                format!("could not resolve MAL token path: {e}"),
+                "MyAnimeList",
+                format!("could not resolve token path: {e}"),
             ));
         }
     }
@@ -1172,10 +1172,28 @@ fn doctor_command(
         println!("{}", r.render());
     }
 
+    println!();
+    println!("{}", doctor_summary_line(&results));
+
     if results.iter().any(|r| r.level == doctor::Level::Fail) {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// "All checks passed." when every row is `Ok`; otherwise a plain issue
+/// count (`Warn` and `Fail` both count — either is something worth the
+/// user's attention, even though only `Fail` affects the exit code).
+fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
+    let issues = results
+        .iter()
+        .filter(|r| r.level != doctor::Level::Ok)
+        .count();
+    match issues {
+        0 => "All checks passed.".to_string(),
+        1 => "1 issue found.".to_string(),
+        n => format!("{n} issues found."),
     }
 }
 

@@ -103,13 +103,13 @@ updated_at = 1
         "a deliberately broken setup must exit non-zero, got stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("watch_later")
+        stdout.contains("watch-later")
             && stdout.contains(&unreachable_override.display().to_string()),
         "must report the unreachable configured watch_later_dir, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("FAIL") && stdout.contains("orphaned-records"),
-        "must report the orphaned-records check as FAIL, got:\n{stdout}"
+        stdout.contains("✗") && stdout.contains("orphaned records"),
+        "must report the orphaned records check as failing, got:\n{stdout}"
     );
     assert!(
         stdout.contains("GoneSeries"),
@@ -124,7 +124,7 @@ updated_at = 1
         "a series whose folder still exists must never be reported as orphaned, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("mal-auth") && stdout.contains("not logged in"),
+        stdout.contains("MyAnimeList") && stdout.contains("not logged in"),
         "Phase 8a-correction: an unset [mal] client_id now resolves to the built-in default \
          client_id (no per-user registration required), so a fresh $HOME with no mal_token.toml \
          must report the real mal-auth check as not-logged-in (WARN) — not \"not configured\" \
@@ -134,9 +134,9 @@ updated_at = 1
 
     if any_mpv_install_detected() {
         assert!(
-            stdout.contains("tsuzuki.lua") && stdout.contains("not installed"),
+            stdout.contains("companion script") && stdout.contains("not installed"),
             "a fresh scratch $HOME never has the companion script installed — if any mpv \
-             install method was detected at all, its tsuzuki.lua check must FAIL, got:\n{stdout}"
+             install method was detected at all, its companion-script check must FAIL, got:\n{stdout}"
         );
     }
 

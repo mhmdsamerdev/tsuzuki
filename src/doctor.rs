@@ -48,11 +48,21 @@ pub enum Level {
     Fail,
 }
 
+/// One scannable report line: a symbol, a short conceptual label, and a
+/// short human-readable result — deliberately not a place for implementation
+/// detail (raw filesystem paths, candidate-directory counts, expiration
+/// seconds, parsing/matching reasoning). That level of detail is reserved
+/// for a future `--verbose` mode; today's report is meant to be read in a
+/// few seconds, not studied. `action`, when present, is the one concrete
+/// next step — printed indented on its own line — that resolves this check;
+/// a check with nothing actionable to say (most WARNs from best-effort
+/// checks, most OKs) leaves it `None` rather than restating the message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckResult {
     pub label: String,
     pub level: Level,
     pub message: String,
+    pub action: Option<String>,
 }
 
 impl CheckResult {
@@ -61,6 +71,7 @@ impl CheckResult {
             label: label.into(),
             level: Level::Ok,
             message: message.into(),
+            action: None,
         }
     }
     pub fn warn(label: impl Into<String>, message: impl Into<String>) -> Self {
@@ -68,6 +79,7 @@ impl CheckResult {
             label: label.into(),
             level: Level::Warn,
             message: message.into(),
+            action: None,
         }
     }
     pub fn fail(label: impl Into<String>, message: impl Into<String>) -> Self {
@@ -75,19 +87,62 @@ impl CheckResult {
             label: label.into(),
             level: Level::Fail,
             message: message.into(),
+            action: None,
         }
     }
 
-    /// `[OK]  label: message`, one line (message may itself contain
-    /// embedded newlines for a multi-line detail, e.g. the orphan list).
-    pub fn render(&self) -> String {
-        let tag = match self.level {
-            Level::Ok => "OK  ",
-            Level::Warn => "WARN",
-            Level::Fail => "FAIL",
-        };
-        format!("[{tag}] {}: {}", self.label, self.message)
+    /// Attaches the one concrete next step that resolves this check —
+    /// rendered on its own indented line under the check itself.
+    pub fn with_action(mut self, action: impl Into<String>) -> Self {
+        self.action = Some(action.into());
+        self
     }
+
+    /// `✓ label — message`, plus an indented `→ action` line when there's a
+    /// concrete next step. One glance per check, never a multi-line
+    /// explanation of a normal state.
+    pub fn render(&self) -> String {
+        let symbol = match self.level {
+            Level::Ok => "✓",
+            Level::Warn => "⚠",
+            Level::Fail => "✗",
+        };
+        match &self.action {
+            Some(action) => format!("{symbol} {} — {}\n  → {action}", self.label, self.message),
+            None => format!("{symbol} {} — {}", self.label, self.message),
+        }
+    }
+}
+
+/// Folds several same-category checks (typically one per mpv install, or
+/// one per candidate directory) into a single display row — CLAUDE.md's
+/// "doctor groups related checks conceptually rather than one row per
+/// internal artifact." The worst level wins (`Fail` > `Warn` > `Ok`); on a
+/// tie, the first offending check's own message/action is used, since
+/// that's the one concrete thing worth telling the user about right now —
+/// a future `--verbose` mode is the place to enumerate every constituent
+/// check individually. An all-`Ok` group collapses to `ok_message` — a
+/// single, install-agnostic phrase — rather than repeating whichever
+/// per-install message happened to be first.
+pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResult]) -> CheckResult {
+    let label = label.into();
+    if let Some(worst) = results.iter().find(|r| r.level == Level::Fail) {
+        return CheckResult {
+            label,
+            level: Level::Fail,
+            message: worst.message.clone(),
+            action: worst.action.clone(),
+        };
+    }
+    if let Some(worst) = results.iter().find(|r| r.level == Level::Warn) {
+        return CheckResult {
+            label,
+            level: Level::Warn,
+            message: worst.message.clone(),
+            action: worst.action.clone(),
+        };
+    }
+    CheckResult::ok(label, ok_message)
 }
 
 // --- 1a. mpv availability ---
@@ -118,34 +173,20 @@ pub fn check_mpv_availability(
 ) -> CheckResult {
     if !command_override.is_empty() {
         return if override_resolves {
-            CheckResult::ok(
-                "mpv",
-                format!("configured [mpv] command_override resolves: \"{command_override}\""),
-            )
+            CheckResult::ok("mpv", "custom command found")
         } else {
-            CheckResult::fail(
-                "mpv",
-                format!(
-                    "configured [mpv] command_override \"{command_override}\" does not resolve \
-                     to an existing, executable program"
-                ),
-            )
+            CheckResult::fail("mpv", "configured command not found")
+                .with_action("check [mpv] command_override in config.toml")
         };
     }
 
     match (presence.native, presence.flatpak) {
-        (false, false) => CheckResult::fail(
-            "mpv",
-            "mpv not found — no native mpv on PATH, no Flatpak io.mpv.Mpv install found. \
-             Install mpv, or set [mpv] command_override in config.toml",
-        ),
-        (true, false) => CheckResult::ok("mpv", "found native mpv on PATH"),
-        (false, true) => CheckResult::ok("mpv", "found Flatpak mpv (io.mpv.Mpv)"),
-        (true, true) => CheckResult::warn(
-            "mpv",
-            "both native and Flatpak mpv found — consider pinning [mpv] command_override \
-             in config.toml to avoid ambiguity",
-        ),
+        (false, false) => CheckResult::fail("mpv", "not found")
+            .with_action("install mpv, or set [mpv] command_override in config.toml"),
+        (true, false) => CheckResult::ok("mpv", "native installation found"),
+        (false, true) => CheckResult::ok("mpv", "Flatpak installation found"),
+        (true, true) => CheckResult::warn("mpv", "both native and Flatpak found, using native")
+            .with_action("pin [mpv] command_override in config.toml to avoid ambiguity"),
     }
 }
 
@@ -234,48 +275,39 @@ fn write_filename_flag_state(contents: &str) -> Option<bool> {
 /// own").
 pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
     let path = install.config_dir.join("mpv.conf");
-    let label = format!("mpv.conf ({})", install.label);
+    let label = format!("mpv config ({})", install.label);
+    let enable_action = format!(
+        "add `write-filename-in-watch-later-config=yes` to {}",
+        path.display()
+    );
 
     let contents = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return CheckResult::fail(
                 label,
-                format!(
-                    "write-filename-in-watch-later-config=yes is missing — {} does not exist. \
-                     Add this line to it:\n      write-filename-in-watch-later-config=yes",
-                    path.display()
-                ),
-            );
+                format!("watch-later tracking not enabled ({})", install.label),
+            )
+            .with_action(enable_action);
         }
-        Err(e) => {
+        Err(_) => {
             // A real, distinct problem from "missing" — e.g. permission
             // denied on the file or one of its parent directories. Mirrors
             // check_mpv_log_dirs's own missing-vs-unreadable distinction;
             // conflating the two here would send a user chasing "create the
             // file" for what's actually a permissions problem.
-            return CheckResult::fail(
-                label,
-                format!("{} exists but is unreadable: {e}", path.display()),
-            );
+            return CheckResult::fail(label, format!("{} mpv.conf is unreadable", install.label))
+                .with_action(format!("check permissions on {}", path.display()));
         }
     };
 
     match write_filename_flag_state(&contents) {
-        Some(true) => CheckResult::ok(
-            label,
-            format!(
-                "write-filename-in-watch-later-config=yes is set in {}",
-                path.display()
-            ),
-        ),
+        Some(true) => CheckResult::ok(label, "watch-later tracking enabled"),
         _ => CheckResult::fail(
             label,
-            format!(
-                "write-filename-in-watch-later-config=yes is not set in {}. Add this line to it:\n      write-filename-in-watch-later-config=yes",
-                path.display()
-            ),
-        ),
+            format!("watch-later tracking not enabled ({})", install.label),
+        )
+        .with_action(enable_action),
     }
 }
 
@@ -293,38 +325,15 @@ pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
 pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
     let scan = mpv::scan_watch_later(config, home);
     if let Some(mpv::ScanWarning::WatchLaterDirNotFound(p)) = &scan.warning {
-        return CheckResult::fail(
-            "watch_later",
+        return CheckResult::fail("watch-later", "configured directory not found").with_action(
             format!(
-                "configured [mpv] watch_later_dir \"{}\" does not exist",
+                "check [mpv] watch_later_dir in config.toml ({})",
                 p.display()
             ),
         );
     }
 
-    if !config.mpv.watch_later_dir.is_empty() {
-        return CheckResult::ok(
-            "watch_later",
-            format!(
-                "configured [mpv] watch_later_dir resolves: \"{}\"",
-                config.mpv.watch_later_dir
-            ),
-        );
-    }
-
-    let candidates = home
-        .map(mpv::candidate_watch_later_dirs)
-        .unwrap_or_default();
-    let existing = candidates.iter().filter(|d| d.exists()).count();
-    CheckResult::ok(
-        "watch_later",
-        format!(
-            "using the OS-default candidate list: {existing}/{} candidate director{} currently \
-             exist (a candidate being absent is normal until mpv writes to it for the first time)",
-            candidates.len(),
-            if candidates.len() == 1 { "y" } else { "ies" }
-        ),
-    )
+    CheckResult::ok("watch-later", "storage available")
 }
 
 // --- 1d. Flatpak filesystem-permission gap ---
@@ -343,22 +352,19 @@ pub fn check_flatpak_permissions(
     flatpak_cli_present: bool,
     permissions_output: Option<&str>,
 ) -> CheckResult {
+    const VERIFY_ACTION: &str = "flatpak info --show-permissions io.mpv.Mpv";
+
     if !flatpak_present {
-        return CheckResult::warn("flatpak-permissions", "skipped — Flatpak mpv not detected");
+        return CheckResult::warn("mpv permissions", "skipped — Flatpak mpv not detected");
     }
     if !flatpak_cli_present {
         return CheckResult::warn(
-            "flatpak-permissions",
-            "the `flatpak` CLI was not found — cannot verify sandboxed mpv's filesystem access; \
-             check manually with `flatpak info --show-permissions io.mpv.Mpv`",
+            "mpv permissions",
+            "could not verify (flatpak CLI not found)",
         );
     }
     let Some(output) = permissions_output else {
-        return CheckResult::warn(
-            "flatpak-permissions",
-            "could not run `flatpak info --show-permissions io.mpv.Mpv` — cannot verify \
-             sandboxed mpv's filesystem access",
-        );
+        return CheckResult::warn("mpv permissions", "could not verify").with_action(VERIFY_ACTION);
     };
     let broad_access = [
         "filesystem=host",
@@ -369,17 +375,13 @@ pub fn check_flatpak_permissions(
     .iter()
     .any(|needle| output.contains(needle));
     if broad_access {
-        CheckResult::ok(
-            "flatpak-permissions",
-            "Flatpak mpv has broad host/home filesystem access — tracked roots are likely reachable",
-        )
+        CheckResult::ok("mpv permissions", "tracked directories accessible")
     } else {
         CheckResult::warn(
-            "flatpak-permissions",
-            "Flatpak mpv's filesystem permissions may not cover your tracked roots — verify \
-             manually with `flatpak info --show-permissions io.mpv.Mpv` (grant broader access \
-             with e.g. `flatpak override --filesystem=host io.mpv.Mpv` if needed)",
+            "mpv permissions",
+            "tracked directories may not be accessible",
         )
+        .with_action(VERIFY_ACTION)
     }
 }
 
@@ -399,35 +401,21 @@ pub struct ScriptCheckOutcome {
 /// of content) which doesn't matter at this size.
 pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
     let script_path = scripts_dir.join("tsuzuki.lua");
-    let full_label = format!("tsuzuki.lua ({label})");
+    let full_label = format!("companion script ({label})");
 
     match fs::read(&script_path) {
         Ok(bytes) if bytes == BUNDLED_SCRIPT.as_bytes() => ScriptCheckOutcome {
-            result: CheckResult::ok(
-                full_label,
-                format!("up to date at {}", script_path.display()),
-            ),
+            result: CheckResult::ok(full_label, "up to date"),
             needs_fix: None,
         },
         Ok(_) => ScriptCheckOutcome {
-            result: CheckResult::fail(
-                full_label,
-                format!(
-                    "installed but out of date (differs from the bundled contrib/mpv/tsuzuki.lua) \
-                     at {} — run `tsuzuki doctor --fix` to update it",
-                    script_path.display()
-                ),
-            ),
+            result: CheckResult::fail(full_label, format!("out of date ({label})"))
+                .with_action("tsuzuki doctor --fix"),
             needs_fix: Some(scripts_dir.to_path_buf()),
         },
         Err(_) => ScriptCheckOutcome {
-            result: CheckResult::fail(
-                full_label,
-                format!(
-                    "not installed at {} — run `tsuzuki doctor --fix` to install it",
-                    script_path.display()
-                ),
-            ),
+            result: CheckResult::fail(full_label, format!("not installed ({label})"))
+                .with_action("tsuzuki doctor --fix"),
             needs_fix: Some(scripts_dir.to_path_buf()),
         },
     }
@@ -457,21 +445,12 @@ pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
     dirs.iter()
         .map(|d| {
             if !d.exists() {
-                CheckResult::ok(
-                    "mpv-log",
-                    format!(
-                        "not created yet at {} (fine — the script may not be installed, or mpv \
-                         hasn't quit a file while it's running, yet)",
-                        d.display()
-                    ),
-                )
+                CheckResult::ok("companion script", "activity log not created yet")
             } else {
                 match fs::read_dir(d) {
-                    Ok(_) => CheckResult::ok("mpv-log", format!("reachable at {}", d.display())),
-                    Err(e) => CheckResult::fail(
-                        "mpv-log",
-                        format!("exists but is unreadable at {}: {e}", d.display()),
-                    ),
+                    Ok(_) => CheckResult::ok("companion script", "activity log reachable"),
+                    Err(_) => CheckResult::fail("companion script", "activity log unreadable")
+                        .with_action(format!("check permissions on {}", d.display())),
                 }
             }
         })
@@ -480,14 +459,14 @@ pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
 
 // --- 1g. tracked-root validity ---
 
-/// One tracked root's own current validity, alongside its `CheckResult` —
-/// callers need the plain `bool` too, to decide which roots are safe to run
-/// per-series orphan detection under (1h must skip an unreachable root
-/// entirely, never treat its absence as proof any series under it is gone).
+/// One tracked root's own current validity — callers need the plain `bool`
+/// to decide which roots are safe to run per-series orphan detection under
+/// (1h must skip an unreachable root entirely, never treat its absence as
+/// proof any series under it is gone); [`summarize_tracked_roots`] folds
+/// every root's validity into the single displayed "library" row.
 pub struct RootCheck {
     pub root: String,
     pub valid: bool,
-    pub result: CheckResult,
 }
 
 pub fn check_tracked_roots(config: &Config, home: Option<&Path>) -> Vec<RootCheck> {
@@ -497,22 +476,40 @@ pub fn check_tracked_roots(config: &Config, home: Option<&Path>) -> Vec<RootChec
         .iter()
         .map(|root| {
             let expanded = roots::expand_tilde(Path::new(root), home);
-            let valid = expanded.is_dir();
-            let result = if valid {
-                CheckResult::ok("tracked-root", format!("reachable: {root}"))
-            } else {
-                CheckResult::fail(
-                    "tracked-root",
-                    format!("does not exist or is not a directory: {root}"),
-                )
-            };
             RootCheck {
                 root: root.clone(),
-                valid,
-                result,
+                valid: expanded.is_dir(),
             }
         })
         .collect()
+}
+
+/// Folds every tracked root's own reachability into one "library" row —
+/// unlike [`combine`], every unreachable root is named (each is
+/// independently actionable, not just the first one found), not just the
+/// worst offender. A fresh install with no tracked roots at all is `Ok`,
+/// not an empty/absent row — "nothing tracked yet" is itself a legitimate,
+/// nameable state.
+pub fn summarize_tracked_roots(checks: &[RootCheck]) -> CheckResult {
+    if checks.is_empty() {
+        return CheckResult::ok("library", "no tracked roots yet")
+            .with_action("tsuzuki add <path>");
+    }
+    let unreachable: Vec<&str> = checks
+        .iter()
+        .filter(|c| !c.valid)
+        .map(|c| c.root.as_str())
+        .collect();
+    if unreachable.is_empty() {
+        let n = checks.len();
+        let noun = if n == 1 { "root" } else { "roots" };
+        CheckResult::ok("library", format!("{n} tracked {noun} reachable"))
+    } else {
+        CheckResult::fail(
+            "library",
+            format!("not reachable: {}", unreachable.join(", ")),
+        )
+    }
 }
 
 // --- 1h. orphaned per-series state.toml records ---
@@ -570,18 +567,15 @@ pub fn find_orphans(
 
 pub fn orphan_check_result(orphans: &[Orphan]) -> CheckResult {
     if orphans.is_empty() {
-        return CheckResult::ok("orphaned-records", "no orphaned state.toml records found");
+        return CheckResult::ok("orphaned records", "none found");
     }
 
-    let mut message = String::from(
-        "orphaned state.toml records found (series deleted, moved, or renamed out from under a \
-         still-tracked root):\n",
-    );
-    for o in orphans {
-        message.push_str(&format!("      \"{}\" (under {})\n", o.name, o.root));
-    }
-    message.push_str(&format!("    run `{FORGET_ORPHANS_COMMAND}` to clear them"));
-    CheckResult::fail("orphaned-records", message)
+    let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
+    CheckResult::fail(
+        "orphaned records",
+        format!("{} found: {}", orphans.len(), names.join(", ")),
+    )
+    .with_action(FORGET_ORPHANS_COMMAND)
 }
 
 /// Permanently removes every record in `orphans` from `state.series` — the
@@ -624,32 +618,19 @@ pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
 pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
     use crate::mal::TokenStatus;
     match status {
-        TokenStatus::NotConfigured => CheckResult::warn(
-            "mal-auth",
-            "not configured — [mal] client_id is empty. Register an app on MyAnimeList and set \
-             client_id in config.toml, then run `tsuzuki sync login`",
-        ),
+        TokenStatus::NotConfigured => CheckResult::warn("MyAnimeList", "not configured")
+            .with_action("set [mal] client_id in config.toml, then run `tsuzuki sync login`"),
         TokenStatus::NotLoggedIn => {
-            CheckResult::warn("mal-auth", "not logged in — run `tsuzuki sync login`")
+            CheckResult::warn("MyAnimeList", "not logged in").with_action("tsuzuki sync login")
         }
-        TokenStatus::Valid { expires_in_secs } => CheckResult::ok(
-            "mal-auth",
-            format!("token valid (expires in {expires_in_secs}s)"),
-        ),
-        TokenStatus::Refreshed { expires_in_secs } => CheckResult::ok(
-            "mal-auth",
-            format!("token refreshed (expires in {expires_in_secs}s)"),
-        ),
-        TokenStatus::RefreshRejected(msg) => CheckResult::fail(
-            "mal-auth",
-            format!(
-                "refresh_token rejected by MyAnimeList — run `tsuzuki sync login` again ({msg})"
-            ),
-        ),
-        TokenStatus::NetworkError(msg) => CheckResult::warn(
-            "mal-auth",
-            format!("could not verify — network error while refreshing: {msg}"),
-        ),
+        TokenStatus::Valid { .. } => CheckResult::ok("MyAnimeList", "signed in"),
+        TokenStatus::Refreshed { .. } => CheckResult::ok("MyAnimeList", "signed in"),
+        TokenStatus::RefreshRejected(_) => {
+            CheckResult::fail("MyAnimeList", "sign-in expired").with_action("tsuzuki sync login")
+        }
+        TokenStatus::NetworkError(_) => {
+            CheckResult::warn("MyAnimeList", "could not verify sign-in (network error)")
+        }
     }
 }
 
@@ -659,6 +640,56 @@ mod tests {
     use crate::state::{SeriesRecord, Status};
     use std::fs as std_fs;
     use tempfile::tempdir;
+
+    // --- CheckResult::render, combine ---
+
+    #[test]
+    fn render_uses_symbols_and_indents_the_action_line() {
+        let ok = CheckResult::ok("mpv", "native installation found");
+        assert_eq!(ok.render(), "✓ mpv — native installation found");
+
+        let warn = CheckResult::warn(
+            "mpv permissions",
+            "tracked directories may not be accessible",
+        )
+        .with_action("flatpak info --show-permissions io.mpv.Mpv");
+        assert_eq!(
+            warn.render(),
+            "⚠ mpv permissions — tracked directories may not be accessible\n  → flatpak info --show-permissions io.mpv.Mpv"
+        );
+
+        let fail = CheckResult::fail("mpv", "not found");
+        assert_eq!(fail.render(), "✗ mpv — not found");
+    }
+
+    #[test]
+    fn combine_is_ok_only_when_every_result_is_ok() {
+        let all_ok = [CheckResult::ok("x", "a"), CheckResult::ok("x", "b")];
+        let r = combine("group", "all good", &all_ok);
+        assert_eq!(r.level, Level::Ok);
+        assert_eq!(r.message, "all good");
+    }
+
+    #[test]
+    fn combine_fail_wins_over_warn_and_ok() {
+        let mixed = [
+            CheckResult::ok("x", "fine"),
+            CheckResult::warn("x", "hmm"),
+            CheckResult::fail("x", "broken").with_action("fix it"),
+        ];
+        let r = combine("group", "all good", &mixed);
+        assert_eq!(r.level, Level::Fail);
+        assert_eq!(r.message, "broken");
+        assert_eq!(r.action.as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn combine_warn_wins_over_ok_when_no_fail_present() {
+        let mixed = [CheckResult::ok("x", "fine"), CheckResult::warn("x", "hmm")];
+        let r = combine("group", "all good", &mixed);
+        assert_eq!(r.level, Level::Warn);
+        assert_eq!(r.message, "hmm");
+    }
 
     // --- 1a: mpv availability ---
 
@@ -829,7 +860,8 @@ mod tests {
         };
         let r = check_mpv_conf(&install);
         assert_eq!(r.level, Level::Fail);
-        assert!(r.message.contains("does not exist"));
+        assert!(r.message.contains("not enabled"));
+        assert!(r.action.is_some());
     }
 
     #[cfg(unix)]
@@ -1141,7 +1173,6 @@ mod tests {
         let checks = check_tracked_roots(&config, None);
         assert_eq!(checks.len(), 1);
         assert!(checks[0].valid);
-        assert_eq!(checks[0].result.level, Level::Ok);
     }
 
     #[test]
@@ -1153,7 +1184,31 @@ mod tests {
 
         let checks = check_tracked_roots(&config, None);
         assert!(!checks[0].valid);
-        assert_eq!(checks[0].result.level, Level::Fail);
+    }
+
+    #[test]
+    fn summarize_tracked_roots_with_none_configured_is_ok_not_absent() {
+        let r = summarize_tracked_roots(&[]);
+        assert_eq!(r.level, Level::Ok);
+        assert!(r.action.is_some());
+    }
+
+    #[test]
+    fn summarize_tracked_roots_names_every_unreachable_root_not_just_the_first() {
+        let checks = [
+            RootCheck {
+                root: "~/Anime".to_string(),
+                valid: false,
+            },
+            RootCheck {
+                root: "~/Manga".to_string(),
+                valid: false,
+            },
+        ];
+        let r = summarize_tracked_roots(&checks);
+        assert_eq!(r.level, Level::Fail);
+        assert!(r.message.contains("~/Anime"));
+        assert!(r.message.contains("~/Manga"));
     }
 
     // --- 1h: orphaned records ---
@@ -1266,7 +1321,10 @@ mod tests {
         assert_eq!(r.level, Level::Fail);
         assert!(r.message.contains("Monster"));
         assert!(r.message.contains("One Piece"));
-        assert!(r.message.contains("tsuzuki doctor --fix --forget-orphans"));
+        assert_eq!(
+            r.action.as_deref(),
+            Some("tsuzuki doctor --fix --forget-orphans")
+        );
     }
 
     #[test]
@@ -1358,7 +1416,6 @@ mod tests {
             expires_in_secs: 1800,
         });
         assert_eq!(r.level, Level::Ok);
-        assert!(r.message.contains("1800"));
     }
 
     #[test]
@@ -1373,7 +1430,7 @@ mod tests {
     fn mal_auth_refresh_rejected_is_fail() {
         let r = check_mal_auth(&TokenStatus::RefreshRejected("invalid_grant".to_string()));
         assert_eq!(r.level, Level::Fail);
-        assert!(r.message.contains("sync login"));
+        assert_eq!(r.action.as_deref(), Some("tsuzuki sync login"));
     }
 
     #[test]

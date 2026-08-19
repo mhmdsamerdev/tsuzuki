@@ -662,6 +662,63 @@ result or an action.
   the common all-good run. Exit-code logic (`ExitCode::FAILURE` iff any
   series failed) is unchanged — only the printed text changed.
 
+### Doctor output is a concise health report, not a narration of every internal check
+Phase 9 UX polish: `tsuzuki doctor` was printing one `[OK]`/`[WARN]`/`[FAIL]`
+row per *internal check function call* — two rows for `mpv.conf` (one per
+mpv install), two for `tsuzuki.lua`, up to three for `mpv-log` candidate
+directories, each with raw absolute paths, candidate-directory counts, and
+token-expiration seconds in the message. Redesigned around the same `✓`/
+`⚠`/`✗` symbol language `sync`'s own output already established (CLAUDE.md's
+"Sync output only ever suggests a confident fuzzy match" above), so the CLI
+has one consistent visual vocabulary for "this is fine" / "this needs
+attention" / "this is broken" across every command, not two.
+
+- **`doctor::CheckResult` gained an `action: Option<String>`** — the one
+  concrete next step, rendered on its own indented `  → ...` line under the
+  check. A check's `message` states the result in a few words; `action` is
+  the only place a raw path or exact command belongs (e.g. `→ flatpak info
+  --show-permissions io.mpv.Mpv`, or the exact mpv.conf path to edit) —
+  because it's something the user will actually act on, not backstory.
+  Detail that's neither the result nor a next step (candidate-directory
+  counts, token expiration seconds, "skipped — no mpv install detected"
+  placeholder rows) is dropped from the default report entirely rather than
+  shortened — CLAUDE.md's "reserved for a future verbose mode," not
+  something this pass builds.
+- **`doctor::combine`** folds several same-category `CheckResult`s
+  (typically one per mpv install) into a single displayed row — the worst
+  level wins, and on a tie the first offending check's own message/action is
+  shown, not a list of every constituent. Used for "mpv config" (per-install
+  `write-filename-in-watch-later-config` checks) and "companion script"
+  (per-install `tsuzuki.lua` status *and* every candidate mpv-log
+  directory's reachability, folded together — both are about the same
+  optional feature, so they read as one row, not two). `summarize_tracked_
+  roots` is the one deliberate exception to "first offender only": every
+  unreachable tracked root is named, since each is independently
+  actionable, not just the first one found — a user with two broken roots
+  needs to see both, not fix one and re-run `doctor` to discover the other.
+- **A check with nothing to check against is omitted, not shown as a hollow
+  "skipped" row.** No mpv install detected at all → no "mpv config" or
+  "companion script" row (the "mpv" row's own FAIL already says everything
+  there is to say). Flatpak not present → no "mpv permissions" row. This is
+  a display-only decision — the underlying check functions
+  (`check_flatpak_permissions`, etc.) still handle the "not applicable"
+  input gracefully and return a `CheckResult` for it, since they're
+  independently unit-tested and may feed a future verbose mode; `main.rs`'s
+  `doctor_command` just doesn't push that result into the default report.
+- **Severity levels are unchanged** — this pass only touched *how* a result
+  is displayed, never *whether* a check is OK/WARN/FAIL or whether it
+  affects the exit code (`ExitCode::FAILURE` iff any row is `Fail`, still
+  computed after `--fix`/`--forget-orphans` mutation, unchanged). Revisiting
+  any check's severity (e.g. whether "companion script not installed"
+  should really be FAIL given the script is documented as strictly
+  optional) is a separate, deliberate decision this pass didn't make.
+- **The report ends with one summary line** — "All checks passed." or "`N`
+  issue(s) found." (`doctor_summary_line`), counting `Warn` and `Fail`
+  together as "issues" (both are worth the user's attention, even though
+  only `Fail` moves the exit code) — mirrors `sync`'s own run-end summary
+  line, the same "diagnose, don't narrate" goal applied to the last line
+  of output as much as every line above it.
+
 ## 4. Dev environment
 
 **All build/test/lint commands run inside `nix-shell`**, not against the
