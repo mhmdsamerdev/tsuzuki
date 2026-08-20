@@ -50,9 +50,9 @@ pub struct SeriesRecord {
     pub episode_number: Option<u32>,
     /// Unix seconds. Only moves on a genuine, persisted state change — never
     /// on a mere scan/invocation, and never on a sub-`resume_seconds`
-    /// observation (CLAUDE.md's "Cursor movement"). Exists to give
-    /// `auto_pause_days` real meaning later; nothing in this phase acts on
-    /// it yet beyond keeping it accurate.
+    /// observation (CLAUDE.md's "Cursor movement"). This is exactly the
+    /// idleness clock `reconcile::apply_idle_auto_pause` reads against
+    /// `[thresholds] auto_pause_days`.
     pub updated_at: u64,
     /// Phase 8b: the highest episode number a MAL sync merge has confirmed
     /// either side already knows about for this series — set only by

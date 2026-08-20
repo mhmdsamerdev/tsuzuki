@@ -251,8 +251,49 @@ fn reconcile_with_script_log_dirs(
         );
     }
 
+    apply_idle_auto_pause(state, config.thresholds.auto_pause_days, now_unix());
+
     ReconcileOutcome {
         warning: scan.warning,
+    }
+}
+
+/// Auto-`Pause`s every `in_progress` record whose `updated_at` has gone
+/// idle for at least `auto_pause_days` days (CLAUDE.md's "`auto_pause_days`
+/// defaults to 0 (never auto-pause)", design.md §8's "nonzero opts an idle
+/// series into auto-`paused`, never auto-`dropped`"). `auto_pause_days ==
+/// 0` (the default) disables this pass entirely — a nonzero value is the
+/// only thing that ever turns it on, never guessed or defaulted-on.
+///
+/// A deliberately separate, final pass over `state.series` rather than
+/// folded into `reconcile_one_series`'s own branching: idleness is a
+/// property of `updated_at` alone, independent of whether this particular
+/// invocation found any fresh activity for that series (most idle series
+/// have none — that's the whole point) or took any of
+/// `reconcile_one_series`'s many early-return paths. Running it *after*
+/// that loop is what makes it safe: a series that this same reconcile pass
+/// just genuinely touched already has `updated_at == now`, so it can never
+/// immediately idle-pause itself in the same call.
+///
+/// Only `InProgress -> Paused` — `Paused` and `Dropped` records are already
+/// excluded from the automatic resume picker, so there is nothing for
+/// idleness to act on there (and `Dropped` has no `Paused` transition at
+/// all, CLAUDE.md's allowed-transitions table). Bumping `updated_at` to
+/// `now` on the transition matches `pause_drop::pause`'s own precedent:
+/// this is a genuine, persisted status change, the same category of event
+/// that already moves it everywhere else in this codebase.
+fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
+    if auto_pause_days == 0 {
+        return;
+    }
+    let idle_threshold_seconds = auto_pause_days.saturating_mul(86_400);
+    for record in &mut state.series {
+        if record.status == Status::InProgress
+            && now.saturating_sub(record.updated_at) >= idle_threshold_seconds
+        {
+            record.status = Status::Paused;
+            record.updated_at = now;
+        }
     }
 }
 
@@ -2354,6 +2395,165 @@ mod tests {
         );
         assert_eq!(record.updated_at, 1, "no genuine change occurred");
         assert_eq!(record.position_seconds, 300.0);
+    }
+
+    // --- auto_pause_days ---
+
+    fn idle_in_progress_record(root: &Path, name: &str, updated_at: u64) -> SeriesRecord {
+        SeriesRecord {
+            root: root.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            status: Status::InProgress,
+            current_relative_path: format!("{name}/ep01.mkv"),
+            position_seconds: 500.0,
+            episode_number: Some(1),
+            updated_at,
+            mal_episode_awareness: None,
+        }
+    }
+
+    #[test]
+    fn auto_pause_days_zero_never_pauses_no_matter_how_old() {
+        // The documented default (CLAUDE.md: "auto_pause_days defaults to
+        // 0 (never auto-pause)") — 0 must disable this entirely, not just
+        // set a very long threshold.
+        let mut state = State {
+            series: vec![idle_in_progress_record(Path::new("~/Anime"), "Monster", 0)],
+            mal_links: Vec::new(),
+        };
+        apply_idle_auto_pause(&mut state, 0, 10_000_000_000);
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(
+            state.series[0].updated_at, 0,
+            "a disabled pass must not touch updated_at either"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_auto_pause_days_pauses_a_genuinely_idle_series() {
+        let now = 10 * 86_400; // day 10
+        let updated_at = 0; // idle for exactly 10 days
+        let mut state = State {
+            series: vec![idle_in_progress_record(
+                Path::new("~/Anime"),
+                "Monster",
+                updated_at,
+            )],
+            mal_links: Vec::new(),
+        };
+        apply_idle_auto_pause(&mut state, 10, now);
+        let record = &state.series[0];
+        assert_eq!(record.status, Status::Paused);
+        assert_eq!(
+            record.updated_at, now,
+            "the transition itself is a genuine, persisted change and must bump updated_at, \
+             matching pause_drop::pause's own precedent"
+        );
+        // Design.md §8: "never auto-dropped" — idleness only ever reaches
+        // Paused, position/episode stay exactly as they were.
+        assert_eq!(record.position_seconds, 500.0);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+    }
+
+    #[test]
+    fn a_series_idle_for_fewer_than_auto_pause_days_stays_in_progress() {
+        let now = 5 * 86_400; // day 5
+        let updated_at = 0;
+        let mut state = State {
+            series: vec![idle_in_progress_record(
+                Path::new("~/Anime"),
+                "Monster",
+                updated_at,
+            )],
+            mal_links: Vec::new(),
+        };
+        // 10-day threshold, only 5 days idle so far.
+        apply_idle_auto_pause(&mut state, 10, now);
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(state.series[0].updated_at, updated_at);
+    }
+
+    #[test]
+    fn already_paused_and_dropped_records_are_left_alone_regardless_of_age() {
+        let ancient = 0u64;
+        let now = 100 * 86_400;
+        let mut state = State {
+            series: vec![
+                SeriesRecord {
+                    status: Status::Paused,
+                    ..idle_in_progress_record(Path::new("~/Anime"), "AlreadyPaused", ancient)
+                },
+                SeriesRecord {
+                    status: Status::Dropped,
+                    ..idle_in_progress_record(Path::new("~/Anime"), "AlreadyDropped", ancient)
+                },
+            ],
+            mal_links: Vec::new(),
+        };
+        apply_idle_auto_pause(&mut state, 1, now);
+        assert_eq!(state.series[0].status, Status::Paused);
+        assert_eq!(
+            state.series[0].updated_at, ancient,
+            "no transition occurred, no bump"
+        );
+        assert_eq!(state.series[1].status, Status::Dropped);
+        assert_eq!(
+            state.series[1].updated_at, ancient,
+            "Dropped -> Paused does not exist; idleness must never invent it"
+        );
+    }
+
+    #[test]
+    fn reconcile_wires_auto_pause_days_end_to_end_and_never_immediately_repauses_fresh_activity() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let idle_series = root.join("Monster");
+        let fresh_series = root.join("Naruto");
+        touch(&idle_series.join("ep01.mkv"));
+        touch(&fresh_series.join("ep01.mkv"));
+
+        let mut config = default_config(&root);
+        config.thresholds.auto_pause_days = 7;
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+
+        let long_ago = now_unix().saturating_sub(30 * 86_400);
+        let mut state = State {
+            series: vec![
+                // No fresh watch_later activity at all this run — genuinely
+                // idle for 30 days against a 7-day threshold.
+                idle_in_progress_record(&root, "Monster", long_ago),
+            ],
+            mal_links: Vec::new(),
+        };
+
+        // Naruto has a brand-new, real bookmark *in this very reconcile
+        // call* — reconcile_one_series will set its updated_at to "now".
+        // A 7-day auto_pause_days must never immediately re-pause activity
+        // this same pass just observed.
+        write_entry(
+            &watch_later,
+            "entry1",
+            &fresh_series.join("ep01.mkv"),
+            300.0,
+        );
+
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+
+        let monster = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            monster.status,
+            Status::Paused,
+            "a genuinely idle in_progress series must be auto-paused end to end"
+        );
+
+        let naruto = state.find(&root.to_string_lossy(), "Naruto").unwrap();
+        assert_eq!(
+            naruto.status,
+            Status::InProgress,
+            "fresh activity observed in this same reconcile pass must never be immediately \
+             auto-paused"
+        );
     }
 
     #[test]

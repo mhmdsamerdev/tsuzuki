@@ -147,6 +147,32 @@ fn write_script_log(
     .unwrap();
 }
 
+/// Rewrites the single existing `state.toml` record's `updated_at` field
+/// to `seconds_ago` in the past — the only way to exercise `auto_pause_days`
+/// idleness from outside the crate (this test binary can't reach
+/// `state::now_unix()`'s callers directly, and there's no CLI surface for
+/// backdating a record — genuine idleness only ever comes from real time
+/// passing). A plain text find-and-replace, exactly like `bypass_real_mpv`'s
+/// own `command_override` patch above; only valid for a single-record
+/// `state.toml`, which is all this suite ever needs it for.
+fn backdate_only_updated_at(home: &Path, seconds_ago: u64) {
+    let path = state_path(home);
+    let contents = fs::read_to_string(&path).unwrap();
+    let marker = "updated_at = ";
+    let start = contents
+        .find(marker)
+        .expect("state.toml must contain updated_at")
+        + marker.len();
+    let rest = &contents[start..];
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let old_value: u64 = rest[..digits_end].parse().unwrap();
+    let new_value = old_value.saturating_sub(seconds_ago);
+    let patched = format!("{}{new_value}{}", &contents[..start], &rest[digits_end..]);
+    fs::write(&path, patched).unwrap();
+}
+
 /// mtime resolution on some filesystems is coarse enough that two writes
 /// within the same instant can tie — every freshest-file-wins scenario in
 /// this suite needs a genuinely later mtime, not just a later wall-clock
@@ -966,4 +992,72 @@ fn sync_without_a_prior_login_fails_cleanly_with_no_network_access() {
         "the error must point at the actual next step, got: {}",
         stderr_of(&sync)
     );
+}
+
+// ---------------------------------------------------------------------
+// 14. `auto_pause_days`: off by default (a genuinely idle series stays
+//     in_progress forever), and — once explicitly opted in — a real,
+//     end-to-end auto-pause of a genuinely idle series, never a drop,
+//     never touching its saved position.
+// ---------------------------------------------------------------------
+
+#[test]
+fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let anime_root = home.join("Anime");
+    let file = anime_root.join("Monster").join("ep01.mkv");
+    touch(&file);
+    add_root(home, &anime_root);
+
+    write_watch_later(home, "entry", &file, 300.0);
+    run_ok(home, &["list"]); // persists a real in_progress record
+
+    // Backdating alone, with the documented default (0 = never auto-pause)
+    // still in effect, must never pause anything — no matter how old.
+    // Merely re-running `list` never bumps `updated_at` on its own (the
+    // watch_later entry is unchanged, so reconcile finds no genuine
+    // change) — direct backdating is the only way to simulate real
+    // elapsed time here.
+    backdate_only_updated_at(home, 365 * 86_400);
+    let list_default = run_ok(home, &["list"]);
+    assert!(
+        list_default.contains("In progress:"),
+        "auto_pause_days defaults to 0 (never auto-pause); got: {list_default}"
+    );
+
+    // Opt in to a real 1-day threshold.
+    let cfg = config_path(home);
+    let patched = fs::read_to_string(&cfg)
+        .unwrap()
+        .replace("auto_pause_days = 0", "auto_pause_days = 1");
+    fs::write(&cfg, patched).unwrap();
+
+    // Genuine fresh activity (a distinguishably different real position)
+    // refreshes `updated_at` to now — a 1-day-old bar hasn't been cleared
+    // yet, so this must stay in_progress.
+    ensure_next_write_is_strictly_fresher();
+    write_watch_later(home, "entry", &file, 600.0);
+    let list_still_fresh = run_ok(home, &["list"]);
+    assert!(
+        list_still_fresh.contains("In progress:"),
+        "got: {list_still_fresh}"
+    );
+
+    // Genuinely idle for 2 days against the 1-day threshold, no further
+    // activity accompanying it.
+    backdate_only_updated_at(home, 2 * 86_400);
+
+    let list_idle = run_ok(home, &["list"]);
+    assert!(
+        list_idle.contains("Paused:") && !list_idle.contains("In progress:"),
+        "a series idle past auto_pause_days must be auto-paused, got: {list_idle}"
+    );
+
+    // design.md §8: "never auto-dropped" — the saved position/episode must
+    // survive the transition untouched, exactly like a manual pause.
+    let state_after = fs::read_to_string(state_path(home)).unwrap();
+    assert!(state_after.contains("600"), "got:\n{state_after}");
+    assert!(state_after.contains("ep01.mkv"), "got:\n{state_after}");
 }
