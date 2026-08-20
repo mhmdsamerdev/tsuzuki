@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.0]
 
 - Tracked roots, natural-sort episode ordering, and exclusions.
 - mpv `watch_later` tracking, with an optional companion script
