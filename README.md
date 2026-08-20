@@ -121,15 +121,20 @@ connection, and no setup beyond pointing Tsuzuki at your files.
 
 ## Installing
 
-Tsuzuki is a single Rust binary. From source, for now:
+```
+curl -LsSf https://github.com/mhmdsamerdev/tsuzuki/releases/latest/download/tsuzuki-installer.sh | sh
+```
+
+Downloads and installs a prebuilt `tsuzuki` binary — nothing else to set
+up. Linux only, for now.
+
+### Building from source instead
 
 ```
 git clone https://github.com/mhmdsamerdev/tsuzuki
 cd tsuzuki
 cargo install --path .
 ```
-
-Prebuilt binaries are on the way. Linux only, for now.
 
 ## Contributing
 

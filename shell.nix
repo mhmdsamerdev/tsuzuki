@@ -16,6 +16,14 @@ pkgs.mkShell {
     pkgs.pkg-config
     pkgs.openssl
 
+    # Release builds vendor+statically-link their own OpenSSL (Cargo.toml's
+    # `openssl = { features = ["vendored"] }") so distributed binaries don't
+    # depend on the install machine's system libssl. Building that vendored
+    # copy shells out to `perl ./Configure`, which needs a real perl with
+    # its core modules (FindBin, etc.) on PATH — the host's own perl isn't
+    # guaranteed to have these, so pull nixpkgs' own in ahead of it.
+    pkgs.perl
+
     # Useful, not required: lets `cargo dist` (Phase 8) work without
     # reaching outside the shell for another toolchain.
     pkgs.cargo-dist

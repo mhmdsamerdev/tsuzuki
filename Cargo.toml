@@ -5,6 +5,10 @@ members = [".", "vendor/anitomy"]
 name = "tsuzuki"
 version = "0.1.0"
 edition = "2024"
+description = "Remembers what you were watching in mpv and resumes it with one command."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/mhmdsamerdev/tsuzuki"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
@@ -31,3 +35,16 @@ ureq = { version = "2.10", default-features = false, features = ["native-tls", "
 # comment for the real, dogfooded failure this fixes.
 native-tls = "0.2"
 webbrowser = "1.0"
+# Forces the openssl-sys dependency native-tls pulls in on Linux to build
+# and statically link its own vendored OpenSSL, rather than linking
+# against whatever libssl happens to be on the build/install machine.
+# Without this, a prebuilt release binary would only run on a system with
+# a compatible system OpenSSL already installed — the opposite of a
+# `curl | sh` install just working. Cargo unifies this feature across the
+# whole dependency graph, so declaring it here is enough.
+openssl = { version = "0.10", features = ["vendored"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
