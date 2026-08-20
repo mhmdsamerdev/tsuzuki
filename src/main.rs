@@ -1078,7 +1078,10 @@ fn sync_link_command(
                     state_path.display()
                 ));
             }
-            confirm(&format!("\"{series}\""), &format!("linked to MAL #{mal_id}"));
+            confirm(
+                &format!("\"{series}\""),
+                &format!("linked to MAL #{mal_id}"),
+            );
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e.to_string()),
