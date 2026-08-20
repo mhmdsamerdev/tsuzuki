@@ -4,10 +4,9 @@ Read this in full at the start of every session before touching code. It is
 the authoritative spec. If something here conflicts with what you remember
 from an earlier session, this file wins — it's kept current on purpose.
 
-Companion file: **`PROGRESS.md`** tracks which phase we're on and what's
-actually done. This file (`CLAUDE.md`) never contains status updates —
-only decisions and the reasoning that protects them. Check `PROGRESS.md`
-first to know where to resume; check `CLAUDE.md` to know how to build it.
+Companion file: **`CHANGELOG.md`** is a short, flat list of what's
+shipped — nothing more. This file (`CLAUDE.md`) never contains status
+updates or history — only decisions and the reasoning that protects them.
 
 ---
 
@@ -19,10 +18,14 @@ what the user was watching in mpv and resumes it with one command:
 it answers exactly one question: *what was I watching, where did I stop,
 and can you take me back there instantly?*
 
-Full product rationale lives in `docs/design.md` (the original design doc).
-This file only holds what changes how you should write code — read
-`docs/design.md` once at project start for the "why we're building this at
-all" narrative; come back here for every implementation decision.
+`README.md` is the public-facing pitch — what Tsuzuki does and why,
+written for someone deciding whether to install it. This file is
+different: it's for whoever is changing the code, and holds only the
+decisions and reasoning that shape *how* it's built, not a restatement of
+the product description.
+
+Tsuzuki shipped v0.1.0 and is now in **maintenance mode** (§6) — small
+fixes, targeted enhancements, dependency upkeep, not an active build plan.
 
 ---
 
@@ -64,6 +67,11 @@ category and only feeds the natural-sort tree. A layout that doesn't fit
 (e.g. a `Rewatches/` layer) gets registered as its own root
 (`tsuzuki add ~/Anime/Rewatches`) — composable roots is the general
 escape hatch; don't add a depth-detection flag for one folder shape.
+
+**The series name is the directory name itself, verbatim** — no parsing,
+no bracket-stripping, ever. People reliably name the top-level show folder
+sensibly; the noisy release-group/quality tags live deeper, where Tsuzuki
+never has to read them for identity purposes.
 
 ### State vs. config are two separate files
 `~/.config/tsuzuki/config.toml` (human-tunable, hand-edited, versionable
@@ -114,8 +122,13 @@ spawn-and-release.
   directory/playlist in mpv, no real position — are filtered out.
 - **Candidate `watch_later` paths are a fixed list per OS/install method**
   (native/Flatpak/Snap), merged freshest-file-wins — never environment
-  detection. See `docs/design.md` §4 for the path list; keep `doctor`'s
-  checks in sync with it.
+  detection. The full list (`mpv.rs`'s `CANDIDATES`, v1 Linux-only):
+  `~/.local/state/mpv/watch_later/` (native, mpv ≥ 0.33), `~/.cache/mpv/
+  watch_later/` (native, older mpv), the same two paths again under
+  `~/.var/app/io.mpv.Mpv/...` (Flatpak), and
+  `~/snap/mpv/current/.local/state/mpv/watch_later/` (Snap). macOS/Windows
+  rows are parameterized but deliberately unverified (§5). Keep `doctor`'s
+  checks in sync with this list.
 - **Absence of a `watch_later` entry is never, by itself, proof of
   completion** — see "Completion detection has a real blind spot" below.
 
@@ -214,6 +227,18 @@ picker, which makes the opposite tradeoff for the opposite reason).
 - **Exclusion enforcement checks the resolved (symlink-following) path,
   not the walked entry's literal path** — a symlink outside an excluded
   dir but pointing into it must still be excluded.
+
+### Episode ordering: hierarchical natural sort, directories fully before a level's own files
+Directories at a given level are natural-sort-ordered and walked
+depth-first *before* that same level's own loose files are appended — not
+interleaved into one flat natural-sort pass. A series root with both a
+`Season 1/` folder and a stray loose OVA file sitting next to it orders
+every file under `Season 1/` before the loose one, regardless of what a
+plain natural-sort comparison between the directory name and the filename
+would suggest on its own. `series.rs`'s `walk` implements this directly:
+subdirs are recursed into `out` fully before the current level's own
+`files` are extended onto it. Files/folders with no embedded number fall
+back to plain alphabetical ordering among themselves.
 
 ### Anitomy only annotates, never reorders
 `anitomy-rs` parses episode *identity* for MAL sync. When parsing fails,
@@ -317,17 +342,17 @@ rather than kept as a redundant wrapper.
 Bare `tsuzuki exclude` lists suggested candidates plus the exact
 `tsuzuki exclude "<path>"` command for each — no interactive walkthrough,
 no separate indexed `--confirm` command. Re-running with an explicit path
-reuses Phase 2's already-validated logic rather than adding new
-cross-invocation state (an index from a prior listing would only be valid
-if nothing changed on disk in between — a guarantee this project avoids
-relying on).
+reuses `exclude`'s own already-validated resolution logic rather than
+adding new cross-invocation state (an index from a prior listing would
+only be valid if nothing changed on disk in between — a guarantee this
+project avoids relying on).
 
 ### Clippy's strict gate is scoped to `-p tsuzuki --no-deps`, not `--workspace`
 `vendor/anitomy` is a workspace member (needed for `cargo build`) but is
 off-limits code — never held to Tsuzuki's own lint bar. `cargo build
 --workspace` still checks the whole thing compiles; only the `-D
-warnings` clippy gate is scoped down. See COMMANDS.md for the exact
-command.
+warnings` clippy gate is scoped down. See `docs/development.md` for the
+exact command.
 
 ### Threshold precedence when position + completion checks overlap (short files)
 On a short enough file, a single position can satisfy both
@@ -336,8 +361,8 @@ once. `mpv.rs`'s `classify()` has the position check win → `StartFromZero`,
 never `Completed`. Reasoning: the wrong-call-cost is asymmetric (falsely
 claiming progress vs. a possible few-second rewatch), and the
 independent absence/duration completion signal still catches these cases
-separately. A judgment call, not a design.md spec — a one-line change in
-`classify()` if real usage disagrees.
+separately. A judgment call, not a hard requirement — a one-line change
+in `classify()` if real usage disagrees.
 
 **`start`'s listing has three distinct display words, one per state.**
 Never-started (no record) → **"Start."** Paused → **"Resume"** (real
@@ -472,10 +497,28 @@ extension-gated. **Unreadable duration is surfaced with a reason, never
 silently dropped to `None`** — but only skips the completion check for
 that file (resume-from-position is unaffected).
 
-### auto_pause_days defaults to 0 (never auto-pause)
-Deliberate. A nonzero default would guess intent (break vs. abandoned vs.
-waiting for episodes to air) — the inference this project avoids
-everywhere else.
+### auto_pause_days: default 0 (never auto-pause), and how the idle pass works once opted in
+Default `0` is deliberate — a nonzero default would guess intent (break
+vs. abandoned vs. waiting for episodes to air), the inference this
+project avoids everywhere else. A nonzero value is the only thing that
+ever turns this on.
+
+Once opted in, `reconcile::apply_idle_auto_pause` runs as its own final
+pass after every per-series reconcile call, not folded into
+`reconcile_one_series`'s own branching — idleness is a property of
+`updated_at` alone, independent of whether a given invocation found any
+fresh activity for that series (most idle series have none). Running it
+*after* the main per-series loop is what makes it safe: a series that pass
+just genuinely touched already has `updated_at == now`, so it can never
+immediately idle-pause itself in the same call.
+
+Only `InProgress -> Paused`, never `Dropped` — idleness alone never
+justifies a destructive transition, the same reasoning every other
+`Dropped` transition in this codebase already follows (manual `drop`, or
+a confirmed completion signal — never a mere timeout). Bumping
+`updated_at` to `now` on the transition matches `pause_drop::pause`'s own
+precedent — a genuine, persisted status change, the same category of
+event that already moves it everywhere else.
 
 ### `state.toml` record identity, root reference, and `updated_at`
 Keyed by **both** tracked root and literal series name — never name
@@ -592,7 +635,7 @@ reasoning):
   `push_episode_count` is ever touched.
 
 ### MAL push number is the last watched episode, not the tracked cursor
-Found in Phase 9 dogfooding: `SeriesRecord.episode_number` is a *cursor* —
+Found during real dogfooding: `SeriesRecord.episode_number` is a *cursor* —
 the episode currently being watched (a real mid-episode position), or the
 one just advanced to at position 0 after the previous episode completed
 (see "When the CURRENT tracked episode itself completes" above) — never
@@ -622,13 +665,16 @@ episode finished.
 This still doesn't perfectly resolve every case (e.g. a manual
 `tsuzuki drop` moments after quitting meaningfully-but-not-fully into an
 episode still reads as "watched" under the `Dropped`-with-nonzero-position
-rule) — an accepted, narrow edge case in the same spirit as §7's already-
-documented local/MAL numbering-drift gap in `docs/design.md`, not
-something worth a new persisted "was this episode actually completed"
-field for.
+rule) — an accepted, narrow edge case, in the same spirit as the other
+known local/MAL numbering gap this project accepts rather than chases:
+local and MAL episode numbering can drift beyond what Anitomy catches
+(split-cour renumbering, dub/sub episode-count differences), and the
+local-to-MAL correspondence is only ever fixed at link time — further
+drift is a manual re-link. Neither case is worth a new persisted "was this
+episode actually completed" field for.
 
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series
-Found in Phase 9 dogfooding: `tsuzuki sync` was printing every one of
+Found during real dogfooding: `tsuzuki sync` was printing every one of
 `rank_candidates`' top-5 results, similarity percentage included, even
 when the "closest" candidate was still an unrelated series. A weak
 candidate isn't a helpful suggestion — it's noise the user has to read
@@ -666,7 +712,7 @@ result or an action.
   series failed) is unchanged — only the printed text changed.
 
 ### Doctor output is a concise health report, not a narration of every internal check
-Phase 9 UX polish: `tsuzuki doctor` was printing one `[OK]`/`[WARN]`/`[FAIL]`
+A later UX pass: `tsuzuki doctor` was printing one `[OK]`/`[WARN]`/`[FAIL]`
 row per *internal check function call* — two rows for `mpv.conf` (one per
 mpv install), two for `tsuzuki.lua`, up to three for `mpv-log` candidate
 directories, each with raw absolute paths, candidate-directory counts, and
@@ -723,14 +769,12 @@ attention" / "this is broken" across every command, not two.
   of output as much as every line above it.
 
 ### `tsuzuki config` is show/edit, not a settings-store CLI
-Phase 9: `config get`/`set`/`list`/`edit` were Phase-0 stubs (`main.rs`'s
-`stub("config get")` etc.) that had never been implemented, and never
-assigned to any real phase — `docs/design.md` §12 only ever promised they'd
-print "not implemented." Implementing them finally forced the question
-design.md's original config example never actually answered: what is
-`config` *for*, given `config.toml` is already explicitly the human-
-hand-edited, dotfiles-versionable file (this section, "State vs. config are
-two separate files")? A `get`/`set` layer earns its place in tools where
+`config get`/`set`/`list`/`edit` started as unimplemented stubs that just
+printed "not implemented." Implementing them for real forced a question
+that had never actually been answered: what is `config` *for*, given
+`config.toml` is already explicitly the human-hand-edited,
+dotfiles-versionable file (this section, "State vs. config are two
+separate files")? A `get`/`set` layer earns its place in tools where
 most users never touch the underlying file directly (git, npm) — that's
 not this tool. Reasoned from Tsuzuki's own actual usage pattern (one
 person, their own machine, values set once at setup and rarely revisited)
@@ -781,9 +825,10 @@ instead of copying that shape, `get`/`set`/`list` didn't survive:
 **All build/test/lint commands run inside `nix-shell`**, not against the
 host's system Rust or system gcc. `shell.nix` at the repo root pins the
 toolchain (rustup-managed rustc/cargo, gcc as linker, pkg-config + openssl
-for the eventual MAL HTTP client, cargo-dist for Phase 8). This exists
-because the host's package manager had a transient gcc/glibc version
-mismatch when this project started — nix-shell was the fix, and it's
+for the MAL HTTP client's vendored-OpenSSL build, cargo-dist for building
+release binaries). This exists because the host's package manager had a
+transient gcc/glibc version mismatch when this project started — nix-shell
+was the fix, and it's
 stayed the standard because it also means anyone (including a future
 Claude Code session on a different machine) gets an identical toolchain
 without touching system packages. Don't suggest `sudo dnf install` for
@@ -794,8 +839,8 @@ If a command in a session transcript or terminal output shows `cargo`/
 `rustc` not found, the fix is `nix-shell` (re-)entry, not a fresh Rust
 install.
 
-Day-to-day commands (build/test/lint/dist) are in `COMMANDS.md` — that
-file is a cheatsheet, not a spec; don't duplicate its contents here.
+Day-to-day commands (build/test/lint/dist) are in `docs/development.md` —
+that file is a cheatsheet, not a spec; don't duplicate its contents here.
 
 ## 5. Tech stack specifics
 
@@ -814,42 +859,52 @@ file is a cheatsheet, not a spec; don't duplicate its contents here.
 - **Testing:** `cargo test` + `assert_cmd` (end-to-end against the
   compiled binary) + `tempfile` (fabricated directory trees for ordering/
   exclusion tests — never touch the real filesystem or a real mpv
-  install). Phases 1–3 (ordering, exclusions, Anitomy) should be testable
-  with zero real I/O; if a test in these phases needs real mpv or network
-  access, that's a sign the logic isn't properly isolated yet.
+  install). Core filesystem logic (ordering, exclusions, Anitomy parsing)
+  should be testable with zero real I/O; if a test for it needs real mpv
+  or network access, that's a sign the logic isn't properly isolated.
 - **Distribution target for v1: Linux only.** OS-candidate-path logic
   should stay parameterized (a lookup table, not an `if cfg!(target_os)`
   scattered everywhere) so macOS/Windows paths can be filled in later
   without restructuring — but don't spend effort verifying them now.
+- **Distribution: prebuilt-binary install script only.** GitHub Releases
+  plus a `cargo-dist`-generated `curl | sh` installer is the sole
+  distribution path — deliberately, not just "not done yet." `cargo
+  publish` is blocked on a real, one-way decision: the vendored
+  `tsuzuki-anitomy` fork (§3) would need publishing to crates.io under its
+  own name first — permanent, public, implies ongoing upkeep — and the
+  audience it'd serve is already covered by `cargo install --path .` from
+  source. A `maturin`-built PyPI wheel would be a second, unrelated
+  packaging toolchain for a Rust CLI with no Python connection, aimed at
+  an audience the install script/source build already serves. Neither is
+  worth setting up on spec — only revisit if real demand shows up.
 
 ---
 
-## 6. Build phases & session workflow
+## 6. Maintenance workflow
 
-Phases are defined in full in `docs/design.md` §11 (Phase 0 through
-Phase 8). Reasoning for the phase order and what belongs in each is
-already there — don't duplicate it here, just follow it.
+Tsuzuki shipped v0.1.0 — there is no active build-phase plan anymore, and
+this section doesn't track one. Work from here is ordinary maintenance:
+bug fixes, small targeted enhancements, dependency upkeep. Judge each
+change against §2's non-negotiable principles and §3's existing decisions
+first — most "obvious" improvements to this codebase turn out to be
+exactly the inference/heuristic shortcuts this project has already
+deliberately ruled out. Check before adding one.
 
-**Gate discipline (strict):** don't start the next phase until the
-current phase's own tests are written and passing. If you hit a design
-question mid-phase that isn't resolved by `docs/design.md`, stop and ask
-rather than guessing and moving on — an unresolved ambiguity compounds if
-later phases build on top of a guess.
-
-**Dogfood checkpoint after Phase 5:** this is called out in the design
-doc as the point the tool becomes real end-to-end. Actually pause there
-and confirm with the user before continuing to Phase 6 — don't treat it
-as just another phase boundary.
+**Gate discipline (still strict):** don't propose a change until its own
+tests are written and passing, `cargo fmt -p tsuzuki --check` is clean,
+and the strict clippy gate (§3's "Clippy's strict gate") is clean. If a
+change touches how something behaves and this file doesn't already answer
+the question, stop and ask rather than guessing — an unresolved ambiguity
+is cheap to resolve now and expensive to untangle later.
 
 **Commits:** the user commits manually. At the end of each unit of work,
 propose a single, simple, conventional commit message (imperative mood,
-e.g. `feat: add tracked-root registration and validation`) — don't commit
-yourself, and don't propose a multi-paragraph message.
+e.g. `fix: ...`, `feat: ...`) — don't commit yourself, and don't propose a
+multi-paragraph message.
 
-**Progress tracking:** update `PROGRESS.md` (not this file) as phases
-complete — current phase, what's done, what's next, any open question
-blocking further work. Keep it short; it's a status file, not a log of
-every session's blow-by-blow.
+**Changelog:** add a line to `CHANGELOG.md`'s `[Unreleased]` section for
+any user-visible change (new behavior, fixed bug, changed default) — one
+line, no separate long-form status file.
 
 ---
 

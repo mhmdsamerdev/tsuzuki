@@ -10,7 +10,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# v1 targets Linux only (CLAUDE.md/design.md §10) — macOS/Windows
+# v1 targets Linux only (CLAUDE.md §5) — macOS/Windows
 # watch_later paths are parameterized but deliberately unverified, so no
 # prebuilt binaries are shipped for them yet.
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
