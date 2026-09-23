@@ -8,6 +8,7 @@ All notable changes to Tsuzuki are documented here.
 - Paused series are now excluded from MAL progress sync.
 - Deleted or otherwise unavailable series folders are now excluded from MAL sync.
 - Unchanged series are omitted from sync output so real actions and warnings stand out.
+- MAL entries now move from Plan to Watch to Watching on progress and to Completed when finished.
 
 ## [v0.1.0]
 

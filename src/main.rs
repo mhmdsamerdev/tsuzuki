@@ -963,6 +963,10 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
                 ..
             } => synced += 1,
             sync::OutcomeKind::Merged {
+                action: sync::MergeAction::RemoteStatus(_),
+                ..
+            } => synced += 1,
+            sync::OutcomeKind::Merged {
                 action: sync::MergeAction::NoOp,
                 ..
             } if local_advance.is_some() => synced += 1,
@@ -1035,6 +1039,10 @@ fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>)
         } => local_advance
             .map(|n| vec![format!("✓ {name} — episode {n} synced")])
             .unwrap_or_default(),
+        sync::OutcomeKind::Merged {
+            action: sync::MergeAction::RemoteStatus(status),
+            ..
+        } => vec![format!("✓ {name} — moved to {}", status.display_name())],
         sync::OutcomeKind::NoExactMatch {
             suggestion: Some(c),
         } => vec![
@@ -1348,6 +1356,23 @@ mod tests {
             vec!["✓ Hinamatsuri — episode 9 synced"]
         );
         assert_eq!(sync_summary_line(0, 0, 0), "no changes");
+    }
+
+    #[test]
+    fn status_only_sync_outcome_reports_the_new_mal_list() {
+        let outcome = sync::SeriesOutcome {
+            root: "~/Anime".to_string(),
+            name: "Hinamatsuri".to_string(),
+            kind: sync::OutcomeKind::Merged {
+                mal_id: 36_207,
+                action: sync::MergeAction::RemoteStatus(sync::MalListStatus::Watching),
+            },
+        };
+
+        assert_eq!(
+            sync_outcome_lines(&outcome, None),
+            vec!["✓ Hinamatsuri — moved to Watching"]
+        );
     }
 
     /// Writes a real mpv-style `watch_later` entry matching `record()`'s

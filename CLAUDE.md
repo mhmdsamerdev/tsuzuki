@@ -635,7 +635,7 @@ reasoning):
   and the unofficial MAL API spec). Getting this wrong is silent — MAL
   ignores an unrecognized field rather than erroring, so the episode
   count would just never update. Re-verify this exact swap first if
-  `push_episode_count` is ever touched.
+  `update_mal_entry` is ever touched.
 
 ### MAL push number is the last watched episode, not the tracked cursor
 Found during real dogfooding: `SeriesRecord.episode_number` is a *cursor* —
@@ -705,6 +705,24 @@ the higher count for a future sync. Paused records never reach this step;
 `Dropped` remains a deliberate dead end and sync does not silently reactivate
 it. Position 0 on the next episode is a forward-looking resume target, not a
 claim that Tsuzuki observed playback there.
+
+### MAL status follows confirmed progress, forward only
+Episode sync also keeps MAL's list category consistent with the agreed
+watched count. A `plan_to_watch` entry with any real progress moves to
+`watching`. A `watching` entry moves to `completed` when the agreed count
+reaches MAL's nonzero `num_episodes`, or when Tsuzuki has its existing
+confirmed-finale signature (`Dropped` with a nonzero completion position).
+A fully watched `plan_to_watch` entry moves directly to `completed` in one
+run. The status field is combined with an episode-count push in one PATCH,
+never sent as a second partially-failable write.
+
+These transitions are monotonic and deliberately narrow: Tsuzuki never
+changes MAL's explicit `on_hold` or `dropped` status, never moves
+`completed` backward, and does nothing for an unknown future API status.
+The official MAL v2 schema exposes `start_date` and `finish_date` in response
+objects but does not list either as writable on the anime-list update
+operation. Tsuzuki therefore leaves dates untouched rather than relying on
+undocumented request fields; revisit only if MAL documents them as writable.
 
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series
 Found during real dogfooding: `tsuzuki sync` was printing every one of
