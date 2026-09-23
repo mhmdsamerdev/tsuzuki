@@ -1682,13 +1682,14 @@ mod tests {
                 mal_id: 42,
             }],
         };
-        let outcomes = run_sync(
+        let outcomes = run_sync_on_date(
             &client,
             "token",
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
             TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
         );
 
         assert_eq!(
