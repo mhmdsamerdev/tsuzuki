@@ -97,12 +97,18 @@ episodes are specials that shouldn't be counted, tell it once with
 
 If you keep a MAL list, Tsuzuki can keep it in sync — in both
 directions, always trusting whichever side is further ahead, never
-overwriting real progress:
+overwriting real progress. Starting an episode moves a planned title to
+Watching and records the start date; finishing a series moves it to
+Completed and records the finish date:
 
 ```
 tsuzuki sync login
 tsuzuki sync
 ```
+
+Paused series are skipped, so pausing can temporarily keep a local watch or
+rewatch separate from MAL. Records whose series folders are no longer
+available are skipped too.
 
 Entirely optional. Everything above works with no account, no internet
 connection, and no setup beyond pointing Tsuzuki at your files.

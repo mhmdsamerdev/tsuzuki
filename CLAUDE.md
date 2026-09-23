@@ -95,10 +95,11 @@ count) — that's the fuzzy inference §2 rules out everywhere.
 
 **An orphaned `state.toml` record (series deleted from disk) stays inert
 until explicitly cleaned — never auto-removed.** `start`/`list` can't
-misrepresent it (they cross-reference a live directory walk). The
-automatic resume picker must degrade gracefully if it points at a deleted
-file (skip it, never crash) — but the record itself isn't silently
-deleted just because its path fails to resolve; that would be inference.
+misrepresent it (they cross-reference a live directory walk), and `sync`
+excludes it before MAL authentication or network work. The automatic resume
+picker must degrade gracefully if it points at a deleted file (skip it,
+never crash) — but the record itself isn't silently deleted just because
+its path fails to resolve; that would be inference.
 Cleanup is `doctor`'s job: it detects the orphan and hands back
 `tsuzuki doctor --fix --forget-orphans` (requires `--fix`, enforced by
 clap; prints exactly what it's about to delete; bulk not per-series, since
@@ -624,7 +625,9 @@ reasoning):
   episode, not the tracked cursor" below — it's not the raw
   `episode_number` itself) — without folding a prior pull back in, a
   later run could re-read a stale lower local number and push it back
-  down over a number MAL already has.
+  down over a number MAL already has. After a successful merge, that same
+  agreed watched count also advances the local cursor as described below;
+  awareness remains necessary when the next episode is not on disk yet.
 - **MAL's `my_list_status` field name is asymmetric, a real trap**: a
   list/anime response reports `num_episodes_watched`; the `PATCH
   /v2/anime/{id}/my_list_status` request body field is
@@ -632,7 +635,7 @@ reasoning):
   and the unofficial MAL API spec). Getting this wrong is silent — MAL
   ignores an unrecognized field rather than erroring, so the episode
   count would just never update. Re-verify this exact swap first if
-  `push_episode_count` is ever touched.
+  `update_mal_entry` is ever touched.
 
 ### MAL push number is the last watched episode, not the tracked cursor
 Found during real dogfooding: `SeriesRecord.episode_number` is a *cursor* —
@@ -673,6 +676,57 @@ local-to-MAL correspondence is only ever fixed at link time — further
 drift is a manual re-link. Neither case is worth a new persisted "was this
 episode actually completed" field for.
 
+### Paused series are excluded from MAL progress sync
+`Paused` is the explicit temporary opt-out from sync. Bare `tsuzuki sync`
+filters paused records before MAL authentication or any network request, so
+neither side's episode count can change the other while a local watch or
+rewatch is paused. The record and any existing MAL link remain intact;
+resuming the series locally makes it eligible on the next sync. `sync link`
+remains available because it records identity only and performs no progress
+merge. Never-started series remain excluded because they have no state record;
+`Dropped` records remain eligible.
+
+### A successful MAL sync advances the local cursor too
+MAL stores the number of episodes already watched; Tsuzuki stores the
+episode to resume. After every successful merge, including a `NoOp`, sync
+aligns the local cursor to the first naturally ordered local file whose
+Anitomy/fallback episode identity is greater than the agreed watched count,
+at position 0. Thus MAL at 9 watched means Tsuzuki resumes episode 10 rather
+than retaining an older local cursor. Running this for `NoOp` is required to
+self-repair state written by older versions, where `mal_episode_awareness`
+could already be 9 while the cursor still pointed at episode 7.
+
+This is strictly forward-only: natural sort remains the ordering authority,
+episode identity only selects the first post-MAL candidate within that
+ordering, and sync never replaces a later local cursor with an earlier one.
+If no later local file exists, or the stored cursor file can no longer be
+resolved, the cursor stays unchanged and `mal_episode_awareness` preserves
+the higher count for a future sync. Paused records never reach this step;
+`Dropped` remains a deliberate dead end and sync does not silently reactivate
+it. Position 0 on the next episode is a forward-looking resume target, not a
+claim that Tsuzuki observed playback there.
+
+### MAL status follows confirmed progress, forward only
+Episode sync also keeps MAL's list category consistent with the agreed
+watched count. A `plan_to_watch` entry with any real progress moves to
+`watching`. A `watching` entry moves to `completed` when the agreed count
+reaches MAL's nonzero `num_episodes`, or when Tsuzuki has its existing
+confirmed-finale signature (`Dropped` with a nonzero completion position).
+A fully watched `plan_to_watch` entry moves directly to `completed` in one
+run. The status field is combined with an episode-count push in one PATCH,
+never sent as a second partially-failable write.
+
+These transitions are monotonic and deliberately narrow: Tsuzuki never
+changes MAL's explicit `on_hold` or `dropped` status, never moves
+`completed` backward, and does nothing for an unknown future API status.
+The same PATCH records the sync run's local calendar date as `start_date`
+when Plan to Watch becomes Watching, or as `finish_date` when Watching
+becomes Completed. A direct Plan to Watch → Completed transition sets both.
+No other sync overwrites either date. Although MAL's official writable
+schema omits these two fields, a live authenticated PATCH/read-back probe
+on 2026-09-23 confirmed that MAL accepts and persists both; the probe also
+restored the original dates successfully.
+
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series
 Found during real dogfooding: `tsuzuki sync` was printing every one of
 `rank_candidates`' top-5 results, similarity percentage included, even
@@ -695,12 +749,15 @@ result or an action.
   precedent (the Anitomy-candidate confirmation flow) still applies: the
   user must explicitly re-run `sync link` to confirm it, nothing
   auto-links.
-- **Terminal output is one line per series, symbol-coded, no matching
-  internals.** `✓` for anything that completed with no action needed
-  (`Merged`, any direction — Push/Pull/NoOp all read the same to the
-  user), `⚠` for anything needing a manual `sync link` (a confident
-  suggestion, no suggestion, or an empty MAL list), `✗` for a real
-  failure. A confident suggestion gets its exact `tsuzuki sync link
+- **Terminal output shows changes and required actions, never unchanged
+  series.** A real Push/Pull gets one `✓` line; a `NoOp` normally gets no
+  per-series line at all — unchanged is the normal case, and listing every
+  unchanged title hides the few results worth reading. The one exception is
+  a `NoOp` that repairs a stale pre-v0.1.1 local cursor: that is a real local
+  change and keeps the same `✓ ... episode N synced` line. `⚠` marks anything
+  needing a manual `sync link` (a confident suggestion, no suggestion, or an
+  empty MAL list), and `✗` marks a real failure. A confident suggestion gets
+  its exact `tsuzuki sync link
   "<series>" --mal-id <id>` command printed on the next, indented line —
   the point is the user can act on the output directly, never re-derive
   the command themselves. Similarity scores and multi-candidate lists are
@@ -708,8 +765,10 @@ result or an action.
 - **The run-end summary omits zero-count categories** (`sync_summary_line`
   in `main.rs`) rather than always printing all three — "Sync complete: 1
   synced, 2 need manual linking" instead of padding it with "0 failed" on
-  the common all-good run. Exit-code logic (`ExitCode::FAILURE` iff any
-  series failed) is unchanged — only the printed text changed.
+  the common all-good run. Only real Push/Pull actions and actual local-cursor
+  repairs count as `synced`; an entirely unchanged run ends with `Sync
+  complete: no changes`.
+  Exit-code logic (`ExitCode::FAILURE` iff any series failed) is unchanged.
 
 ### Doctor output is a concise health report, not a narration of every internal check
 A later UX pass: `tsuzuki doctor` was printing one `[OK]`/`[WARN]`/`[FAIL]`

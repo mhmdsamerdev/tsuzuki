@@ -899,10 +899,11 @@ fn ensure_sync_access_token(
 }
 
 /// `tsuzuki sync` (bare) — design.md §7 + this phase's own instructions:
-/// every tracked series with real progress (a `state.toml` record at all —
-/// a never-started series has none, so it's never in `targets` to begin
-/// with), attempt linking first if not already linked, then merge if
-/// linked. One series failing never aborts the run.
+/// every available, non-paused series with real progress, attempt linking
+/// first if not already linked, then merge if linked. Paused and orphaned
+/// records are filtered before MAL authentication, so a library with no
+/// eligible records performs no network work. One series failing never
+/// aborts the run.
 fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -912,22 +913,18 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         print_scan_warning(w);
     }
 
+    let targets = sync::eligible_targets(&state, config, home);
+
+    if targets.is_empty() {
+        println!("Nothing eligible to sync.");
+        return ExitCode::SUCCESS;
+    }
+
     let client = mal::UreqClient;
     let access_token = match ensure_sync_access_token(&client, config) {
         Ok(t) => t,
         Err(code) => return code,
     };
-
-    let targets: Vec<(String, String)> = state
-        .series
-        .iter()
-        .map(|r| (r.root.clone(), r.name.clone()))
-        .collect();
-
-    if targets.is_empty() {
-        println!("Nothing tracked with real progress to sync.");
-        return ExitCode::SUCCESS;
-    }
 
     let before = state.clone();
     let outcomes = sync::run_sync(
@@ -938,6 +935,8 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         sync::API_CALL_DELAY,
         config.mal.fuzzy_match_threshold,
     );
+
+    let local_advances = sync::apply_synced_progress(config, &mut state, &outcomes, home);
 
     if state != before
         && let Err(e) = state::write(state_path, &state)
@@ -951,10 +950,30 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
     let mut failed = 0;
     let mut needs_linking = 0;
     let mut synced = 0;
+    let mut detail_lines = Vec::new();
     for outcome in &outcomes {
-        print_sync_outcome(outcome);
+        let local_advance = local_advances
+            .iter()
+            .find(|(root, name, _)| root == &outcome.root && name == &outcome.name)
+            .map(|(_, _, watched)| *watched);
+        detail_lines.extend(sync_outcome_lines(outcome, local_advance));
         match &outcome.kind {
-            sync::OutcomeKind::Merged { .. } => synced += 1,
+            sync::OutcomeKind::Merged {
+                action: sync::MergeAction::Push(_) | sync::MergeAction::Pull(_),
+                ..
+            } => synced += 1,
+            sync::OutcomeKind::Merged {
+                action: sync::MergeAction::RemoteStatus(_),
+                ..
+            } => synced += 1,
+            sync::OutcomeKind::Merged {
+                action: sync::MergeAction::NoOp,
+                ..
+            } if local_advance.is_some() => synced += 1,
+            sync::OutcomeKind::Merged {
+                action: sync::MergeAction::NoOp,
+                ..
+            } => {}
             sync::OutcomeKind::NoExactMatch { .. } | sync::OutcomeKind::EmptyList => {
                 needs_linking += 1;
             }
@@ -962,7 +981,12 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         }
     }
 
-    println!();
+    for line in &detail_lines {
+        println!("{line}");
+    }
+    if !detail_lines.is_empty() {
+        println!();
+    }
     println!(
         "Sync complete: {}",
         sync_summary_line(synced, needs_linking, failed)
@@ -978,7 +1002,8 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 /// Comma-joined, zero-count categories omitted — "1 synced, 2 need manual
 /// linking", never "1 synced, 2 need manual linking, 0 failed". Keeps the
 /// common all-good run's summary a single short clause instead of padding
-/// it with categories that didn't happen.
+/// it with categories that didn't happen. `synced` counts only real pushes
+/// and pulls; unchanged series are deliberately absent from the report.
 fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
     let mut parts = Vec::new();
     if synced > 0 {
@@ -991,48 +1016,49 @@ fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
         parts.push(format!("{failed} failed"));
     }
     if parts.is_empty() {
-        "nothing to report".to_string()
+        "no changes".to_string()
     } else {
         parts.join(", ")
     }
 }
 
-/// One concise, action-oriented line per series (design.md §7's "sync
-/// output communicates the result and any required user action, never
-/// unnecessary matching detail" — CLAUDE.md's "sync output only ever
-/// suggests a confident fuzzy match"): `✓` for anything that completed
-/// without user action needed, `⚠` for anything that needs one, `✗` for a
-/// real failure. Never prints similarity percentages or a list of weak
-/// candidates — `run_sync` itself already filtered a fuzzy suggestion down
-/// to at most one, and only when it was confident enough to be worth
-/// showing at all.
-fn print_sync_outcome(outcome: &sync::SeriesOutcome) {
+/// Concise, action-oriented output for one series. A no-op produces no
+/// lines: unchanged series are the normal case and listing every one hides
+/// the results that matter. `✓` is reserved for a real push/pull, `⚠` for
+/// required user action, and `✗` for a failure.
+fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>) -> Vec<String> {
     let name = &outcome.name;
     match &outcome.kind {
         sync::OutcomeKind::Merged {
             action: sync::MergeAction::Push(n) | sync::MergeAction::Pull(n),
             ..
-        } => println!("✓ {name} — episode {n} synced"),
+        } => vec![format!("✓ {name} — episode {n} synced")],
         sync::OutcomeKind::Merged {
             action: sync::MergeAction::NoOp,
             ..
-        } => println!("✓ {name} — already in sync"),
+        } => local_advance
+            .map(|n| vec![format!("✓ {name} — episode {n} synced")])
+            .unwrap_or_default(),
+        sync::OutcomeKind::Merged {
+            action: sync::MergeAction::RemoteStatus(status),
+            ..
+        } => vec![format!("✓ {name} — moved to {}", status.display_name())],
         sync::OutcomeKind::NoExactMatch {
             suggestion: Some(c),
-        } => {
-            println!(
+        } => vec![
+            format!(
                 "⚠ {name} — did you mean \"{}\" (MAL #{})?",
                 c.title, c.mal_id
-            );
-            println!("  → tsuzuki sync link \"{name}\" --mal-id {}", c.mal_id);
-        }
+            ),
+            format!("  → tsuzuki sync link \"{name}\" --mal-id {}", c.mal_id),
+        ],
         sync::OutcomeKind::NoExactMatch { suggestion: None } => {
-            println!("⚠ {name} — no matching series found");
+            vec![format!("⚠ {name} — no matching series found")]
         }
         sync::OutcomeKind::EmptyList => {
-            println!("⚠ {name} — your MyAnimeList list is empty");
+            vec![format!("⚠ {name} — your MyAnimeList list is empty")]
         }
-        sync::OutcomeKind::Failed(msg) => println!("✗ {name} — sync failed: {msg}"),
+        sync::OutcomeKind::Failed(msg) => vec![format!("✗ {name} — sync failed: {msg}")],
     }
 }
 
@@ -1311,6 +1337,42 @@ mod tests {
             updated_at: 1,
             mal_episode_awareness: None,
         }
+    }
+
+    #[test]
+    fn unchanged_sync_outcomes_are_silent_and_summarize_as_no_changes() {
+        let outcome = sync::SeriesOutcome {
+            root: "~/Anime".to_string(),
+            name: "Hinamatsuri".to_string(),
+            kind: sync::OutcomeKind::Merged {
+                mal_id: 36_207,
+                action: sync::MergeAction::NoOp,
+            },
+        };
+
+        assert!(sync_outcome_lines(&outcome, None).is_empty());
+        assert_eq!(
+            sync_outcome_lines(&outcome, Some(9)),
+            vec!["✓ Hinamatsuri — episode 9 synced"]
+        );
+        assert_eq!(sync_summary_line(0, 0, 0), "no changes");
+    }
+
+    #[test]
+    fn status_only_sync_outcome_reports_the_new_mal_list() {
+        let outcome = sync::SeriesOutcome {
+            root: "~/Anime".to_string(),
+            name: "Hinamatsuri".to_string(),
+            kind: sync::OutcomeKind::Merged {
+                mal_id: 36_207,
+                action: sync::MergeAction::RemoteStatus(sync::MalListStatus::Watching),
+            },
+        };
+
+        assert_eq!(
+            sync_outcome_lines(&outcome, None),
+            vec!["✓ Hinamatsuri — moved to Watching"]
+        );
     }
 
     /// Writes a real mpv-style `watch_later` entry matching `record()`'s

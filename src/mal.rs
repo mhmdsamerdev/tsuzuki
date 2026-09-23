@@ -437,8 +437,8 @@ impl fmt::Display for HttpError {
 /// code exchange and refresh are `application/x-www-form-urlencoded`
 /// POSTs — Phase 8a), plus `get`/`patch_form` for the authenticated data API
 /// (`sync.rs`, Phase 8b) — fetching the user's anime list, looking up one
-/// anime's list status, and pushing an episode count. One trait, one real
-/// implementation ([`UreqClient`]), so every caller above it (PKCE, URL
+/// anime's list status, and updating episode progress/list status. One
+/// trait, one real implementation ([`UreqClient`]), so every caller above it (PKCE, URL
 /// building, token-status logic, linking, merge decisions) is testable
 /// against a fabricated client with zero real network calls.
 pub trait MalHttpClient {

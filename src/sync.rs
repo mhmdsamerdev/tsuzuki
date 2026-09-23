@@ -44,11 +44,18 @@
 //! regresses what's already been confirmed on either side.
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
+use chrono::Local;
 use serde::Deserialize;
 
+use crate::anitomy;
+use crate::config::Config;
+use crate::exclude;
 use crate::mal::{HttpResponse, MalHttpClient};
+use crate::roots::{expand_tilde, normalize};
+use crate::series;
 use crate::state::{MalLink, SeriesRecord, State, Status, now_unix};
 
 pub const API_BASE: &str = "https://api.myanimelist.net/v2";
@@ -112,6 +119,48 @@ pub struct AnimeListEntry {
     pub id: u32,
     pub titles: AnimeTitles,
     pub num_episodes_watched: u32,
+    pub num_episodes: u32,
+    pub status: MalListStatus,
+}
+
+/// MAL's documented anime-list statuses. `Unknown` keeps a future API value
+/// from breaking the whole sync run; Tsuzuki simply leaves an unrecognized
+/// status untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MalListStatus {
+    Watching,
+    Completed,
+    OnHold,
+    Dropped,
+    PlanToWatch,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl MalListStatus {
+    fn api_value(self) -> Option<&'static str> {
+        match self {
+            MalListStatus::Watching => Some("watching"),
+            MalListStatus::Completed => Some("completed"),
+            MalListStatus::OnHold => Some("on_hold"),
+            MalListStatus::Dropped => Some("dropped"),
+            MalListStatus::PlanToWatch => Some("plan_to_watch"),
+            MalListStatus::Unknown => None,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            MalListStatus::Watching => "Watching",
+            MalListStatus::Completed => "Completed",
+            MalListStatus::OnHold => "On Hold",
+            MalListStatus::Dropped => "Dropped",
+            MalListStatus::PlanToWatch => "Plan to Watch",
+            MalListStatus::Unknown => "Unknown",
+        }
+    }
 }
 
 /// Every known title for one entry — main title, English, Japanese (when
@@ -269,6 +318,8 @@ struct AlternativeTitlesJson {
 #[derive(Debug, Deserialize)]
 struct MyListStatusJson {
     #[serde(default)]
+    status: MalListStatus,
+    #[serde(default)]
     num_episodes_watched: u32,
 }
 
@@ -280,11 +331,17 @@ struct AnimeNodeJson {
     alternative_titles: Option<AlternativeTitlesJson>,
     #[serde(default)]
     my_list_status: Option<MyListStatusJson>,
+    #[serde(default)]
+    num_episodes: u32,
 }
 
 #[derive(Debug, Deserialize)]
 struct AnimeListEntryJson {
     node: AnimeNodeJson,
+    /// The user-list endpoint returns this beside `node`; the single-anime
+    /// endpoint instead returns `my_list_status` inside the anime object.
+    #[serde(default)]
+    list_status: Option<MyListStatusJson>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,11 +357,17 @@ struct AnimeListResponseJson {
     paging: Option<PagingJson>,
 }
 
-fn to_anime_list_entry(node: AnimeNodeJson) -> AnimeListEntry {
+fn to_anime_list_entry(entry: AnimeListEntryJson) -> AnimeListEntry {
+    let node = entry.node;
     let (en, ja, synonyms) = match node.alternative_titles {
         Some(t) => (t.en, t.ja, t.synonyms),
         None => (String::new(), String::new(), Vec::new()),
     };
+    let (num_episodes_watched, status) = entry
+        .list_status
+        .or(node.my_list_status)
+        .map(|s| (s.num_episodes_watched, s.status))
+        .unwrap_or((0, MalListStatus::Unknown));
     AnimeListEntry {
         id: node.id,
         titles: AnimeTitles {
@@ -313,10 +376,9 @@ fn to_anime_list_entry(node: AnimeNodeJson) -> AnimeListEntry {
             ja,
             synonyms,
         },
-        num_episodes_watched: node
-            .my_list_status
-            .map(|s| s.num_episodes_watched)
-            .unwrap_or(0),
+        num_episodes_watched,
+        num_episodes: node.num_episodes,
+        status,
     }
 }
 
@@ -327,8 +389,8 @@ const MAX_LIST_PAGES: usize = 200;
 
 /// Fetches the authenticated user's full anime list (design.md §7's
 /// "fetch the user's MAL list"), following `paging.next` until exhausted.
-/// `fields=alternative_titles,my_list_status` so every entry already
-/// carries what both linking (titles) and merging (`num_episodes_watched`)
+/// `fields=alternative_titles,num_episodes,list_status` so every entry
+/// already carries what linking, progress merging, and status transitions
 /// need — a freshly-linked series never needs a second lookup this same run.
 pub fn fetch_anime_list(
     client: &dyn MalHttpClient,
@@ -338,7 +400,7 @@ pub fn fetch_anime_list(
     let mut entries = Vec::new();
     let mut url = format!("{API_BASE}/users/@me/animelist");
     let mut query: Vec<(&str, &str)> = vec![
-        ("fields", "alternative_titles,my_list_status"),
+        ("fields", "alternative_titles,num_episodes,list_status"),
         ("limit", "1000"),
         ("nsfw", "true"),
     ];
@@ -354,7 +416,7 @@ pub fn fetch_anime_list(
             serde_json::from_str(&resp.body).map_err(|e| SyncApiError::Parse(e.to_string()))?;
 
         for item in parsed.data {
-            entries.push(to_anime_list_entry(item.node));
+            entries.push(to_anime_list_entry(item));
         }
 
         match parsed.paging.and_then(|p| p.next) {
@@ -386,13 +448,15 @@ pub struct AnimeStatus {
     /// anime ID that simply isn't on this user's list at all.
     pub on_list: bool,
     pub num_episodes_watched: u32,
+    pub num_episodes: u32,
+    pub status: MalListStatus,
 }
 
 /// A single anime's current list status by ID — used both to validate a
 /// manual `sync link --mal-id` (does it actually appear on the user's list)
 /// and, for an already-linked series, to learn MAL's current
-/// `num_episodes_watched` for the merge comparison, without re-fetching or
-/// re-scanning the entire list.
+/// watched count, total episode count, and list status without re-fetching
+/// or re-scanning the entire list.
 pub fn fetch_anime_status(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -400,22 +464,30 @@ pub fn fetch_anime_status(
 ) -> Result<AnimeStatus, SyncApiError> {
     let url = format!("{API_BASE}/anime/{mal_id}");
     let resp = client
-        .get(&url, bearer_token, &[("fields", "my_list_status")])
+        .get(
+            &url,
+            bearer_token,
+            &[("fields", "num_episodes,my_list_status")],
+        )
         .map_err(|e| SyncApiError::Transport(e.to_string()))?;
     require_success(&resp)?;
     let parsed: AnimeNodeJson =
         serde_json::from_str(&resp.body).map_err(|e| SyncApiError::Parse(e.to_string()))?;
+    let on_list = parsed.my_list_status.is_some();
+    let (num_episodes_watched, status) = parsed
+        .my_list_status
+        .map(|s| (s.num_episodes_watched, s.status))
+        .unwrap_or((0, MalListStatus::Unknown));
     Ok(AnimeStatus {
-        on_list: parsed.my_list_status.is_some(),
-        num_episodes_watched: parsed
-            .my_list_status
-            .map(|s| s.num_episodes_watched)
-            .unwrap_or(0),
+        on_list,
+        num_episodes_watched,
+        num_episodes: parsed.num_episodes,
+        status,
     })
 }
 
-/// Pushes a new episode count to MAL (design.md §7: `PATCH
-/// /v2/anime/{id}/my_list_status`). **The request body field is
+/// Updates MAL through `PATCH /v2/anime/{id}/my_list_status`. **The episode
+/// request-body field is
 /// `num_watched_episodes`** — MAL's API is asymmetric here: the *response*
 /// (`fetch_anime_status`/the list fetch) reports `num_episodes_watched`,
 /// but the *update* endpoint's own request-body field is
@@ -424,21 +496,42 @@ pub fn fetch_anime_status(
 /// specification (which explicitly notes the two field names differ). This
 /// asymmetry is easy to get wrong silently — using the response field name
 /// here wouldn't error, MAL would just ignore the unrecognized field and
-/// the episode count would silently never update.
-pub fn push_episode_count(
+/// the episode count would silently never update. Combining an
+/// episode push and a status transition avoids two writes—and avoids a
+/// partially-applied result if the second request were to fail. MAL's
+/// published writable schema omits `start_date` and `finish_date`, but a
+/// live authenticated PATCH/read-back probe confirmed both fields are
+/// accepted and persisted; they are included only with the corresponding
+/// forward status transition.
+fn update_mal_entry(
     client: &dyn MalHttpClient,
     bearer_token: &str,
     mal_id: u32,
-    num_watched_episodes: u32,
+    num_watched_episodes: Option<u32>,
+    status: Option<MalListStatus>,
+    start_date: Option<&str>,
+    finish_date: Option<&str>,
 ) -> Result<(), SyncApiError> {
     let url = format!("{API_BASE}/anime/{mal_id}/my_list_status");
-    let value = num_watched_episodes.to_string();
+    let episode_value = num_watched_episodes.map(|value| value.to_string());
+    let mut params = Vec::new();
+    if let Some(value) = episode_value.as_deref() {
+        params.push(("num_watched_episodes", value));
+    }
+    if let Some(value) = status.and_then(MalListStatus::api_value) {
+        params.push(("status", value));
+    }
+    if let Some(value) = start_date {
+        params.push(("start_date", value));
+    }
+    if let Some(value) = finish_date {
+        params.push(("finish_date", value));
+    }
+    if params.is_empty() {
+        return Ok(());
+    }
     let resp = client
-        .patch_form(
-            &url,
-            bearer_token,
-            &[("num_watched_episodes", value.as_str())],
-        )
+        .patch_form(&url, bearer_token, &params)
         .map_err(|e| SyncApiError::Transport(e.to_string()))?;
     require_success(&resp)?;
     Ok(())
@@ -452,6 +545,8 @@ pub enum MergeAction {
     Push(u32),
     /// MAL is ahead — update local awareness only, to this number.
     Pull(u32),
+    /// Episode counts already agree, but MAL's list status changed.
+    RemoteStatus(MalListStatus),
     NoOp,
 }
 
@@ -463,6 +558,48 @@ pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
         std::cmp::Ordering::Greater => MergeAction::Push(local),
         std::cmp::Ordering::Less => MergeAction::Pull(mal),
         std::cmp::Ordering::Equal => MergeAction::NoOp,
+    }
+}
+
+/// The only automatic MAL status transitions. Tsuzuki never changes an
+/// explicit `on_hold`/`dropped` status and never moves a status backward.
+/// A completed count is based on MAL's declared total when available, or
+/// Tsuzuki's existing confirmed-finale signal.
+fn desired_status(
+    current: MalListStatus,
+    watched: u32,
+    total_episodes: u32,
+    local_finished: bool,
+) -> Option<MalListStatus> {
+    if watched == 0 {
+        return None;
+    }
+    let finished = local_finished || (total_episodes > 0 && watched >= total_episodes);
+    match (current, finished) {
+        (MalListStatus::PlanToWatch, true) | (MalListStatus::Watching, true) => {
+            Some(MalListStatus::Completed)
+        }
+        (MalListStatus::PlanToWatch, false) => Some(MalListStatus::Watching),
+        _ => None,
+    }
+}
+
+/// Date fields that belong to a forward MAL status transition. MAL accepts
+/// calendar dates rather than timestamps, so both values use the local date
+/// captured once at the beginning of this sync run. A title completed in a
+/// single run crosses both boundaries and receives both dates.
+fn transition_dates(
+    current: MalListStatus,
+    next: Option<MalListStatus>,
+    sync_date: &str,
+) -> (Option<&str>, Option<&str>) {
+    match (current, next) {
+        (MalListStatus::PlanToWatch, Some(MalListStatus::Watching)) => (Some(sync_date), None),
+        (MalListStatus::Watching, Some(MalListStatus::Completed)) => (None, Some(sync_date)),
+        (MalListStatus::PlanToWatch, Some(MalListStatus::Completed)) => {
+            (Some(sync_date), Some(sync_date))
+        }
+        _ => (None, None),
     }
 }
 
@@ -501,22 +638,158 @@ pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     watched.max(record.mal_episode_awareness.unwrap_or(0))
 }
 
+/// Advances Tsuzuki's local playback cursor to the first locally available
+/// episode after `watched_episodes`.
+///
+/// MAL reports a watched count, while Tsuzuki stores the episode to resume.
+/// A successful sync therefore has a local consequence when MAL is ahead:
+/// if MAL says episode 9 is watched, the local cursor should land on episode
+/// 10 at position zero instead of continuing to resume an older episode.
+///
+/// The ordered file list remains authoritative. Anitomy only identifies the
+/// first entry whose episode number is greater than MAL's watched count; it
+/// never reorders the list. The cursor moves only when that entry is later
+/// than the currently stored file, so sync can never regress local progress.
+/// Paused records stay paused, and dropped records remain deliberate dead
+/// ends. If the next episode is not on disk yet, the record is left alone;
+/// the retained `mal_episode_awareness` lets a later sync try again after new
+/// files arrive.
+fn advance_local_cursor(
+    config: &Config,
+    state: &mut State,
+    root: &str,
+    name: &str,
+    watched_episodes: u32,
+    home: Option<&Path>,
+) -> bool {
+    let Some(record_index) = state
+        .series
+        .iter()
+        .position(|record| record.root == root && record.name == name)
+    else {
+        return false;
+    };
+    if state.series[record_index].status == Status::Dropped {
+        return false;
+    }
+
+    let expanded_root = expand_tilde(Path::new(root), home);
+    let series_path = expanded_root.join(name);
+    let excluded = exclude::excluded_paths_for_root(config, root, home);
+    let Ok(ordered) =
+        series::ordered_episodes_excluding(&series_path, &config.roots.video_extensions, &excluded)
+    else {
+        return false;
+    };
+
+    let current_path = expanded_root.join(&state.series[record_index].current_relative_path);
+    let current_real = normalize(&current_path, home);
+    let Some(current_index) = ordered
+        .iter()
+        .position(|path| normalize(path, home) == current_real)
+    else {
+        return false;
+    };
+
+    let identities = anitomy::episode_identity(&ordered);
+    let Some(next_index) = identities
+        .iter()
+        .position(|identity| identity.episode_number > watched_episodes)
+    else {
+        return false;
+    };
+    if next_index <= current_index {
+        return false;
+    }
+
+    let next_relative = ordered[next_index]
+        .strip_prefix(&expanded_root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| name.to_string());
+    let record = &mut state.series[record_index];
+    record.current_relative_path = next_relative;
+    record.position_seconds = 0.0;
+    record.episode_number = Some(identities[next_index].episode_number);
+    record.updated_at = now_unix();
+    true
+}
+
+/// Applies the local-cursor side of every successful sync result.
+///
+/// `NoOp` is intentionally included: releases before v0.1.1 could persist
+/// the higher MAL awareness without advancing the cursor, so the next sync
+/// must repair that stale state even though the episode-count merge itself
+/// now has nothing left to change. Returns each cursor it actually advanced
+/// with the agreed watched count, so the command layer can report that real
+/// local change while keeping fully unchanged no-ops silent.
+pub fn apply_synced_progress(
+    config: &Config,
+    state: &mut State,
+    outcomes: &[SeriesOutcome],
+    home: Option<&Path>,
+) -> Vec<(String, String, u32)> {
+    let mut advanced = Vec::new();
+    for outcome in outcomes {
+        let OutcomeKind::Merged { action, .. } = &outcome.kind else {
+            continue;
+        };
+        let watched_episodes = match *action {
+            MergeAction::Push(n) | MergeAction::Pull(n) => n,
+            MergeAction::RemoteStatus(_) | MergeAction::NoOp => state
+                .find(&outcome.root, &outcome.name)
+                .map(local_effective_episode)
+                .unwrap_or(0),
+        };
+        if advance_local_cursor(
+            config,
+            state,
+            &outcome.root,
+            &outcome.name,
+            watched_episodes,
+            home,
+        ) {
+            advanced.push((outcome.root.clone(), outcome.name.clone(), watched_episodes));
+        }
+    }
+    advanced
+}
+
 /// Runs the decision and, only for `Push`, the actual PATCH — a merge that
 /// resolves to `Pull`/`NoOp` never calls the network a second time (the
 /// `mal` number was already learned via whichever GET the caller used to
 /// resolve it).
-fn merge_and_maybe_push(
+fn merge_and_maybe_update(
     client: &dyn MalHttpClient,
     bearer_token: &str,
     mal_id: u32,
     local: u32,
-    mal: u32,
+    remote: &AnimeStatus,
+    local_finished: bool,
+    sync_date: &str,
 ) -> Result<MergeAction, SyncApiError> {
-    let action = decide_merge(local, mal);
-    if let MergeAction::Push(n) = action {
-        push_episode_count(client, bearer_token, mal_id, n)?;
+    let merge_action = decide_merge(local, remote.num_episodes_watched);
+    let agreed = local.max(remote.num_episodes_watched);
+    let status_update = desired_status(remote.status, agreed, remote.num_episodes, local_finished);
+    let (start_date, finish_date) = transition_dates(remote.status, status_update, sync_date);
+    let episode_update = match merge_action {
+        MergeAction::Push(n) => Some(n),
+        _ => None,
+    };
+    update_mal_entry(
+        client,
+        bearer_token,
+        mal_id,
+        episode_update,
+        status_update,
+        start_date,
+        finish_date,
+    )?;
+    if merge_action == MergeAction::NoOp
+        && let Some(status) = status_update
+    {
+        return Ok(MergeAction::RemoteStatus(status));
     }
-    Ok(action)
+    Ok(merge_action)
 }
 
 /// Applies a resolved merge action to `state` — updates
@@ -524,13 +797,14 @@ fn merge_and_maybe_push(
 /// `updated_at`, but **only** for `Push`/`Pull` (design.md's "equal →
 /// no-op" means no-op all the way down to storage: a genuine no-op never
 /// touches `state.toml` at all, matching this project's existing "never
-/// touch saved state on a no-op" precedent everywhere else). Never writes
-/// `current_relative_path`/`position_seconds` — no real playback position
-/// is ever implied by a merge action.
+/// touch saved state on a no-op" precedent everywhere else). Cursor
+/// alignment is a separate post-merge step: [`advance_local_cursor`] may
+/// move to the first unwatched local episode at position zero, but this
+/// function never invents a playback position for a watched episode.
 fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
     let new_awareness = match action {
         MergeAction::Push(n) | MergeAction::Pull(n) => n,
-        MergeAction::NoOp => return,
+        MergeAction::RemoteStatus(_) | MergeAction::NoOp => return,
     };
     if let Some(record) = state.find_mut(root, name) {
         record.mal_episode_awareness = Some(new_awareness);
@@ -623,14 +897,38 @@ pub struct SeriesOutcome {
     pub kind: OutcomeKind,
 }
 
+/// Returns the state records eligible for a MAL progress merge.
+///
+/// Pausing is an explicit request to preserve a series' local progress
+/// without MAL changing it (and without that stale local cursor changing
+/// MAL). An orphaned record is inert everywhere outside `doctor`, so its
+/// series directory must also exist at sync time. Dropped records remain
+/// eligible when their directory is still present.
+pub fn eligible_targets(
+    state: &State,
+    config: &Config,
+    home: Option<&Path>,
+) -> Vec<(String, String)> {
+    state
+        .series
+        .iter()
+        .filter(|record| {
+            record.status != Status::Paused
+                && config.roots.paths.contains(&record.root)
+                && expand_tilde(Path::new(&record.root), home)
+                    .join(&record.name)
+                    .is_dir()
+        })
+        .map(|record| (record.root.clone(), record.name.clone()))
+        .collect()
+}
+
 /// Runs `sync` across every `(root, name)` in `targets` — design.md §7 +
 /// this phase's own instructions: attempt linking first if not already
 /// linked, then merge if linked; one series failing never aborts the rest.
-/// `targets` is expected to already be filtered to series with real
-/// progress (a `state.toml` record exists at all) — a never-started series
-/// has no record and is never in this list to begin with, so "skip
-/// untouched series" falls out of the caller's own selection, not logic
-/// here.
+/// `targets` is expected to come from [`eligible_targets`]: a never-started
+/// series has no record, while paused and orphaned records are deliberately
+/// excluded before this network-facing layer runs.
 ///
 /// The bulk list (needed only for not-yet-linked series) is fetched **at
 /// most once** per run, shared across every series that needs it — not
@@ -644,6 +942,29 @@ pub fn run_sync(
     targets: &[(String, String)],
     delay: Duration,
     fuzzy_match_threshold: f64,
+) -> Vec<SeriesOutcome> {
+    let sync_date = Local::now().format("%Y-%m-%d").to_string();
+    run_sync_on_date(
+        client,
+        bearer_token,
+        state,
+        targets,
+        delay,
+        fuzzy_match_threshold,
+        &sync_date,
+    )
+}
+
+/// The testable core of [`run_sync`]. Production captures the local calendar
+/// date once so every transition in one command uses the same value.
+fn run_sync_on_date(
+    client: &dyn MalHttpClient,
+    bearer_token: &str,
+    state: &mut State,
+    targets: &[(String, String)],
+    delay: Duration,
+    fuzzy_match_threshold: f64,
+    sync_date: &str,
 ) -> Vec<SeriesOutcome> {
     if targets.is_empty() {
         return Vec::new();
@@ -666,6 +987,9 @@ pub fn run_sync(
             .find(root, name)
             .map(local_effective_episode)
             .unwrap_or(0);
+        let local_finished = state.find(root, name).is_some_and(|record| {
+            record.status == Status::Dropped && record.position_seconds > 0.0
+        });
 
         let mal_id = match state.find_mal_link(root, name).map(|l| l.mal_id) {
             Some(id) => id,
@@ -686,9 +1010,22 @@ pub fn run_sync(
                             // A freshly-linked entry already carries
                             // num_episodes_watched from the same list
                             // fetch — merge immediately, no extra GET.
-                            let mal = entry.num_episodes_watched;
+                            let remote = AnimeStatus {
+                                on_list: true,
+                                num_episodes_watched: entry.num_episodes_watched,
+                                num_episodes: entry.num_episodes,
+                                status: entry.status,
+                            };
                             throttle(&mut is_first_call, delay);
-                            match merge_and_maybe_push(client, bearer_token, id, local, mal) {
+                            match merge_and_maybe_update(
+                                client,
+                                bearer_token,
+                                id,
+                                local,
+                                &remote,
+                                local_finished,
+                                sync_date,
+                            ) {
                                 Ok(action) => {
                                     apply_merge_result(state, root, name, action);
                                     outcomes.push(SeriesOutcome {
@@ -740,12 +1077,14 @@ pub fn run_sync(
         // the bulk list.
         throttle(&mut is_first_call, delay);
         let result = fetch_anime_status(client, bearer_token, mal_id).and_then(|status| {
-            merge_and_maybe_push(
+            merge_and_maybe_update(
                 client,
                 bearer_token,
                 mal_id,
                 local,
-                status.num_episodes_watched,
+                &status,
+                local_finished,
+                sync_date,
             )
         });
         match result {
@@ -773,6 +1112,8 @@ mod tests {
     use super::*;
     use crate::mal::HttpError;
     use std::cell::RefCell;
+    use std::fs;
+    use tempfile::tempdir;
 
     /// A representative `fuzzy_match_threshold`, used everywhere `run_sync`
     /// is exercised end-to-end in this module's tests unless a test is
@@ -814,6 +1155,8 @@ mod tests {
                 synonyms: synonyms.iter().map(|s| s.to_string()).collect(),
             },
             num_episodes_watched: 0,
+            num_episodes: 0,
+            status: MalListStatus::Unknown,
         }
     }
 
@@ -959,6 +1302,73 @@ mod tests {
         assert_eq!(decide_merge(u32::MAX, u32::MAX), MergeAction::NoOp);
     }
 
+    #[test]
+    fn mal_status_transitions_are_forward_only_and_progress_driven() {
+        assert_eq!(
+            desired_status(MalListStatus::PlanToWatch, 1, 12, false),
+            Some(MalListStatus::Watching)
+        );
+        assert_eq!(
+            desired_status(MalListStatus::Watching, 12, 12, false),
+            Some(MalListStatus::Completed)
+        );
+        assert_eq!(
+            desired_status(MalListStatus::PlanToWatch, 12, 12, false),
+            Some(MalListStatus::Completed),
+            "a fully watched planned title should not require two sync runs"
+        );
+        assert_eq!(
+            desired_status(MalListStatus::Watching, 3, 0, true),
+            Some(MalListStatus::Completed),
+            "Tsuzuki's confirmed-finale signal works when MAL's total is unknown"
+        );
+
+        for status in [
+            MalListStatus::OnHold,
+            MalListStatus::Dropped,
+            MalListStatus::Completed,
+            MalListStatus::Unknown,
+        ] {
+            assert_eq!(desired_status(status, 12, 12, true), None);
+        }
+        assert_eq!(
+            desired_status(MalListStatus::PlanToWatch, 0, 12, false),
+            None,
+            "zero progress must not move a planned title to Watching"
+        );
+
+        let date = "2026-09-23";
+        assert_eq!(
+            transition_dates(
+                MalListStatus::PlanToWatch,
+                Some(MalListStatus::Watching),
+                date
+            ),
+            (Some(date), None)
+        );
+        assert_eq!(
+            transition_dates(
+                MalListStatus::Watching,
+                Some(MalListStatus::Completed),
+                date
+            ),
+            (None, Some(date))
+        );
+        assert_eq!(
+            transition_dates(
+                MalListStatus::PlanToWatch,
+                Some(MalListStatus::Completed),
+                date
+            ),
+            (Some(date), Some(date))
+        );
+        assert_eq!(
+            transition_dates(MalListStatus::Watching, None, date),
+            (None, None),
+            "dates must remain untouched without a status transition"
+        );
+    }
+
     // --- local_effective_episode: mal_episode_awareness participates as "local" ---
 
     fn base_record() -> SeriesRecord {
@@ -1024,6 +1434,146 @@ mod tests {
         assert_eq!(local_effective_episode(&record), 8);
     }
 
+    #[test]
+    fn synced_mal_progress_advances_the_local_resume_cursor() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_dir = root.join("Shokei Shoujo no Virgin Road");
+        fs::create_dir_all(&series_dir).unwrap();
+        for episode in 1..=12 {
+            fs::File::create(series_dir.join(format!(
+                "Shokei Shoujo no Virgin Road - S01E{episode:02}.mkv"
+            )))
+            .unwrap();
+        }
+
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+        let mut record = base_record();
+        record.root.clone_from(&root_string);
+        record.name = "Shokei Shoujo no Virgin Road".to_string();
+        record.current_relative_path =
+            format!("{}/Shokei Shoujo no Virgin Road - S01E07.mkv", record.name);
+        record.position_seconds = 600.0;
+        record.episode_number = Some(7);
+        // This reproduces an already-synced state written by v0.1.0: MAL
+        // awareness moved to 9, but the local cursor incorrectly stayed 7.
+        record.mal_episode_awareness = Some(9);
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+
+        let outcomes = vec![SeriesOutcome {
+            root: root_string.clone(),
+            name: "Shokei Shoujo no Virgin Road".to_string(),
+            kind: OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::NoOp,
+            },
+        }];
+        let advanced = apply_synced_progress(&config, &mut state, &outcomes, Some(dir.path()));
+        assert_eq!(
+            advanced,
+            vec![(
+                root_string.clone(),
+                "Shokei Shoujo no Virgin Road".to_string(),
+                9
+            )]
+        );
+
+        let record = state
+            .find(&root_string, "Shokei Shoujo no Virgin Road")
+            .unwrap();
+        assert_eq!(
+            record.current_relative_path,
+            "Shokei Shoujo no Virgin Road/Shokei Shoujo no Virgin Road - S01E10.mkv"
+        );
+        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.episode_number, Some(10));
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.mal_episode_awareness, Some(9));
+    }
+
+    #[test]
+    fn synced_mal_progress_never_moves_the_local_cursor_backward() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_dir = root.join("One Piece");
+        fs::create_dir_all(&series_dir).unwrap();
+        for episode in 1..=10 {
+            fs::File::create(series_dir.join(format!("One Piece - {episode:02}.mkv"))).unwrap();
+        }
+
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+        let mut record = base_record();
+        record.root.clone_from(&root_string);
+        record.current_relative_path = "One Piece/One Piece - 10.mkv".to_string();
+        record.position_seconds = 500.0;
+        record.episode_number = Some(10);
+        let before = record.clone();
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+
+        assert!(!advance_local_cursor(
+            &config,
+            &mut state,
+            &root_string,
+            "One Piece",
+            5,
+            Some(dir.path()),
+        ));
+        assert_eq!(state.series[0], before);
+    }
+
+    #[test]
+    fn paused_and_orphaned_series_are_excluded_from_sync_targets() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        for name in ["Watching", "Local Rewatch", "Finished"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+
+        let mut in_progress = base_record();
+        in_progress.root.clone_from(&root_string);
+        in_progress.name = "Watching".to_string();
+
+        let mut paused = base_record();
+        paused.root.clone_from(&root_string);
+        paused.name = "Local Rewatch".to_string();
+        paused.status = Status::Paused;
+
+        let mut dropped = base_record();
+        dropped.root.clone_from(&root_string);
+        dropped.name = "Finished".to_string();
+        dropped.status = Status::Dropped;
+
+        let mut orphaned = base_record();
+        orphaned.root.clone_from(&root_string);
+        orphaned.name = "Deleted".to_string();
+
+        let state = State {
+            series: vec![in_progress, paused, dropped, orphaned],
+            mal_links: Vec::new(),
+        };
+
+        assert_eq!(
+            eligible_targets(&state, &config, Some(dir.path())),
+            vec![
+                (root_string.clone(), "Watching".to_string()),
+                (root_string, "Finished".to_string()),
+            ]
+        );
+    }
+
     // --- THE non-destructive invariant test (verification item 5) ---
     //
     // Fabricates exactly the case a naive implementation gets wrong: a
@@ -1085,13 +1635,14 @@ mod tests {
             }],
         };
 
-        let outcomes = run_sync(
+        let outcomes = run_sync_on_date(
             &client,
             "token",
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
             TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
         );
 
         assert_eq!(outcomes.len(), 1);
@@ -1112,6 +1663,168 @@ mod tests {
                 .unwrap()
                 .mal_episode_awareness,
             Some(18)
+        );
+    }
+
+    #[test]
+    fn progressed_plan_to_watch_entry_moves_to_watching_in_the_same_patch() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"Test Anime","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":0}}"#,
+        );
+
+        let mut state = State {
+            series: vec![base_record()], // cursor 9 -> 8 watched locally
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        };
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(8)
+            }
+        );
+        assert_eq!(
+            client.patch_calls.borrow().as_slice(),
+            &[(
+                format!("{API_BASE}/anime/42/my_list_status"),
+                "num_watched_episodes=8&status=watching&start_date=2026-09-23".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn status_only_transition_is_reported_as_a_real_remote_change() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"Test Anime","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":8}}"#,
+        );
+
+        let mut state = State {
+            series: vec![base_record()], // cursor 9 -> 8 watched locally
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        };
+        let outcomes = run_sync_on_date(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::RemoteStatus(MalListStatus::Watching)
+            }
+        );
+        assert_eq!(
+            client.patch_calls.borrow()[0].1,
+            "status=watching&start_date=2026-09-23".to_string()
+        );
+    }
+
+    #[test]
+    fn reaching_mals_episode_total_moves_watching_entry_to_completed() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"Test Anime","num_episodes":12,"my_list_status":{"status":"watching","num_episodes_watched":11}}"#,
+        );
+
+        let mut record = base_record();
+        record.episode_number = Some(13); // cursor 13 -> 12 watched locally
+        let mut state = State {
+            series: vec![record],
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        };
+        let outcomes = run_sync_on_date(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(12)
+            }
+        );
+        assert_eq!(
+            client.patch_calls.borrow()[0].1,
+            "num_watched_episodes=12&status=completed&finish_date=2026-09-23".to_string()
+        );
+    }
+
+    #[test]
+    fn completing_a_planned_entry_sets_both_transition_dates() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"Test Anime","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":0}}"#,
+        );
+
+        let mut record = base_record();
+        record.episode_number = Some(13); // cursor 13 -> 12 watched locally
+        let mut state = State {
+            series: vec![record],
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        };
+        let outcomes = run_sync_on_date(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(12)
+            }
+        );
+        assert_eq!(
+            client.patch_calls.borrow()[0].1,
+            "num_watched_episodes=12&status=completed&start_date=2026-09-23&finish_date=2026-09-23"
         );
     }
 
@@ -1286,7 +1999,7 @@ mod tests {
         let client = FakeClient::new();
         client.push_list_response(
             200,
-            r#"{"data":[{"node":{"id":7,"title":"One Piece","alternative_titles":{"en":"","ja":"","synonyms":[]},"my_list_status":{"num_episodes_watched":3}}}]}"#,
+            r#"{"data":[{"node":{"id":7,"title":"One Piece","num_episodes":12,"alternative_titles":{"en":"","ja":"","synonyms":[]}},"list_status":{"status":"watching","num_episodes_watched":3}}]}"#,
         );
 
         let mut record = base_record();
