@@ -26,6 +26,13 @@ cargo test
 The full test suite should stay green before you propose a change —
 that's how regressions get caught here.
 
+To use the freshly built CLI without installing it, replace `tsuzuki` in
+any command with `./target/debug/tsuzuki`. For example:
+
+```
+./target/debug/tsuzuki status
+```
+
 ## 3. Lint & format
 
 ```
