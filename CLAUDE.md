@@ -95,10 +95,11 @@ count) — that's the fuzzy inference §2 rules out everywhere.
 
 **An orphaned `state.toml` record (series deleted from disk) stays inert
 until explicitly cleaned — never auto-removed.** `start`/`list` can't
-misrepresent it (they cross-reference a live directory walk). The
-automatic resume picker must degrade gracefully if it points at a deleted
-file (skip it, never crash) — but the record itself isn't silently
-deleted just because its path fails to resolve; that would be inference.
+misrepresent it (they cross-reference a live directory walk), and `sync`
+excludes it before MAL authentication or network work. The automatic resume
+picker must degrade gracefully if it points at a deleted file (skip it,
+never crash) — but the record itself isn't silently deleted just because
+its path fails to resolve; that would be inference.
 Cleanup is `doctor`'s job: it detects the orphan and hands back
 `tsuzuki doctor --fix --forget-orphans` (requires `--fix`, enforced by
 clap; prints exactly what it's about to delete; bulk not per-series, since

@@ -744,12 +744,24 @@ pub struct SeriesOutcome {
 ///
 /// Pausing is an explicit request to preserve a series' local progress
 /// without MAL changing it (and without that stale local cursor changing
-/// MAL). Dropped records remain eligible; only `Paused` is the sync opt-out.
-pub fn eligible_targets(state: &State) -> Vec<(String, String)> {
+/// MAL). An orphaned record is inert everywhere outside `doctor`, so its
+/// series directory must also exist at sync time. Dropped records remain
+/// eligible when their directory is still present.
+pub fn eligible_targets(
+    state: &State,
+    config: &Config,
+    home: Option<&Path>,
+) -> Vec<(String, String)> {
     state
         .series
         .iter()
-        .filter(|record| record.status != Status::Paused)
+        .filter(|record| {
+            record.status != Status::Paused
+                && config.roots.paths.contains(&record.root)
+                && expand_tilde(Path::new(&record.root), home)
+                    .join(&record.name)
+                    .is_dir()
+        })
         .map(|record| (record.root.clone(), record.name.clone()))
         .collect()
 }
@@ -758,8 +770,8 @@ pub fn eligible_targets(state: &State) -> Vec<(String, String)> {
 /// this phase's own instructions: attempt linking first if not already
 /// linked, then merge if linked; one series failing never aborts the rest.
 /// `targets` is expected to come from [`eligible_targets`]: a never-started
-/// series has no record and a paused series is deliberately excluded before
-/// this network-facing layer runs.
+/// series has no record, while paused and orphaned records are deliberately
+/// excluded before this network-facing layer runs.
 ///
 /// The bulk list (needed only for not-yet-linked series) is fetched **at
 /// most once** per run, shared across every series that needs it — not
@@ -1245,28 +1257,44 @@ mod tests {
     }
 
     #[test]
-    fn paused_series_are_excluded_from_sync_targets() {
+    fn paused_and_orphaned_series_are_excluded_from_sync_targets() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        for name in ["Watching", "Local Rewatch", "Finished"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+
         let mut in_progress = base_record();
+        in_progress.root.clone_from(&root_string);
         in_progress.name = "Watching".to_string();
 
         let mut paused = base_record();
+        paused.root.clone_from(&root_string);
         paused.name = "Local Rewatch".to_string();
         paused.status = Status::Paused;
 
         let mut dropped = base_record();
+        dropped.root.clone_from(&root_string);
         dropped.name = "Finished".to_string();
         dropped.status = Status::Dropped;
 
+        let mut orphaned = base_record();
+        orphaned.root.clone_from(&root_string);
+        orphaned.name = "Deleted".to_string();
+
         let state = State {
-            series: vec![in_progress, paused, dropped],
+            series: vec![in_progress, paused, dropped, orphaned],
             mal_links: Vec::new(),
         };
 
         assert_eq!(
-            eligible_targets(&state),
+            eligible_targets(&state, &config, Some(dir.path())),
             vec![
-                ("~/Anime".to_string(), "Watching".to_string()),
-                ("~/Anime".to_string(), "Finished".to_string()),
+                (root_string.clone(), "Watching".to_string()),
+                (root_string, "Finished".to_string()),
             ]
         );
     }

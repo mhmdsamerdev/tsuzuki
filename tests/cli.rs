@@ -1024,7 +1024,38 @@ fn paused_series_are_not_synced_and_need_no_mal_login() {
 }
 
 // ---------------------------------------------------------------------
-// 15. `auto_pause_days`: off by default (a genuinely idle series stays
+// 15. A deleted series folder leaves its state record inert: sync neither
+//     lists it nor requires MAL access, and doctor remains the only cleanup.
+// ---------------------------------------------------------------------
+
+#[test]
+fn orphaned_series_are_not_synced_and_their_state_is_preserved() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let anime_root = home.join("Anime");
+    let series_dir = anime_root.join("Shokei Shoujo no Virgin Road");
+    let file = series_dir.join("ep07.mkv");
+    touch(&file);
+    add_root(home, &anime_root);
+
+    write_watch_later(home, "entry", &file, 300.0);
+    run_ok(home, &["list"]);
+    fs::remove_dir_all(&series_dir).unwrap();
+    let before = fs::read_to_string(state_path(home)).unwrap();
+
+    let stdout = run_ok(home, &["sync"]);
+    assert_eq!(stdout.trim(), "Nothing eligible to sync.");
+    assert!(!stdout.contains("Shokei Shoujo no Virgin Road"));
+    assert_eq!(
+        fs::read_to_string(state_path(home)).unwrap(),
+        before,
+        "sync must leave an orphaned record for doctor to handle explicitly"
+    );
+}
+
+// ---------------------------------------------------------------------
+// 16. `auto_pause_days`: off by default (a genuinely idle series stays
 //     in_progress forever), and — once explicitly opted in — a real,
 //     end-to-end auto-pause of a genuinely idle series, never a drop,
 //     never touching its saved position.

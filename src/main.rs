@@ -899,10 +899,11 @@ fn ensure_sync_access_token(
 }
 
 /// `tsuzuki sync` (bare) — design.md §7 + this phase's own instructions:
-/// every non-paused series with real progress, attempt linking first if not
-/// already linked, then merge if linked. Paused records are filtered before
-/// MAL authentication, so an all-paused library performs no network work.
-/// One series failing never aborts the run.
+/// every available, non-paused series with real progress, attempt linking
+/// first if not already linked, then merge if linked. Paused and orphaned
+/// records are filtered before MAL authentication, so a library with no
+/// eligible records performs no network work. One series failing never
+/// aborts the run.
 fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -912,7 +913,7 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         print_scan_warning(w);
     }
 
-    let targets = sync::eligible_targets(&state);
+    let targets = sync::eligible_targets(&state, config, home);
 
     if targets.is_empty() {
         println!("Nothing eligible to sync.");

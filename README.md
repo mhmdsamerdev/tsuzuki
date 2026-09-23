@@ -105,7 +105,8 @@ tsuzuki sync
 ```
 
 Paused series are skipped, so pausing can temporarily keep a local watch or
-rewatch separate from MAL.
+rewatch separate from MAL. Records whose series folders are no longer
+available are skipped too.
 
 Entirely optional. Everything above works with no account, no internet
 connection, and no setup beyond pointing Tsuzuki at your files.
