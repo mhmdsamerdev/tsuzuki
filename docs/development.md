@@ -121,3 +121,39 @@ Small commits, imperative mood (`fix: ...`, `feat: ...`). Add a line to
 [`CHANGELOG.md`](../CHANGELOG.md)'s `[Unreleased]` section for anything
 user-visible. Open a pull request once tests, `fmt`, and `clippy` are all
 clean — no extra process beyond that.
+
+## 8. Releasing a version
+
+Prepare the release on a branch:
+
+1. Update the version in `Cargo.toml`.
+2. Run `cargo check` to update `Cargo.lock`.
+3. Move the current `[Unreleased]` entries in `CHANGELOG.md` under the new
+   version, then leave an empty `[Unreleased]` section at the top.
+4. Run the full checks:
+
+   ```
+   cargo build --workspace
+   cargo test --workspace
+   cargo fmt -p tsuzuki --check
+   cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings
+   ```
+
+5. Check the release build and version:
+
+   ```
+   cargo build --release
+   ./target/release/tsuzuki --version
+   ```
+
+Commit these changes and merge them into `main`. From an up-to-date `main`,
+create and push the matching tag:
+
+```
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Pushing the tag starts the release workflow, which builds the Linux binaries
+and installer and publishes the GitHub release. Check that the workflow passes
+and that the release contains both Linux builds and the install script.
