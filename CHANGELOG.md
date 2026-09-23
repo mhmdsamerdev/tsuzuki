@@ -4,6 +4,8 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+## [v0.1.1]
+
 - Fixed MAL sync pulls leaving Tsuzuki's local resume cursor on an older episode.
 - Paused series are now excluded from MAL progress sync.
 - Deleted or otherwise unavailable series folders are now excluded from MAL sync.
