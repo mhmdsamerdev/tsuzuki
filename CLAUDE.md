@@ -728,12 +728,15 @@ result or an action.
   precedent (the Anitomy-candidate confirmation flow) still applies: the
   user must explicitly re-run `sync link` to confirm it, nothing
   auto-links.
-- **Terminal output is one line per series, symbol-coded, no matching
-  internals.** `✓` for anything that completed with no action needed
-  (`Merged`, any direction — Push/Pull/NoOp all read the same to the
-  user), `⚠` for anything needing a manual `sync link` (a confident
-  suggestion, no suggestion, or an empty MAL list), `✗` for a real
-  failure. A confident suggestion gets its exact `tsuzuki sync link
+- **Terminal output shows changes and required actions, never unchanged
+  series.** A real Push/Pull gets one `✓` line; a `NoOp` normally gets no
+  per-series line at all — unchanged is the normal case, and listing every
+  unchanged title hides the few results worth reading. The one exception is
+  a `NoOp` that repairs a stale pre-v0.1.1 local cursor: that is a real local
+  change and keeps the same `✓ ... episode N synced` line. `⚠` marks anything
+  needing a manual `sync link` (a confident suggestion, no suggestion, or an
+  empty MAL list), and `✗` marks a real failure. A confident suggestion gets
+  its exact `tsuzuki sync link
   "<series>" --mal-id <id>` command printed on the next, indented line —
   the point is the user can act on the output directly, never re-derive
   the command themselves. Similarity scores and multi-candidate lists are
@@ -741,8 +744,10 @@ result or an action.
 - **The run-end summary omits zero-count categories** (`sync_summary_line`
   in `main.rs`) rather than always printing all three — "Sync complete: 1
   synced, 2 need manual linking" instead of padding it with "0 failed" on
-  the common all-good run. Exit-code logic (`ExitCode::FAILURE` iff any
-  series failed) is unchanged — only the printed text changed.
+  the common all-good run. Only real Push/Pull actions and actual local-cursor
+  repairs count as `synced`; an entirely unchanged run ends with `Sync
+  complete: no changes`.
+  Exit-code logic (`ExitCode::FAILURE` iff any series failed) is unchanged.
 
 ### Doctor output is a concise health report, not a narration of every internal check
 A later UX pass: `tsuzuki doctor` was printing one `[OK]`/`[WARN]`/`[FAIL]`

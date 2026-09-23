@@ -588,13 +588,16 @@ fn advance_local_cursor(
 /// `NoOp` is intentionally included: releases before v0.1.1 could persist
 /// the higher MAL awareness without advancing the cursor, so the next sync
 /// must repair that stale state even though the episode-count merge itself
-/// now has nothing left to change.
+/// now has nothing left to change. Returns each cursor it actually advanced
+/// with the agreed watched count, so the command layer can report that real
+/// local change while keeping fully unchanged no-ops silent.
 pub fn apply_synced_progress(
     config: &Config,
     state: &mut State,
     outcomes: &[SeriesOutcome],
     home: Option<&Path>,
-) {
+) -> Vec<(String, String, u32)> {
+    let mut advanced = Vec::new();
     for outcome in outcomes {
         let OutcomeKind::Merged { action, .. } = &outcome.kind else {
             continue;
@@ -606,15 +609,18 @@ pub fn apply_synced_progress(
                 .map(local_effective_episode)
                 .unwrap_or(0),
         };
-        advance_local_cursor(
+        if advance_local_cursor(
             config,
             state,
             &outcome.root,
             &outcome.name,
             watched_episodes,
             home,
-        );
+        ) {
+            advanced.push((outcome.root.clone(), outcome.name.clone(), watched_episodes));
+        }
     }
+    advanced
 }
 
 /// Runs the decision and, only for `Push`, the actual PATCH — a merge that
@@ -1206,7 +1212,15 @@ mod tests {
                 action: MergeAction::NoOp,
             },
         }];
-        apply_synced_progress(&config, &mut state, &outcomes, Some(dir.path()));
+        let advanced = apply_synced_progress(&config, &mut state, &outcomes, Some(dir.path()));
+        assert_eq!(
+            advanced,
+            vec![(
+                root_string.clone(),
+                "Shokei Shoujo no Virgin Road".to_string(),
+                9
+            )]
+        );
 
         let record = state
             .find(&root_string, "Shokei Shoujo no Virgin Road")
