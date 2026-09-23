@@ -624,7 +624,9 @@ reasoning):
   episode, not the tracked cursor" below — it's not the raw
   `episode_number` itself) — without folding a prior pull back in, a
   later run could re-read a stale lower local number and push it back
-  down over a number MAL already has.
+  down over a number MAL already has. After a successful merge, that same
+  agreed watched count also advances the local cursor as described below;
+  awareness remains necessary when the next episode is not on disk yet.
 - **MAL's `my_list_status` field name is asymmetric, a real trap**: a
   list/anime response reports `num_episodes_watched`; the `PATCH
   /v2/anime/{id}/my_list_status` request body field is
@@ -672,6 +674,26 @@ local and MAL episode numbering can drift beyond what Anitomy catches
 local-to-MAL correspondence is only ever fixed at link time — further
 drift is a manual re-link. Neither case is worth a new persisted "was this
 episode actually completed" field for.
+
+### A successful MAL sync advances the local cursor too
+MAL stores the number of episodes already watched; Tsuzuki stores the
+episode to resume. After every successful merge, including a `NoOp`, sync
+aligns the local cursor to the first naturally ordered local file whose
+Anitomy/fallback episode identity is greater than the agreed watched count,
+at position 0. Thus MAL at 9 watched means Tsuzuki resumes episode 10 rather
+than retaining an older local cursor. Running this for `NoOp` is required to
+self-repair state written by older versions, where `mal_episode_awareness`
+could already be 9 while the cursor still pointed at episode 7.
+
+This is strictly forward-only: natural sort remains the ordering authority,
+episode identity only selects the first post-MAL candidate within that
+ordering, and sync never replaces a later local cursor with an earlier one.
+If no later local file exists, or the stored cursor file can no longer be
+resolved, the cursor stays unchanged and `mal_episode_awareness` preserves
+the higher count for a future sync. `Paused` remains paused, and `Dropped`
+remains a deliberate dead end; sync does not silently reactivate either.
+Position 0 on the next episode is a forward-looking resume target, not a
+claim that Tsuzuki observed playback there.
 
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series
 Found during real dogfooding: `tsuzuki sync` was printing every one of

@@ -63,11 +63,11 @@ pub struct SeriesRecord {
     /// every state-touching command, CLAUDE.md's "every state-touching
     /// command reconciles first") — reusing that field for a MAL-driven
     /// number would silently lose it the very next time any command ran.
-    /// `None` means no sync merge has ever touched this series. Never
-    /// implies a real playback position — a merge action never writes
-    /// `current_relative_path`/`position_seconds` (design.md §7: "No
-    /// timestamp/position is implied for episodes Tsuzuki never actually
-    /// observed playback of").
+    /// `None` means no sync merge has ever touched this series. This field
+    /// never implies a real playback position. After a successful merge,
+    /// sync may separately advance `current_relative_path` to the first
+    /// unwatched local episode at position zero; it never fabricates a
+    /// position within an episode Tsuzuki did not observe locally.
     #[serde(default)]
     pub mal_episode_awareness: Option<u32>,
 }

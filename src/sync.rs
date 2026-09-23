@@ -44,11 +44,17 @@
 //! regresses what's already been confirmed on either side.
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::anitomy;
+use crate::config::Config;
+use crate::exclude;
 use crate::mal::{HttpResponse, MalHttpClient};
+use crate::roots::{expand_tilde, normalize};
+use crate::series;
 use crate::state::{MalLink, SeriesRecord, State, Status, now_unix};
 
 pub const API_BASE: &str = "https://api.myanimelist.net/v2";
@@ -501,6 +507,116 @@ pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     watched.max(record.mal_episode_awareness.unwrap_or(0))
 }
 
+/// Advances Tsuzuki's local playback cursor to the first locally available
+/// episode after `watched_episodes`.
+///
+/// MAL reports a watched count, while Tsuzuki stores the episode to resume.
+/// A successful sync therefore has a local consequence when MAL is ahead:
+/// if MAL says episode 9 is watched, the local cursor should land on episode
+/// 10 at position zero instead of continuing to resume an older episode.
+///
+/// The ordered file list remains authoritative. Anitomy only identifies the
+/// first entry whose episode number is greater than MAL's watched count; it
+/// never reorders the list. The cursor moves only when that entry is later
+/// than the currently stored file, so sync can never regress local progress.
+/// Paused records stay paused, and dropped records remain deliberate dead
+/// ends. If the next episode is not on disk yet, the record is left alone;
+/// the retained `mal_episode_awareness` lets a later sync try again after new
+/// files arrive.
+fn advance_local_cursor(
+    config: &Config,
+    state: &mut State,
+    root: &str,
+    name: &str,
+    watched_episodes: u32,
+    home: Option<&Path>,
+) -> bool {
+    let Some(record_index) = state
+        .series
+        .iter()
+        .position(|record| record.root == root && record.name == name)
+    else {
+        return false;
+    };
+    if state.series[record_index].status == Status::Dropped {
+        return false;
+    }
+
+    let expanded_root = expand_tilde(Path::new(root), home);
+    let series_path = expanded_root.join(name);
+    let excluded = exclude::excluded_paths_for_root(config, root, home);
+    let Ok(ordered) =
+        series::ordered_episodes_excluding(&series_path, &config.roots.video_extensions, &excluded)
+    else {
+        return false;
+    };
+
+    let current_path = expanded_root.join(&state.series[record_index].current_relative_path);
+    let current_real = normalize(&current_path, home);
+    let Some(current_index) = ordered
+        .iter()
+        .position(|path| normalize(path, home) == current_real)
+    else {
+        return false;
+    };
+
+    let identities = anitomy::episode_identity(&ordered);
+    let Some(next_index) = identities
+        .iter()
+        .position(|identity| identity.episode_number > watched_episodes)
+    else {
+        return false;
+    };
+    if next_index <= current_index {
+        return false;
+    }
+
+    let next_relative = ordered[next_index]
+        .strip_prefix(&expanded_root)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| name.to_string());
+    let record = &mut state.series[record_index];
+    record.current_relative_path = next_relative;
+    record.position_seconds = 0.0;
+    record.episode_number = Some(identities[next_index].episode_number);
+    record.updated_at = now_unix();
+    true
+}
+
+/// Applies the local-cursor side of every successful sync result.
+///
+/// `NoOp` is intentionally included: releases before v0.1.1 could persist
+/// the higher MAL awareness without advancing the cursor, so the next sync
+/// must repair that stale state even though the episode-count merge itself
+/// now has nothing left to change.
+pub fn apply_synced_progress(
+    config: &Config,
+    state: &mut State,
+    outcomes: &[SeriesOutcome],
+    home: Option<&Path>,
+) {
+    for outcome in outcomes {
+        let OutcomeKind::Merged { action, .. } = &outcome.kind else {
+            continue;
+        };
+        let watched_episodes = match *action {
+            MergeAction::Push(n) | MergeAction::Pull(n) => n,
+            MergeAction::NoOp => state
+                .find(&outcome.root, &outcome.name)
+                .map(local_effective_episode)
+                .unwrap_or(0),
+        };
+        advance_local_cursor(
+            config,
+            state,
+            &outcome.root,
+            &outcome.name,
+            watched_episodes,
+            home,
+        );
+    }
+}
+
 /// Runs the decision and, only for `Push`, the actual PATCH — a merge that
 /// resolves to `Pull`/`NoOp` never calls the network a second time (the
 /// `mal` number was already learned via whichever GET the caller used to
@@ -524,9 +640,10 @@ fn merge_and_maybe_push(
 /// `updated_at`, but **only** for `Push`/`Pull` (design.md's "equal →
 /// no-op" means no-op all the way down to storage: a genuine no-op never
 /// touches `state.toml` at all, matching this project's existing "never
-/// touch saved state on a no-op" precedent everywhere else). Never writes
-/// `current_relative_path`/`position_seconds` — no real playback position
-/// is ever implied by a merge action.
+/// touch saved state on a no-op" precedent everywhere else). Cursor
+/// alignment is a separate post-merge step: [`advance_local_cursor`] may
+/// move to the first unwatched local episode at position zero, but this
+/// function never invents a playback position for a watched episode.
 fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
     let new_awareness = match action {
         MergeAction::Push(n) | MergeAction::Pull(n) => n,
@@ -773,6 +890,8 @@ mod tests {
     use super::*;
     use crate::mal::HttpError;
     use std::cell::RefCell;
+    use std::fs;
+    use tempfile::tempdir;
 
     /// A representative `fuzzy_match_threshold`, used everywhere `run_sync`
     /// is exercised end-to-end in this module's tests unless a test is
@@ -1022,6 +1141,95 @@ mod tests {
         record.status = Status::Dropped;
         record.position_seconds = 0.0;
         assert_eq!(local_effective_episode(&record), 8);
+    }
+
+    #[test]
+    fn synced_mal_progress_advances_the_local_resume_cursor() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_dir = root.join("Shokei Shoujo no Virgin Road");
+        fs::create_dir_all(&series_dir).unwrap();
+        for episode in 1..=12 {
+            fs::File::create(series_dir.join(format!(
+                "Shokei Shoujo no Virgin Road - S01E{episode:02}.mkv"
+            )))
+            .unwrap();
+        }
+
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+        let mut record = base_record();
+        record.root.clone_from(&root_string);
+        record.name = "Shokei Shoujo no Virgin Road".to_string();
+        record.current_relative_path =
+            format!("{}/Shokei Shoujo no Virgin Road - S01E07.mkv", record.name);
+        record.position_seconds = 600.0;
+        record.episode_number = Some(7);
+        // This reproduces an already-synced state written by v0.1.0: MAL
+        // awareness moved to 9, but the local cursor incorrectly stayed 7.
+        record.mal_episode_awareness = Some(9);
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+
+        let outcomes = vec![SeriesOutcome {
+            root: root_string.clone(),
+            name: "Shokei Shoujo no Virgin Road".to_string(),
+            kind: OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::NoOp,
+            },
+        }];
+        apply_synced_progress(&config, &mut state, &outcomes, Some(dir.path()));
+
+        let record = state
+            .find(&root_string, "Shokei Shoujo no Virgin Road")
+            .unwrap();
+        assert_eq!(
+            record.current_relative_path,
+            "Shokei Shoujo no Virgin Road/Shokei Shoujo no Virgin Road - S01E10.mkv"
+        );
+        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.episode_number, Some(10));
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.mal_episode_awareness, Some(9));
+    }
+
+    #[test]
+    fn synced_mal_progress_never_moves_the_local_cursor_backward() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_dir = root.join("One Piece");
+        fs::create_dir_all(&series_dir).unwrap();
+        for episode in 1..=10 {
+            fs::File::create(series_dir.join(format!("One Piece - {episode:02}.mkv"))).unwrap();
+        }
+
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+        let mut record = base_record();
+        record.root.clone_from(&root_string);
+        record.current_relative_path = "One Piece/One Piece - 10.mkv".to_string();
+        record.position_seconds = 500.0;
+        record.episode_number = Some(10);
+        let before = record.clone();
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+
+        assert!(!advance_local_cursor(
+            &config,
+            &mut state,
+            &root_string,
+            "One Piece",
+            5,
+            Some(dir.path()),
+        ));
+        assert_eq!(state.series[0], before);
     }
 
     // --- THE non-destructive invariant test (verification item 5) ---

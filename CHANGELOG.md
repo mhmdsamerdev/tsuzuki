@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- Fixed MAL sync pulls leaving Tsuzuki's local resume cursor on an older episode.
+
 ## [v0.1.0]
 
 - Tracked roots, natural-sort episode ordering, and exclusions.

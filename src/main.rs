@@ -939,6 +939,8 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         config.mal.fuzzy_match_threshold,
     );
 
+    sync::apply_synced_progress(config, &mut state, &outcomes, home);
+
     if state != before
         && let Err(e) = state::write(state_path, &state)
     {
