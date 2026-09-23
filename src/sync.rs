@@ -47,6 +47,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use chrono::Local;
 use serde::Deserialize;
 
 use crate::anitomy;
@@ -497,13 +498,19 @@ pub fn fetch_anime_status(
 /// here wouldn't error, MAL would just ignore the unrecognized field and
 /// the episode count would silently never update. Combining an
 /// episode push and a status transition avoids two writes—and avoids a
-/// partially-applied result if the second request were to fail.
+/// partially-applied result if the second request were to fail. MAL's
+/// published writable schema omits `start_date` and `finish_date`, but a
+/// live authenticated PATCH/read-back probe confirmed both fields are
+/// accepted and persisted; they are included only with the corresponding
+/// forward status transition.
 fn update_mal_entry(
     client: &dyn MalHttpClient,
     bearer_token: &str,
     mal_id: u32,
     num_watched_episodes: Option<u32>,
     status: Option<MalListStatus>,
+    start_date: Option<&str>,
+    finish_date: Option<&str>,
 ) -> Result<(), SyncApiError> {
     let url = format!("{API_BASE}/anime/{mal_id}/my_list_status");
     let episode_value = num_watched_episodes.map(|value| value.to_string());
@@ -513,6 +520,12 @@ fn update_mal_entry(
     }
     if let Some(value) = status.and_then(MalListStatus::api_value) {
         params.push(("status", value));
+    }
+    if let Some(value) = start_date {
+        params.push(("start_date", value));
+    }
+    if let Some(value) = finish_date {
+        params.push(("finish_date", value));
     }
     if params.is_empty() {
         return Ok(());
@@ -568,6 +581,25 @@ fn desired_status(
         }
         (MalListStatus::PlanToWatch, false) => Some(MalListStatus::Watching),
         _ => None,
+    }
+}
+
+/// Date fields that belong to a forward MAL status transition. MAL accepts
+/// calendar dates rather than timestamps, so both values use the local date
+/// captured once at the beginning of this sync run. A title completed in a
+/// single run crosses both boundaries and receives both dates.
+fn transition_dates(
+    current: MalListStatus,
+    next: Option<MalListStatus>,
+    sync_date: &str,
+) -> (Option<&str>, Option<&str>) {
+    match (current, next) {
+        (MalListStatus::PlanToWatch, Some(MalListStatus::Watching)) => (Some(sync_date), None),
+        (MalListStatus::Watching, Some(MalListStatus::Completed)) => (None, Some(sync_date)),
+        (MalListStatus::PlanToWatch, Some(MalListStatus::Completed)) => {
+            (Some(sync_date), Some(sync_date))
+        }
+        _ => (None, None),
     }
 }
 
@@ -733,15 +765,25 @@ fn merge_and_maybe_update(
     local: u32,
     remote: &AnimeStatus,
     local_finished: bool,
+    sync_date: &str,
 ) -> Result<MergeAction, SyncApiError> {
     let merge_action = decide_merge(local, remote.num_episodes_watched);
     let agreed = local.max(remote.num_episodes_watched);
     let status_update = desired_status(remote.status, agreed, remote.num_episodes, local_finished);
+    let (start_date, finish_date) = transition_dates(remote.status, status_update, sync_date);
     let episode_update = match merge_action {
         MergeAction::Push(n) => Some(n),
         _ => None,
     };
-    update_mal_entry(client, bearer_token, mal_id, episode_update, status_update)?;
+    update_mal_entry(
+        client,
+        bearer_token,
+        mal_id,
+        episode_update,
+        status_update,
+        start_date,
+        finish_date,
+    )?;
     if merge_action == MergeAction::NoOp
         && let Some(status) = status_update
     {
@@ -901,6 +943,29 @@ pub fn run_sync(
     delay: Duration,
     fuzzy_match_threshold: f64,
 ) -> Vec<SeriesOutcome> {
+    let sync_date = Local::now().format("%Y-%m-%d").to_string();
+    run_sync_on_date(
+        client,
+        bearer_token,
+        state,
+        targets,
+        delay,
+        fuzzy_match_threshold,
+        &sync_date,
+    )
+}
+
+/// The testable core of [`run_sync`]. Production captures the local calendar
+/// date once so every transition in one command uses the same value.
+fn run_sync_on_date(
+    client: &dyn MalHttpClient,
+    bearer_token: &str,
+    state: &mut State,
+    targets: &[(String, String)],
+    delay: Duration,
+    fuzzy_match_threshold: f64,
+    sync_date: &str,
+) -> Vec<SeriesOutcome> {
     if targets.is_empty() {
         return Vec::new();
     }
@@ -959,6 +1024,7 @@ pub fn run_sync(
                                 local,
                                 &remote,
                                 local_finished,
+                                sync_date,
                             ) {
                                 Ok(action) => {
                                     apply_merge_result(state, root, name, action);
@@ -1011,7 +1077,15 @@ pub fn run_sync(
         // the bulk list.
         throttle(&mut is_first_call, delay);
         let result = fetch_anime_status(client, bearer_token, mal_id).and_then(|status| {
-            merge_and_maybe_update(client, bearer_token, mal_id, local, &status, local_finished)
+            merge_and_maybe_update(
+                client,
+                bearer_token,
+                mal_id,
+                local,
+                &status,
+                local_finished,
+                sync_date,
+            )
         });
         match result {
             Ok(action) => {
@@ -1261,6 +1335,37 @@ mod tests {
             desired_status(MalListStatus::PlanToWatch, 0, 12, false),
             None,
             "zero progress must not move a planned title to Watching"
+        );
+
+        let date = "2026-09-23";
+        assert_eq!(
+            transition_dates(
+                MalListStatus::PlanToWatch,
+                Some(MalListStatus::Watching),
+                date
+            ),
+            (Some(date), None)
+        );
+        assert_eq!(
+            transition_dates(
+                MalListStatus::Watching,
+                Some(MalListStatus::Completed),
+                date
+            ),
+            (None, Some(date))
+        );
+        assert_eq!(
+            transition_dates(
+                MalListStatus::PlanToWatch,
+                Some(MalListStatus::Completed),
+                date
+            ),
+            (Some(date), Some(date))
+        );
+        assert_eq!(
+            transition_dates(MalListStatus::Watching, None, date),
+            (None, None),
+            "dates must remain untouched without a status transition"
         );
     }
 
@@ -1530,13 +1635,14 @@ mod tests {
             }],
         };
 
-        let outcomes = run_sync(
+        let outcomes = run_sync_on_date(
             &client,
             "token",
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
             TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
         );
 
         assert_eq!(outcomes.len(), 1);
@@ -1596,7 +1702,7 @@ mod tests {
             client.patch_calls.borrow().as_slice(),
             &[(
                 format!("{API_BASE}/anime/42/my_list_status"),
-                "num_watched_episodes=8&status=watching".to_string()
+                "num_watched_episodes=8&status=watching&start_date=2026-09-23".to_string()
             )]
         );
     }
@@ -1617,13 +1723,14 @@ mod tests {
                 mal_id: 42,
             }],
         };
-        let outcomes = run_sync(
+        let outcomes = run_sync_on_date(
             &client,
             "token",
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
             TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
         );
 
         assert_eq!(
@@ -1635,7 +1742,7 @@ mod tests {
         );
         assert_eq!(
             client.patch_calls.borrow()[0].1,
-            "status=watching".to_string()
+            "status=watching&start_date=2026-09-23".to_string()
         );
     }
 
@@ -1657,13 +1764,14 @@ mod tests {
                 mal_id: 42,
             }],
         };
-        let outcomes = run_sync(
+        let outcomes = run_sync_on_date(
             &client,
             "token",
             &mut state,
             &[("~/Anime".to_string(), "One Piece".to_string())],
             Duration::ZERO,
             TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
         );
 
         assert_eq!(
@@ -1675,7 +1783,48 @@ mod tests {
         );
         assert_eq!(
             client.patch_calls.borrow()[0].1,
-            "num_watched_episodes=12&status=completed".to_string()
+            "num_watched_episodes=12&status=completed&finish_date=2026-09-23".to_string()
+        );
+    }
+
+    #[test]
+    fn completing_a_planned_entry_sets_both_transition_dates() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"Test Anime","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":0}}"#,
+        );
+
+        let mut record = base_record();
+        record.episode_number = Some(13); // cursor 13 -> 12 watched locally
+        let mut state = State {
+            series: vec![record],
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        };
+        let outcomes = run_sync_on_date(
+            &client,
+            "token",
+            &mut state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(12)
+            }
+        );
+        assert_eq!(
+            client.patch_calls.borrow()[0].1,
+            "num_watched_episodes=12&status=completed&start_date=2026-09-23&finish_date=2026-09-23"
         );
     }
 

@@ -719,10 +719,13 @@ never sent as a second partially-failable write.
 These transitions are monotonic and deliberately narrow: Tsuzuki never
 changes MAL's explicit `on_hold` or `dropped` status, never moves
 `completed` backward, and does nothing for an unknown future API status.
-The official MAL v2 schema exposes `start_date` and `finish_date` in response
-objects but does not list either as writable on the anime-list update
-operation. Tsuzuki therefore leaves dates untouched rather than relying on
-undocumented request fields; revisit only if MAL documents them as writable.
+The same PATCH records the sync run's local calendar date as `start_date`
+when Plan to Watch becomes Watching, or as `finish_date` when Watching
+becomes Completed. A direct Plan to Watch → Completed transition sets both.
+No other sync overwrites either date. Although MAL's official writable
+schema omits these two fields, a live authenticated PATCH/read-back probe
+on 2026-09-23 confirmed that MAL accepts and persists both; the probe also
+restored the original dates successfully.
 
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series
 Found during real dogfooding: `tsuzuki sync` was printing every one of
