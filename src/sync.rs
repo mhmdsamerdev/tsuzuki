@@ -740,14 +740,26 @@ pub struct SeriesOutcome {
     pub kind: OutcomeKind,
 }
 
+/// Returns the state records eligible for a MAL progress merge.
+///
+/// Pausing is an explicit request to preserve a series' local progress
+/// without MAL changing it (and without that stale local cursor changing
+/// MAL). Dropped records remain eligible; only `Paused` is the sync opt-out.
+pub fn eligible_targets(state: &State) -> Vec<(String, String)> {
+    state
+        .series
+        .iter()
+        .filter(|record| record.status != Status::Paused)
+        .map(|record| (record.root.clone(), record.name.clone()))
+        .collect()
+}
+
 /// Runs `sync` across every `(root, name)` in `targets` — design.md §7 +
 /// this phase's own instructions: attempt linking first if not already
 /// linked, then merge if linked; one series failing never aborts the rest.
-/// `targets` is expected to already be filtered to series with real
-/// progress (a `state.toml` record exists at all) — a never-started series
-/// has no record and is never in this list to begin with, so "skip
-/// untouched series" falls out of the caller's own selection, not logic
-/// here.
+/// `targets` is expected to come from [`eligible_targets`]: a never-started
+/// series has no record and a paused series is deliberately excluded before
+/// this network-facing layer runs.
 ///
 /// The bulk list (needed only for not-yet-linked series) is fetched **at
 /// most once** per run, shared across every series that needs it — not
@@ -1230,6 +1242,33 @@ mod tests {
             Some(dir.path()),
         ));
         assert_eq!(state.series[0], before);
+    }
+
+    #[test]
+    fn paused_series_are_excluded_from_sync_targets() {
+        let mut in_progress = base_record();
+        in_progress.name = "Watching".to_string();
+
+        let mut paused = base_record();
+        paused.name = "Local Rewatch".to_string();
+        paused.status = Status::Paused;
+
+        let mut dropped = base_record();
+        dropped.name = "Finished".to_string();
+        dropped.status = Status::Dropped;
+
+        let state = State {
+            series: vec![in_progress, paused, dropped],
+            mal_links: Vec::new(),
+        };
+
+        assert_eq!(
+            eligible_targets(&state),
+            vec![
+                ("~/Anime".to_string(), "Watching".to_string()),
+                ("~/Anime".to_string(), "Finished".to_string()),
+            ]
+        );
     }
 
     // --- THE non-destructive invariant test (verification item 5) ---

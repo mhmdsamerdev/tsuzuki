@@ -675,6 +675,16 @@ local-to-MAL correspondence is only ever fixed at link time — further
 drift is a manual re-link. Neither case is worth a new persisted "was this
 episode actually completed" field for.
 
+### Paused series are excluded from MAL progress sync
+`Paused` is the explicit temporary opt-out from sync. Bare `tsuzuki sync`
+filters paused records before MAL authentication or any network request, so
+neither side's episode count can change the other while a local watch or
+rewatch is paused. The record and any existing MAL link remain intact;
+resuming the series locally makes it eligible on the next sync. `sync link`
+remains available because it records identity only and performs no progress
+merge. Never-started series remain excluded because they have no state record;
+`Dropped` records remain eligible.
+
 ### A successful MAL sync advances the local cursor too
 MAL stores the number of episodes already watched; Tsuzuki stores the
 episode to resume. After every successful merge, including a `NoOp`, sync
@@ -690,9 +700,9 @@ episode identity only selects the first post-MAL candidate within that
 ordering, and sync never replaces a later local cursor with an earlier one.
 If no later local file exists, or the stored cursor file can no longer be
 resolved, the cursor stays unchanged and `mal_episode_awareness` preserves
-the higher count for a future sync. `Paused` remains paused, and `Dropped`
-remains a deliberate dead end; sync does not silently reactivate either.
-Position 0 on the next episode is a forward-looking resume target, not a
+the higher count for a future sync. Paused records never reach this step;
+`Dropped` remains a deliberate dead end and sync does not silently reactivate
+it. Position 0 on the next episode is a forward-looking resume target, not a
 claim that Tsuzuki observed playback there.
 
 ### Sync output only ever suggests a confident fuzzy match, and stays one line per series

@@ -899,10 +899,10 @@ fn ensure_sync_access_token(
 }
 
 /// `tsuzuki sync` (bare) — design.md §7 + this phase's own instructions:
-/// every tracked series with real progress (a `state.toml` record at all —
-/// a never-started series has none, so it's never in `targets` to begin
-/// with), attempt linking first if not already linked, then merge if
-/// linked. One series failing never aborts the run.
+/// every non-paused series with real progress, attempt linking first if not
+/// already linked, then merge if linked. Paused records are filtered before
+/// MAL authentication, so an all-paused library performs no network work.
+/// One series failing never aborts the run.
 fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -912,22 +912,18 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         print_scan_warning(w);
     }
 
+    let targets = sync::eligible_targets(&state);
+
+    if targets.is_empty() {
+        println!("Nothing eligible to sync.");
+        return ExitCode::SUCCESS;
+    }
+
     let client = mal::UreqClient;
     let access_token = match ensure_sync_access_token(&client, config) {
         Ok(t) => t,
         Err(code) => return code,
     };
-
-    let targets: Vec<(String, String)> = state
-        .series
-        .iter()
-        .map(|r| (r.root.clone(), r.name.clone()))
-        .collect();
-
-    if targets.is_empty() {
-        println!("Nothing tracked with real progress to sync.");
-        return ExitCode::SUCCESS;
-    }
 
     let before = state.clone();
     let outcomes = sync::run_sync(
