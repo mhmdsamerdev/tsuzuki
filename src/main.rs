@@ -4,6 +4,7 @@ mod config;
 mod doctor;
 mod duration;
 mod exclude;
+mod http;
 mod launch;
 mod mal;
 mod mpv;
@@ -17,6 +18,7 @@ mod series;
 mod state;
 mod sync;
 mod target;
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -120,6 +122,7 @@ fn dispatch(
             fix,
             forget_orphans,
         } => doctor_command(fix, forget_orphans, config, state_path, home),
+        Command::Update => update_command(),
     }
 }
 
@@ -1140,6 +1143,13 @@ fn doctor_command(
     state_path: &Path,
     home: Option<&Path>,
 ) -> ExitCode {
+    // Local only — never calls update::check_for_update(). This exists so
+    // a pasted doctor report (the standard ask on a GitHub issue) names
+    // the exact version a bug was filed against; whether a newer release
+    // exists is `tsuzuki update`'s job alone (CLAUDE.md).
+    println!("Tsuzuki v{}", update::current_version());
+    println!();
+
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
@@ -1293,6 +1303,43 @@ fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
         0 => "All checks passed.".to_string(),
         1 => "1 issue found.".to_string(),
         n => format!("{n} issues found."),
+    }
+}
+
+/// `tsuzuki update` — the sole place in this crate other than `sync` that
+/// ever touches the network, and only because this command was explicitly
+/// invoked (CLAUDE.md's "network only touched on request"). Takes no
+/// `config`/`state_path`/`home`: unlike every other command, updating has
+/// nothing to do with tracked series or local state.
+///
+/// Installs directly, with no separate `--install` flag to wait for —
+/// running `update` at all is already the explicit action; gating the one
+/// thing it does behind a second flag would only add a step for no real
+/// safety benefit (there's nothing destructive here: the installer just
+/// replaces the binary with what `/releases/latest` already publishes).
+fn update_command() -> ExitCode {
+    let current = update::current_version();
+    let status = match update::check_for_update() {
+        Ok(status) => status,
+        // Fail fast: never attempts the installer against network already
+        // proven broken. UpdateCheckError's own Display is already a
+        // short, curated line (no raw HTTP bodies), so this needs no
+        // further translation before reaching the terminal.
+        Err(e) => return fail(&format!("could not check for updates: {e}")),
+    };
+    println!("{}", status.render(current));
+
+    let update::UpdateStatus::UpdateAvailable { latest } = status else {
+        return ExitCode::SUCCESS;
+    };
+
+    println!("Installing {latest}...");
+    match update::run_install() {
+        Ok(()) => {
+            println!("✓ updated to {latest}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&format!("install failed: {e}")),
     }
 }
 

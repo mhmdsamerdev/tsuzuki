@@ -187,3 +187,20 @@ fn doctor_forget_orphans_without_fix_is_rejected_by_the_cli() {
         "expected clap's own dependency-violation error, got:\n{stderr}"
     );
 }
+
+#[test]
+fn doctor_prints_the_local_version_banner_first_with_no_network_involved() {
+    // Zero network: this only proves the banner is the compiled-in
+    // CARGO_PKG_VERSION, never a live GitHub lookup (CLAUDE.md's "doctor's
+    // version line is local-only").
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let doctor = run(home, &["doctor"]);
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    let expected = format!("Tsuzuki v{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        stdout.starts_with(&expected),
+        "expected doctor's first line to be {expected:?}, got:\n{stdout}"
+    );
+}

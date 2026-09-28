@@ -887,6 +887,61 @@ instead of copying that shape, `get`/`set`/`list` didn't survive:
   surfaced immediately rather than left for the next unrelated command to
   trip over.
 
+### `doctor`'s version line is local-only; `tsuzuki update` is the only place that ever checks GitHub
+`doctor` is the command a GitHub issue reporter is asked to run and paste
+output from. Its first two printed lines are `Tsuzuki v<version>` from
+`update::current_version()` (a bare `env!("CARGO_PKG_VERSION")` wrapper) —
+purely local, compiled-in identification so a maintainer can tell which
+release range a bug was filed against. **It never calls
+`update::check_for_update()` or otherwise touches the network** — a future
+session must not "helpfully" merge the two by having `doctor` report
+whether a newer release exists. That job belongs to `update` alone, kept
+that way specifically so `doctor` stays the network-free command it
+already was (its MAL-auth check already only reads a local token file,
+never calls MAL live).
+
+`tsuzuki update` is the one command besides `sync` where CLAUDE.md's
+"network only touched on request" is satisfied by the subcommand name
+itself being explicitly typed — same exception, same reasoning. `tsuzuki
+update` GETs GitHub's `/releases/latest` API (via `crate::http`, shared
+with `mal.rs`'s network plumbing — see below), reports one of three
+outcomes (`UpToDate`/`UpdateAvailable`/`Ahead`), and — deliberately with
+no separate flag to wait for — installs immediately when
+`UpdateAvailable`, by spawning the exact `curl -LsSf <installer-url> | sh`
+one-liner `README.md` documents manually, blocking with real stdio
+inherited (`config edit`'s `$EDITOR`-spawn precedent, not `launch.rs`'s
+fire-and-forget mpv spawn — the user needs to see the installer's own
+output and get a real exit code back). Both URLs are derived from
+`Cargo.toml`'s own `repository` field (`env!("CARGO_PKG_REPOSITORY")`)
+rather than a second hardcoded owner/repo string.
+
+**No `--install` flag, deliberately** — an earlier version of this
+command gated the install behind one, but running `update` at all is
+already the explicit action; there's nothing destructive to add a second
+confirmation step for (the installer just replaces the binary with what
+`/releases/latest` already publishes), so a flag would only add friction
+with no real safety benefit. `UpToDate`/`Ahead` never install — nothing
+to do. A failed version check bails out before ever spawning the
+installer (fail-fast — never stacks two different failure modes against
+network already proven broken).
+
+**`install-updater` stays `false` in `dist-workspace.toml` even with
+`tsuzuki update` existing** — that flag is cargo-dist's own optional
+generator for a separate self-updater binary; this hand-rolled
+check-then-invoke-the-existing-installer command already covers the need
+without a second update mechanism. Don't flip it thinking it's now
+redundant-but-consistent — it would just produce a second, competing way
+to update.
+
+**`src/http.rs`** holds `HttpResponse`/`HttpError`/`build_agent`/
+`map_ureq_result` — originally private to `mal.rs`, relocated once
+`update.rs` became a second real network caller needing the identical
+native-tls `Agent` setup (`mal.rs`'s doc comment there explains the
+already-once-hit "no TLS backend configured" bug this guards against).
+`mal.rs` re-exports `HttpResponse`/`HttpError` so existing callers
+(`sync.rs`) needed no changes. A third future network caller should go
+through `crate::http` too, not reimplement this a third time.
+
 ## 4. Dev environment
 
 **All build/test/lint commands run inside `nix-shell`**, not against the

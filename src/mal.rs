@@ -418,19 +418,14 @@ fn write_http_response(stream: &mut TcpStream, status: u16, message: &str) -> io
 
 // --- HTTP client (injectable — the one seam that ever touches the network) ---
 
-pub struct HttpResponse {
-    pub status: u16,
-    pub body: String,
-}
-
-#[derive(Debug)]
-pub struct HttpError(pub String);
-
-impl fmt::Display for HttpError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// `HttpResponse`/`HttpError` themselves, plus the native-tls `Agent`
+/// building and result-mapping every real client here needs, now live in
+/// `crate::http` — shared with `update.rs`'s GitHub release check, the
+/// second real network caller in this crate. Re-exported so existing
+/// `crate::mal::HttpResponse`/`crate::mal::HttpError` references (e.g.
+/// `sync.rs`) don't need to change.
+pub use crate::http::{HttpError, HttpResponse};
+use crate::http::{build_agent, map_ureq_result};
 
 /// The MAL HTTP surface Tsuzuki needs, end to end: `post_form` for the
 /// unauthenticated OAuth token endpoint (client_id-only, both authorization-
@@ -468,57 +463,11 @@ pub trait MalHttpClient {
 /// async runtime (CLAUDE.md §5: "MAL calls must stay lazy/on-demand", "don't
 /// introduce anything at startup that reintroduces meaningful latency" — an
 /// async executor pulled in for one on-demand code path would work directly
-/// against the reason this project is Rust). This is the only place in the
-/// whole binary that ever makes a real network call.
-///
-/// **Must use an explicit `Agent` with `.tls_connector(...)` set, never the
-/// bare `ureq::post(...)`/`ureq::get(...)` shortcut functions.** Found the
-/// hard way, against the real MAL API: `ureq`'s `native-tls` feature is
-/// never picked up automatically by those shortcuts — per `ureq`'s own
-/// source (`lib.rs`'s `default_tls_config`), only the `tls` (rustls)
-/// feature wires a default TLS backend into them. With `default-features =
-/// false` and only `native-tls` enabled (Cargo.toml, chosen to use the
-/// pkg-config+openssl `shell.nix` already provisions), the shortcuts had
-/// *no* TLS backend at all — every request failed with "Unknown Scheme:
-/// cannot make HTTPS request because no TLS backend is configured". No unit
-/// test in this module caught it: every one of them goes through the
-/// injectable `MalHttpClient` trait's fake, never this real impl. Building
-/// the connector fresh per call (rather than caching it) is deliberate
-/// simplicity, not an oversight — this is an on-demand, low-frequency path
-/// (a login once, a refresh roughly hourly at most), so the tiny, one-time
-/// TLS-connector setup cost here is a complete non-issue.
+/// against the reason this project is Rust). Uses `crate::http::build_agent`/
+/// `crate::http::map_ureq_result` for the native-tls `Agent` setup and result
+/// mapping — see that module's doc comment for why the bare `ureq::post(...)`/
+/// `ureq::get(...)` shortcut functions must never be used instead.
 pub struct UreqClient;
-
-/// Builds a fresh `Agent` with the explicit native-tls connector every
-/// `UreqClient` method needs (see the doc comment above) — factored out
-/// once `get`/`patch_form` joined `post_form` in needing it, so the setup
-/// exists in exactly one place rather than three copies.
-fn build_agent() -> Result<ureq::Agent, HttpError> {
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
-    Ok(ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(connector))
-        .build())
-}
-
-/// Maps a `ureq` call result to `HttpResponse`/`HttpError` — a non-2xx
-/// status is still `Ok(HttpResponse { status, .. })` (the caller decides
-/// what a given status means; this layer only distinguishes "got a real
-/// HTTP response" from "never reached the server at all").
-fn map_ureq_result(result: Result<ureq::Response, ureq::Error>) -> Result<HttpResponse, HttpError> {
-    match result {
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.into_string().unwrap_or_default();
-            Ok(HttpResponse { status, body })
-        }
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp.into_string().unwrap_or_default();
-            Ok(HttpResponse { status: code, body })
-        }
-        Err(e) => Err(HttpError(e.to_string())),
-    }
-}
 
 impl MalHttpClient for UreqClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {

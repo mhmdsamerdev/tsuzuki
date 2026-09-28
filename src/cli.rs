@@ -121,6 +121,13 @@ pub enum Command {
         #[arg(long, requires = "fix")]
         forget_orphans: bool,
     },
+
+    /// Check for a newer published GitHub release, and install it directly
+    /// if one is found, via the same installer script README.md
+    /// documents. The network is only ever touched here because this
+    /// command was explicitly invoked — never from `doctor` or any other
+    /// command.
+    Update,
 }
 
 #[derive(Debug, Subcommand)]
