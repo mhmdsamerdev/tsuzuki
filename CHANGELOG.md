@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.2]
 
 - Fixed correct episode_number when a completion chain spans multiple watched episodes.
 - `tsuzuki doctor` now prints the tool's own version.
