@@ -4,6 +4,8 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- Fixed correct episode_number when a completion chain spans multiple watched episodes.
+
 ## [v0.1.1]
 
 - Fixed MAL sync pulls leaving Tsuzuki's local resume cursor on an older episode.

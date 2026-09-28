@@ -422,7 +422,11 @@ step further, not just records the fact:
   (binge), the ordinary forward-scan logic still applies from there.
 - **No next episode** (completed one was the actual last file) → series
   auto-transitions to `Dropped`, no manual `drop` needed — this is the
-  mechanism behind `start`'s "Rewatch?" display.
+  mechanism behind `start`'s "Rewatch?" display. `episode_number` is set to
+  this true final episode's own identity here, correct regardless of how
+  many already-completed episodes the walk chained through to reach it —
+  `current_relative_path`/`position_seconds` are the only two fields left
+  frozen at whatever the record held before the chain started.
 
 **Applies identically when no `state.toml` record exists yet.** A
 never-tracked series whose only observed activity is a `Completed`
@@ -654,7 +658,11 @@ in `mal_episode_awareness` as before.
 advance a just-completed series to, so it leaves the cursor sitting on
 the finale it just confirmed complete and transitions straight to
 `Dropped` — the one state where the cursor's own episode genuinely *is*
-the watched count already, not one short of it. This is identifiable
+the watched count already, not one short of it. This holds regardless of
+how many already-completed episodes the walk chained through to reach
+that finale in a single call — whether the tracked episode itself was
+already the last one, or several further episodes had each separately
+completed since the last reconcile. This is identifiable
 without guessing, from data already on the record: `Dropped` with a real
 (nonzero) `position_seconds` is exactly that path's own signature — the
 same nonzero near-the-end position `classify()` used to confirm

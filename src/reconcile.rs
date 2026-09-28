@@ -631,7 +631,9 @@ fn reconcile_one_series(
 /// manual `tsuzuki drop` reaches it (CLAUDE.md: no new state), and — like
 /// manual `drop` — never mutates the stored `current_relative_path`/
 /// `position_seconds` on the way there; only a landing on a real episode
-/// does.
+/// does. `episode_number` is the one exception: it always lands on the true
+/// final episode's own identity on this exit path too, regardless of how
+/// many already-completed episodes the walk chained through to get there.
 #[allow(clippy::too_many_arguments)]
 fn apply_completion_advance(
     state: &mut State,
@@ -646,10 +648,13 @@ fn apply_completion_advance(
     home: Option<&Path>,
 ) {
     let mut cursor = start_index;
+    let identities = anitomy::episode_identity(ordered);
     loop {
         if cursor + 1 >= ordered.len() {
+            let episode_number = identities.get(cursor).map(|id| id.episode_number);
             let record = &mut state.series[i];
             record.status = Status::Dropped;
+            record.episode_number = episode_number;
             record.updated_at = now_unix();
             return;
         }
@@ -680,7 +685,6 @@ fn apply_completion_advance(
                 .strip_prefix(expanded_root)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| name.to_string());
-            let identities = anitomy::episode_identity(ordered);
             let episode_number = identities.get(cursor).map(|id| id.episode_number);
             let record = &mut state.series[i];
             record.status = Status::InProgress;
@@ -2128,6 +2132,90 @@ mod tests {
         // extended to auto-drop: the stored position/path are untouched.
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(record.position_seconds, 900.0);
+    }
+
+    #[test]
+    fn a_multi_hop_completion_chain_lands_episode_number_on_the_true_final_episode_before_dropping()
+    {
+        // Regression test for a real, reported bug: when the completion-chain
+        // walk in `apply_completion_advance` runs through more than one
+        // already-completed episode before running out of series (the
+        // `cursor + 1 >= ordered.len()` exit branch), it correctly transitions
+        // to `Dropped` but used to leave `episode_number` frozen at whatever
+        // the record held before this call started, even though `cursor`
+        // itself had genuinely advanced several steps further by the time it
+        // exited. Mirrors a real reported shape: a record sitting on episode 2
+        // of a 5-episode series, with episodes 2 through 5 all independently
+        // completed (script `eof`).
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+        touch(&series_path.join("ep03.mkv"));
+        touch(&series_path.join("ep04.mkv"));
+        touch(&series_path.join("ep05.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // ep02 through ep05 all independently classify Completed (script eof).
+        for (file_name, entry_name) in [
+            ("ep02.mkv", "entry-ep02"),
+            ("ep03.mkv", "entry-ep03"),
+            ("ep04.mkv", "entry-ep04"),
+            ("ep05.mkv", "entry-ep05"),
+        ] {
+            write_script_entry(
+                &script_log_dir,
+                entry_name,
+                &series_path.join(file_name),
+                Some(1420.0),
+                Some(1415.0),
+                "eof",
+            );
+        }
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::InProgress,
+                current_relative_path: "Monster/ep02.mkv".to_string(),
+                position_seconds: 1200.0,
+                episode_number: Some(2),
+                updated_at: 1,
+                mal_episode_awareness: None,
+            }],
+
+            mal_links: Vec::new(),
+        };
+
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.status,
+            Status::Dropped,
+            "chaining through every remaining episode's completion must still auto-Drop"
+        );
+        assert_eq!(
+            record.episode_number,
+            Some(5),
+            "episode_number must land on the true final episode (5), not freeze at the \
+             starting cursor's episode (2), regardless of how many episodes were chained \
+             through"
+        );
+        // current_relative_path/position_seconds stay exactly what they were
+        // before this call — only episode_number is corrected.
+        assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
+        assert_eq!(record.position_seconds, 1200.0);
     }
 
     #[test]
