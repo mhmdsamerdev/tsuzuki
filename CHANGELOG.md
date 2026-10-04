@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.3]
 
 - `start`/`resume` choices are grouped by root, and `list` tags each series with its root, when several roots are tracked.
 - `add`, `exclude`, `pause` and `drop` accept multiple arguments.
