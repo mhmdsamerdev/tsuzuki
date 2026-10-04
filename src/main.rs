@@ -565,10 +565,13 @@ fn resume_command(
     }
 
     let overviews = overview::all_series(config, &state, home);
-    let in_progress: Vec<_> = overviews
-        .into_iter()
-        .filter(|o| o.status == Some(Status::InProgress))
-        .collect();
+    let in_progress: Vec<_> = overview::group_by_root(
+        overviews
+            .into_iter()
+            .filter(|o| o.status == Some(Status::InProgress))
+            .collect(),
+        &config.roots.paths,
+    );
 
     match in_progress.len() {
         // Zero `in_progress` series falls through to `start`'s behavior
@@ -588,6 +591,7 @@ fn resume_command(
                         .unwrap_or_else(|| "unknown episode".to_string());
                     format!("{} ({ep})", o.name)
                 },
+                |o| o.root.as_str(),
                 is_tty,
                 "Resume which series?",
                 |line| println!("{line}"),
@@ -670,6 +674,8 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         (None, "Never started"),
     ];
 
+    let multi_route = overview::is_multi_route(overviews.iter().map(|o| o.root.as_str()));
+
     let mut first_group = true;
     for (status, header) in GROUPS {
         let items: Vec<_> = overviews
@@ -685,12 +691,22 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         first_group = false;
 
         println!("{header}:");
-        for o in items {
-            let ep = o
-                .episode_number
-                .map(|e| format!(" — ep. {e}"))
-                .unwrap_or_default();
-            println!("  {}{ep} ({} files)", o.name, o.file_count);
+        let mut rows: Vec<String> = items
+            .iter()
+            .map(|o| {
+                let ep = o
+                    .episode_number
+                    .map(|e| format!(" — ep. {e}"))
+                    .unwrap_or_default();
+                format!("  {}{ep} ({} files)", o.name, o.file_count)
+            })
+            .collect();
+        if multi_route {
+            let routes: Vec<&str> = items.iter().map(|o| o.root.as_str()).collect();
+            rows = overview::tag_with_routes(&rows, &routes);
+        }
+        for row in rows {
+            println!("{row}");
         }
     }
     ExitCode::SUCCESS
@@ -737,7 +753,10 @@ fn start_command(
     }
 
     let overviews = overview::all_series(config, &state, home);
-    let eligible = overview::sorted_for_list(overview::eligible_for_start(&overviews));
+    let eligible = overview::group_by_root(
+        overview::sorted_for_list(overview::eligible_for_start(&overviews)),
+        &config.roots.paths,
+    );
 
     if eligible.is_empty() {
         println!("Nothing to start.");
@@ -750,6 +769,7 @@ fn start_command(
     let outcome = picker::pick(
         &eligible,
         overview::start_line,
+        |o| o.root.as_str(),
         is_tty,
         "Start which one?",
         |line| println!("{line}"),

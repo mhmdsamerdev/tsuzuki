@@ -1,0 +1,78 @@
+--- src/main.rs
++++ replace list_command -> ExitCode with Default::default()
+@@ -647,74 +647,17 @@
+         println!("Running `tsuzuki` bare will prompt among these.");
+     }
+     ExitCode::SUCCESS
+ }
+ 
+ /// `tsuzuki list` — every tracked series, grouped/ordered per CLAUDE.md's
+ /// "`list` ordering and episode-number display".
+ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+-    let (state, warning) = match reconcile_state(config, state_path, home) {
+-        Ok(v) => v,
+-        Err(code) => return code,
+-    };
+-    if let Some(w) = &warning {
+-        print_scan_warning(w);
+-    }
+-
+-    let overviews = overview::sorted_for_list(overview::all_series(config, &state, home));
+-    if overviews.is_empty() {
+-        println!("No tracked series.");
+-        println!("→ tsuzuki add <path>");
+-        return ExitCode::SUCCESS;
+-    }
+-
+-    const GROUPS: [(Option<Status>, &str); 4] = [
+-        (Some(Status::InProgress), "In progress"),
+-        (Some(Status::Paused), "Paused"),
+-        (Some(Status::Dropped), "Dropped"),
+-        (None, "Never started"),
+-    ];
+-
+-    let multi_route = overview::is_multi_route(overviews.iter().map(|o| o.root.as_str()));
+-
+-    let mut first_group = true;
+-    for (status, header) in GROUPS {
+-        let items: Vec<_> = overviews
+-            .iter()
+-            .filter(|o| overview::list_group(o.status) == status)
+-            .collect();
+-        if items.is_empty() {
+-            continue;
+-        }
+-        if !first_group {
+-            println!();
+-        }
+-        first_group = false;
+-
+-        println!("{header}:");
+-        let mut rows: Vec<String> = items
+-            .iter()
+-            .map(|o| {
+-                let ep = o
+-                    .episode_number
+-                    .map(|e| format!(" — ep. {e}"))
+-                    .unwrap_or_default();
+-                format!("  {}{ep} ({} files)", o.name, o.file_count)
+-            })
+-            .collect();
+-        if multi_route {
+-            let routes: Vec<&str> = items.iter().map(|o| o.root.as_str()).collect();
+-            rows = overview::tag_with_routes(&rows, &routes);
+-        }
+-        for row in rows {
+-            println!("{row}");
+-        }
+-    }
+-    ExitCode::SUCCESS
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// The progress verb `start` prints for a picked series.
+ fn start_verb(status: Option<Status>) -> &'static str {
+     match status {
+         Some(Status::Paused) => "Resuming",
+         Some(Status::Dropped | Status::Completed) => "Rewatching",
+         _ => "Starting",

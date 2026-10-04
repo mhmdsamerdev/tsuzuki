@@ -1522,3 +1522,97 @@ fn exclude_without_paths_still_lists_candidates_and_never_mutates_config() {
     );
     assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
 }
+
+// ---------------------------------------------------------------------
+// 14. Several tracked routes: `list`, `start` and `resume` name each
+//     series' route; one route keeps the plain output.
+// ---------------------------------------------------------------------
+
+/// Two tracked roots, `Anime` (added first) and `Shows`, returned as their
+/// stored strings.
+fn two_roots_with_series(home: &Path, anime: &[&str], shows: &[&str]) -> (String, String) {
+    let anime_root = home.join("Anime");
+    let shows_root = home.join("Shows");
+    for name in anime {
+        touch(&anime_root.join(name).join("ep01.mkv"));
+    }
+    for name in shows {
+        touch(&shows_root.join(name).join("ep01.mkv"));
+    }
+    add_root(home, &anime_root);
+    add_root(home, &shows_root);
+    (
+        anime_root.to_str().unwrap().to_string(),
+        shows_root.to_str().unwrap().to_string(),
+    )
+}
+
+#[test]
+fn list_with_two_routes_tags_every_row_with_its_route() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    two_roots_with_series(home, &["Monster"], &["Frieren", "Monster"]);
+
+    let list = run_ok(home, &["list"]);
+
+    assert_eq!(
+        list,
+        "Never started:\n  Frieren (1 files)  [Shows]\n  Monster (1 files)  [Anime]\n  Monster (1 files)  [Shows]\n"
+    );
+}
+
+#[test]
+fn list_with_one_route_has_no_route_tags() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = home.join("Anime");
+    touch(&root.join("Monster").join("ep01.mkv"));
+    add_root(home, &root);
+
+    let list = run_ok(home, &["list"]);
+
+    assert_eq!(list, "Never started:\n  Monster (1 files)\n");
+}
+
+#[test]
+fn non_tty_start_with_two_routes_groups_choices_under_route_headers() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    two_roots_with_series(home, &["Monster"], &["Frieren", "Monster"]);
+
+    let start = run(home, &["start"]);
+
+    assert!(!start.status.success());
+    assert_eq!(
+        stdout_of(&start),
+        "Available to start:\n\nAnime\n  1. Monster — Start (1 files)\n\nShows\n  2. Frieren — Start (1 files)\n  3. Monster — Start (1 files)\n\nRun `tsuzuki start <series>` to pick one.\n"
+    );
+}
+
+#[test]
+fn non_tty_resume_with_two_routes_groups_in_progress_series_under_route_headers() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let (anime, shows) = two_roots_with_series(home, &["Monster"], &["Frieren"]);
+    write_watch_later(
+        home,
+        "entry-a",
+        &Path::new(&anime).join("Monster").join("ep01.mkv"),
+        300.0,
+    );
+    write_watch_later(
+        home,
+        "entry-b",
+        &Path::new(&shows).join("Frieren").join("ep01.mkv"),
+        400.0,
+    );
+    run_ok(home, &["list"]); // persists both as real in_progress records
+
+    let resume = run(home, &["resume"]);
+
+    assert!(!resume.status.success());
+    assert_eq!(
+        stdout_of(&resume),
+        "Anime\n  1. Monster (ep. 1)\n\nShows\n  2. Frieren (ep. 1)\n\nRun `tsuzuki resume <series>` to pick one.\n"
+    );
+}

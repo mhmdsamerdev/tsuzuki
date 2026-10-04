@@ -1,0 +1,21 @@
+--- src/picker.rs
++++ replace && with || in pick
+@@ -58,17 +58,17 @@
+ ) -> PickerOutcome<T> {
+     let multi_route = overview::is_multi_route(items.iter().map(&route));
+ 
+     if !is_tty {
+         let routes: Vec<&str> = items.iter().map(&route).collect();
+         let shown = overview::route_display(&routes);
+         let mut current: Option<&str> = None;
+         for (i, item) in items.iter().enumerate() {
+-            if multi_route && current != Some(routes[i]) {
++            if multi_route || /* ~ changed by cargo-mutants ~ */ current != Some(routes[i]) {
+                 if current.is_some() {
+                     print_line("");
+                 }
+                 print_line(&shown[i]);
+                 current = Some(routes[i]);
+             }
+             print_line(&format!("  {}. {}", i + 1, label(item)));
+         }

@@ -1,0 +1,86 @@
+--- src/main.rs
++++ replace resume_command -> ExitCode with Default::default()
+@@ -539,82 +539,17 @@
+ fn resume_command(
+     series: Option<String>,
+     root: Option<PathBuf>,
+     config: &Config,
+     state_path: &Path,
+     home: Option<&Path>,
+     is_tty: bool,
+ ) -> ExitCode {
+-    let (state, warning) = match reconcile_state(config, state_path, home) {
+-        Ok(v) => v,
+-        Err(code) => return code,
+-    };
+-    if let Some(w) = &warning {
+-        print_scan_warning(w);
+-    }
+-
+-    if let Some(series) = series {
+-        return explicit_play(
+-            &series,
+-            root.as_deref(),
+-            config,
+-            &state,
+-            home,
+-            "resume",
+-            "Resuming",
+-        );
+-    }
+-
+-    let overviews = overview::all_series(config, &state, home);
+-    let in_progress: Vec<_> = overview::group_by_root(
+-        overviews
+-            .into_iter()
+-            .filter(|o| o.status == Some(Status::InProgress))
+-            .collect(),
+-        &config.roots.paths,
+-    );
+-
+-    match in_progress.len() {
+-        // Zero `in_progress` series falls through to `start`'s behavior
+-        // (design.md §6).
+-        0 => start_command(None, None, config, state_path, home, is_tty),
+-        1 => {
+-            let o = &in_progress[0];
+-            play_series(config, &state, &o.root, &o.name, home, "Resuming")
+-        }
+-        _ => {
+-            let outcome = picker::pick(
+-                &in_progress,
+-                |o| {
+-                    let ep = o
+-                        .episode_number
+-                        .map(|e| format!("ep. {e}"))
+-                        .unwrap_or_else(|| "unknown episode".to_string());
+-                    format!("{} ({ep})", o.name)
+-                },
+-                |o| o.root.as_str(),
+-                is_tty,
+-                "Resume which series?",
+-                |line| println!("{line}"),
+-                picker::dialoguer_select,
+-            );
+-            match outcome {
+-                picker::PickerOutcome::Selected(o) => {
+-                    play_series(config, &state, &o.root, &o.name, home, "Resuming")
+-                }
+-                picker::PickerOutcome::Listed => {
+-                    println!();
+-                    println!("Run `tsuzuki resume <series>` to pick one.");
+-                    ExitCode::FAILURE
+-                }
+-                picker::PickerOutcome::Cancelled => ExitCode::FAILURE,
+-            }
+-        }
+-    }
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `tsuzuki status` — every currently `in_progress` series (`current` was
+ /// cut per CLAUDE.md; this is its replacement).
+ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+     let (state, warning) = match reconcile_state(config, state_path, home) {
+         Ok(v) => v,
+         Err(code) => return code,

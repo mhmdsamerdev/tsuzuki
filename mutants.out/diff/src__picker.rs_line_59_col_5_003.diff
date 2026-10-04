@@ -1,0 +1,48 @@
+--- src/picker.rs
++++ replace pick -> PickerOutcome<T> with PickerOutcome::from(Default::default())
+@@ -51,44 +51,17 @@
+     items: &[T],
+     label: impl Fn(&T) -> String,
+     route: impl Fn(&T) -> &str,
+     is_tty: bool,
+     prompt: &str,
+     mut print_line: impl FnMut(&str),
+     select: impl FnOnce(&str, &[String]) -> Option<usize>,
+ ) -> PickerOutcome<T> {
+-    let multi_route = overview::is_multi_route(items.iter().map(&route));
+-
+-    if !is_tty {
+-        let routes: Vec<&str> = items.iter().map(&route).collect();
+-        let shown = overview::route_display(&routes);
+-        let mut current: Option<&str> = None;
+-        for (i, item) in items.iter().enumerate() {
+-            if multi_route && current != Some(routes[i]) {
+-                if current.is_some() {
+-                    print_line("");
+-                }
+-                print_line(&shown[i]);
+-                current = Some(routes[i]);
+-            }
+-            print_line(&format!("  {}. {}", i + 1, label(item)));
+-        }
+-        return PickerOutcome::Listed;
+-    }
+-
+-    let mut labels: Vec<String> = items.iter().map(&label).collect();
+-    if multi_route {
+-        let routes: Vec<&str> = items.iter().map(&route).collect();
+-        labels = overview::tag_with_routes(&labels, &routes);
+-    }
+-    match select(prompt, &labels) {
+-        Some(index) => PickerOutcome::Selected(items[index].clone()),
+-        None => PickerOutcome::Cancelled,
+-    }
++    PickerOutcome::from(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// The real, production `select` implementation: a `dialoguer` arrow-key
+ /// selector. This is the *only* place `dialoguer` is touched in this
+ /// module — `pick` itself never references it — so production code passes
+ /// this function pointer while tests pass a fake closure instead.
+ pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {
+     dialoguer::Select::new()

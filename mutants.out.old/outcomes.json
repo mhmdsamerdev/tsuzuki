@@ -1,0 +1,1224 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 153.35292604,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 3.074645079,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/main.rs:547:5: replace resume_command -> ExitCode with Default::default()",
+          "package": "tsuzuki",
+          "file": "src/main.rs",
+          "function": {
+            "function_name": "resume_command",
+            "return_type": "-> ExitCode",
+            "span": {
+              "start": {
+                "line": 537,
+                "column": 1
+              },
+              "end": {
+                "line": 613,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 547,
+              "column": 5
+            },
+            "end": {
+              "line": 612,
+              "column": 6
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__main.rs_line_547_col_5.log",
+      "diff_path": "diff/src__main.rs_line_547_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.711122327,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.867872046,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/main.rs:571:34: replace == with != in resume_command",
+          "package": "tsuzuki",
+          "file": "src/main.rs",
+          "function": {
+            "function_name": "resume_command",
+            "return_type": "-> ExitCode",
+            "span": {
+              "start": {
+                "line": 537,
+                "column": 1
+              },
+              "end": {
+                "line": 613,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 571,
+              "column": 34
+            },
+            "end": {
+              "line": 571,
+              "column": 36
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__main.rs_line_571_col_34.log",
+      "diff_path": "diff/src__main.rs_line_571_col_34.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.558058071,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.858801155,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/main.rs:655:5: replace list_command -> ExitCode with Default::default()",
+          "package": "tsuzuki",
+          "file": "src/main.rs",
+          "function": {
+            "function_name": "list_command",
+            "return_type": "-> ExitCode",
+            "span": {
+              "start": {
+                "line": 652,
+                "column": 1
+              },
+              "end": {
+                "line": 713,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 655,
+              "column": 5
+            },
+            "end": {
+              "line": 712,
+              "column": 22
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__main.rs_line_655_col_5.log",
+      "diff_path": "diff/src__main.rs_line_655_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.85959326,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.6062844360000001,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/main.rs:735:5: replace start_command -> ExitCode with Default::default()",
+          "package": "tsuzuki",
+          "file": "src/main.rs",
+          "function": {
+            "function_name": "start_command",
+            "return_type": "-> ExitCode",
+            "span": {
+              "start": {
+                "line": 724,
+                "column": 1
+              },
+              "end": {
+                "line": 789,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 735,
+              "column": 5
+            },
+            "end": {
+              "line": 788,
+              "column": 6
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__main.rs_line_735_col_5.log",
+      "diff_path": "diff/src__main.rs_line_735_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 3.121231535,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 2.913023509,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:132:5: replace group_by_root -> Vec<SeriesOverview> with vec![]",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "group_by_root",
+            "return_type": "-> Vec<SeriesOverview>",
+            "span": {
+              "start": {
+                "line": 129,
+                "column": 1
+              },
+              "end": {
+                "line": 139,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 132,
+              "column": 5
+            },
+            "end": {
+              "line": 138,
+              "column": 14
+            }
+          },
+          "replacement": "vec![]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_132_col_5.log",
+      "diff_path": "diff/src__overview.rs_line_132_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.559498172,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402897234,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:132:5: replace group_by_root -> Vec<SeriesOverview> with vec![Default::default()]",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "group_by_root",
+            "return_type": "-> Vec<SeriesOverview>",
+            "span": {
+              "start": {
+                "line": 129,
+                "column": 1
+              },
+              "end": {
+                "line": 139,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 132,
+              "column": 5
+            },
+            "end": {
+              "line": 138,
+              "column": 14
+            }
+          },
+          "replacement": "vec![Default::default()]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__overview.rs_line_132_col_5_001.log",
+      "diff_path": "diff/src__overview.rs_line_132_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.756375612,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:135:30: replace == with != in group_by_root",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "group_by_root",
+            "return_type": "-> Vec<SeriesOverview>",
+            "span": {
+              "start": {
+                "line": 129,
+                "column": 1
+              },
+              "end": {
+                "line": 139,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 135,
+              "column": 30
+            },
+            "end": {
+              "line": 135,
+              "column": 32
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_135_col_30.log",
+      "diff_path": "diff/src__overview.rs_line_135_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.958223983,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.40237943,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:143:5: replace is_multi_route -> bool with true",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "is_multi_route",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 141,
+                "column": 1
+              },
+              "end": {
+                "line": 148,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 143,
+              "column": 5
+            },
+            "end": {
+              "line": 147,
+              "column": 6
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_143_col_5.log",
+      "diff_path": "diff/src__overview.rs_line_143_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.059039018,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402646725,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:143:5: replace is_multi_route -> bool with false",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "is_multi_route",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 141,
+                "column": 1
+              },
+              "end": {
+                "line": 148,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 143,
+              "column": 5
+            },
+            "end": {
+              "line": 147,
+              "column": 6
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_143_col_5_001.log",
+      "diff_path": "diff/src__overview.rs_line_143_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.606236446,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402506554,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:145:41: replace != with == in is_multi_route",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "is_multi_route",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 141,
+                "column": 1
+              },
+              "end": {
+                "line": 148,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 145,
+              "column": 41
+            },
+            "end": {
+              "line": 145,
+              "column": 43
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_145_col_41.log",
+      "diff_path": "diff/src__overview.rs_line_145_col_41.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.121539478,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.403156039,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![]",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "tag_with_routes",
+            "return_type": "-> Vec<String>",
+            "span": {
+              "start": {
+                "line": 150,
+                "column": 1
+              },
+              "end": {
+                "line": 159,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 153,
+              "column": 5
+            },
+            "end": {
+              "line": 158,
+              "column": 19
+            }
+          },
+          "replacement": "vec![]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_153_col_5.log",
+      "diff_path": "diff/src__overview.rs_line_153_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.560721263,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402286502,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![String::new()]",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "tag_with_routes",
+            "return_type": "-> Vec<String>",
+            "span": {
+              "start": {
+                "line": 150,
+                "column": 1
+              },
+              "end": {
+                "line": 159,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 153,
+              "column": 5
+            },
+            "end": {
+              "line": 158,
+              "column": 19
+            }
+          },
+          "replacement": "vec![String::new()]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_153_col_5_001.log",
+      "diff_path": "diff/src__overview.rs_line_153_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.711809226,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402451766,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![\"xyzzy\".into()]",
+          "package": "tsuzuki",
+          "file": "src/overview.rs",
+          "function": {
+            "function_name": "tag_with_routes",
+            "return_type": "-> Vec<String>",
+            "span": {
+              "start": {
+                "line": 150,
+                "column": 1
+              },
+              "end": {
+                "line": 159,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 153,
+              "column": 5
+            },
+            "end": {
+              "line": 158,
+              "column": 19
+            }
+          },
+          "replacement": "vec![\"xyzzy\".into()]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__overview.rs_line_153_col_5_002.log",
+      "diff_path": "diff/src__overview.rs_line_153_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.709333178,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402384678,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::new()",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 59,
+              "column": 5
+            },
+            "end": {
+              "line": 84,
+              "column": 6
+            }
+          },
+          "replacement": "PickerOutcome::new()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__picker.rs_line_59_col_5.log",
+      "diff_path": "diff/src__picker.rs_line_59_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.95457912,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::from_iter([Default::default()])",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 59,
+              "column": 5
+            },
+            "end": {
+              "line": 84,
+              "column": 6
+            }
+          },
+          "replacement": "PickerOutcome::from_iter([Default::default()])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__picker.rs_line_59_col_5_001.log",
+      "diff_path": "diff/src__picker.rs_line_59_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.902596759,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::new(Default::default())",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 59,
+              "column": 5
+            },
+            "end": {
+              "line": 84,
+              "column": 6
+            }
+          },
+          "replacement": "PickerOutcome::new(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__picker.rs_line_59_col_5_002.log",
+      "diff_path": "diff/src__picker.rs_line_59_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.952669041,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::from(Default::default())",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 59,
+              "column": 5
+            },
+            "end": {
+              "line": 84,
+              "column": 6
+            }
+          },
+          "replacement": "PickerOutcome::from(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/src__picker.rs_line_59_col_5_003.log",
+      "diff_path": "diff/src__picker.rs_line_59_col_5_003.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.902887139,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:64:28: replace && with || in pick",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 64,
+              "column": 28
+            },
+            "end": {
+              "line": 64,
+              "column": 30
+            }
+          },
+          "replacement": "||",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__picker.rs_line_64_col_28.log",
+      "diff_path": "diff/src__picker.rs_line_64_col_28.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 2.65971577,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.402352851,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/picker.rs:64:39: replace != with == in pick",
+          "package": "tsuzuki",
+          "file": "src/picker.rs",
+          "function": {
+            "function_name": "pick",
+            "return_type": "-> PickerOutcome<T>",
+            "span": {
+              "start": {
+                "line": 37,
+                "column": 1
+              },
+              "end": {
+                "line": 85,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 64,
+              "column": 39
+            },
+            "end": {
+              "line": 64,
+              "column": 41
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__picker.rs_line_64_col_39.log",
+      "diff_path": "diff/src__picker.rs_line_64_col_39.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.806844743,
+          "process_status": "Success",
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.403255643,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=tsuzuki@0.1.2"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 19,
+  "missed": 0,
+  "caught": 14,
+  "timeout": 0,
+  "unviable": 5,
+  "success": 0,
+  "start_time": "2026-10-04T20:30:10.906837114Z",
+  "end_time": "2026-10-04T20:33:37.340303218Z",
+  "cargo_mutants_version": "27.0.0"
+}

@@ -1,3 +1,5 @@
-src/main.rs:151:16: replace && with || in add_command
-src/main.rs:222:16: replace && with || in exclude_command
-src/main.rs:869:16: replace && with || in transition_series
+src/overview.rs:132:5: replace group_by_root -> Vec<SeriesOverview> with vec![Default::default()]
+src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::new()
+src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::from_iter([Default::default()])
+src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::new(Default::default())
+src/picker.rs:59:5: replace pick -> PickerOutcome<T> with PickerOutcome::from(Default::default())

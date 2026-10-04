@@ -40,7 +40,9 @@ tsuzuki
 
 One series in progress? It resumes immediately, no prompt. A few
 different things going at once? Pick one with the arrow keys. Nothing in
-progress yet? It shows you what's available to start.
+progress yet? It shows you what's available to start. With several
+roots tracked, choices are grouped by root (and `tsuzuki list` tags each
+series with its root).
 
 Your filesystem is already your library. Tsuzuki never reorganizes it,
 never renames anything, never guesses which files are "real" episodes —

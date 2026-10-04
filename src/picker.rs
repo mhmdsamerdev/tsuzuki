@@ -9,6 +9,8 @@
 
 use std::io::IsTerminal;
 
+use crate::overview;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PickerOutcome<T> {
     /// The user picked (or there was only one choice worth auto-selecting —
@@ -41,22 +43,43 @@ pub fn stdin_is_tty() -> bool {
 /// selection path (not just the non-TTY fallback) genuinely unit-testable:
 /// a test can inject a fake `select` and drive a fabricated choice all the
 /// way through to `PickerOutcome::Selected`, without a real terminal.
+///
+/// When `items` span more than one `route` (callers pass them route-contiguous),
+/// the non-TTY listing gets a route header per group and the TTY labels get an
+/// aligned `[route]` tag; with one route the output is untouched.
 pub fn pick<T: Clone>(
     items: &[T],
     label: impl Fn(&T) -> String,
+    route: impl Fn(&T) -> &str,
     is_tty: bool,
     prompt: &str,
     mut print_line: impl FnMut(&str),
     select: impl FnOnce(&str, &[String]) -> Option<usize>,
 ) -> PickerOutcome<T> {
+    let multi_route = overview::is_multi_route(items.iter().map(&route));
+
     if !is_tty {
+        let routes: Vec<&str> = items.iter().map(&route).collect();
+        let shown = overview::route_display(&routes);
+        let mut current: Option<&str> = None;
         for (i, item) in items.iter().enumerate() {
+            if multi_route && current != Some(routes[i]) {
+                if current.is_some() {
+                    print_line("");
+                }
+                print_line(&shown[i]);
+                current = Some(routes[i]);
+            }
             print_line(&format!("  {}. {}", i + 1, label(item)));
         }
         return PickerOutcome::Listed;
     }
 
-    let labels: Vec<String> = items.iter().map(&label).collect();
+    let mut labels: Vec<String> = items.iter().map(&label).collect();
+    if multi_route {
+        let routes: Vec<&str> = items.iter().map(&route).collect();
+        labels = overview::tag_with_routes(&labels, &routes);
+    }
     match select(prompt, &labels) {
         Some(index) => PickerOutcome::Selected(items[index].clone()),
         None => PickerOutcome::Cancelled,
@@ -88,6 +111,7 @@ mod tests {
         let outcome = pick(
             &items,
             |s| s.clone(),
+            |_| "~/Anime",
             false,
             "Pick one",
             |line| printed.push(line.to_string()),
@@ -106,6 +130,7 @@ mod tests {
         let outcome = pick(
             &items,
             |s| s.clone(),
+            |_| "~/Anime",
             false,
             "Pick one",
             |line| printed.push(line.to_string()),
@@ -129,6 +154,7 @@ mod tests {
         let outcome = pick(
             &items,
             |s| s.clone(),
+            |_| "~/Anime",
             true,
             "Resume which series?",
             |_| panic!("print_line must never be called in the TTY branch"),
@@ -148,6 +174,7 @@ mod tests {
         let outcome = pick(
             &items,
             |n| format!("item #{n}"),
+            |_| "~/Anime",
             true,
             "Pick",
             |_| {},
@@ -169,7 +196,15 @@ mod tests {
     #[test]
     fn tty_selection_cancelled_reports_cancelled_not_a_default_selection() {
         let items = vec!["Monster".to_string()];
-        let outcome = pick(&items, |s| s.clone(), true, "Pick one", |_| {}, |_, _| None);
+        let outcome = pick(
+            &items,
+            |s| s.clone(),
+            |_| "~/Anime",
+            true,
+            "Pick one",
+            |_| {},
+            |_, _| None,
+        );
         assert_eq!(outcome, PickerOutcome::Cancelled);
     }
 
@@ -179,5 +214,163 @@ mod tests {
         // proves the check itself is safe to call, not any particular
         // result.
         let _ = stdin_is_tty();
+    }
+
+    fn route_of(item: &(String, String)) -> &str {
+        &item.1
+    }
+
+    fn items(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(n, r)| (n.to_string(), r.to_string()))
+            .collect()
+    }
+
+    fn name_of(item: &(String, String)) -> String {
+        item.0.clone()
+    }
+
+    #[test]
+    fn non_tty_multi_route_prints_group_headers_with_continuous_numbering() {
+        let items = items(&[
+            ("Monster", "~/Anime"),
+            ("Naruto", "~/Anime"),
+            ("Frieren", "/mnt/nas/Shows"),
+        ]);
+        let mut printed = Vec::new();
+
+        let outcome = pick(
+            &items,
+            name_of,
+            route_of,
+            false,
+            "Pick",
+            |line| printed.push(line.to_string()),
+            |_, _| panic!("select must never be called in the non-TTY branch"),
+        );
+
+        assert_eq!(outcome, PickerOutcome::Listed);
+        assert_eq!(
+            printed,
+            vec![
+                "Anime",
+                "  1. Monster",
+                "  2. Naruto",
+                "",
+                "Shows",
+                "  3. Frieren",
+            ]
+        );
+    }
+
+    #[test]
+    fn non_tty_single_route_has_no_headers() {
+        let items = items(&[("Monster", "~/Anime"), ("Naruto", "~/Anime")]);
+        let mut printed = Vec::new();
+
+        pick(
+            &items,
+            name_of,
+            route_of,
+            false,
+            "Pick",
+            |line| printed.push(line.to_string()),
+            |_, _| None,
+        );
+
+        assert_eq!(printed, vec!["  1. Monster", "  2. Naruto"]);
+    }
+
+    #[test]
+    fn tty_multi_route_tags_labels_with_aligned_route() {
+        let items = items(&[
+            ("Monster", "~/Anime"),
+            ("Frieren", "/mnt/nas/Shows"),
+            ("Nana", "/mnt/nas/Shows"),
+        ]);
+
+        let outcome = pick(
+            &items,
+            name_of,
+            route_of,
+            true,
+            "Pick",
+            |_| panic!("print_line must never be called in the TTY branch"),
+            |_, labels| {
+                assert_eq!(
+                    labels,
+                    &[
+                        "Monster  [Anime]".to_string(),
+                        "Frieren  [Shows]".to_string(),
+                        "Nana     [Shows]".to_string(),
+                    ]
+                );
+                Some(1)
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            PickerOutcome::Selected(("Frieren".to_string(), "/mnt/nas/Shows".to_string()))
+        );
+    }
+
+    #[test]
+    fn tty_single_route_labels_are_untagged() {
+        let items = items(&[("Monster", "~/Anime"), ("Naruto", "~/Anime")]);
+
+        pick(
+            &items,
+            name_of,
+            route_of,
+            true,
+            "Pick",
+            |_| {},
+            |_, labels| {
+                assert_eq!(labels, &["Monster".to_string(), "Naruto".to_string()]);
+                None
+            },
+        );
+    }
+
+    #[test]
+    fn tty_same_name_under_two_routes_selects_the_chosen_route() {
+        let items = items(&[("Monster", "~/Anime"), ("Monster", "/mnt/nas/Shows")]);
+
+        let outcome = pick(
+            &items,
+            name_of,
+            route_of,
+            true,
+            "Pick",
+            |_| {},
+            |_, _| Some(1),
+        );
+
+        assert_eq!(
+            outcome,
+            PickerOutcome::Selected(("Monster".to_string(), "/mnt/nas/Shows".to_string()))
+        );
+    }
+
+    #[test]
+    fn non_tty_routes_sharing_a_folder_name_are_headed_by_their_full_root() {
+        let items = items(&[("Monster", "~/Anime"), ("Frieren", "/mnt/Anime")]);
+        let mut printed = Vec::new();
+
+        pick(
+            &items,
+            name_of,
+            route_of,
+            false,
+            "Pick",
+            |line| printed.push(line.to_string()),
+            |_, _| None,
+        );
+
+        assert_eq!(
+            printed,
+            vec!["~/Anime", "  1. Monster", "", "/mnt/Anime", "  2. Frieren"]
+        );
     }
 }

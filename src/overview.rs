@@ -126,6 +126,57 @@ pub fn sorted_for_list(mut overviews: Vec<SeriesOverview>) -> Vec<SeriesOverview
     overviews
 }
 
+/// Stable-sorts `overviews` so each root's series are contiguous, roots in
+/// the order of `roots` (the config's); a root not in `roots` sorts last.
+pub fn group_by_root(mut overviews: Vec<SeriesOverview>, roots: &[String]) -> Vec<SeriesOverview> {
+    overviews.sort_by_key(|o| {
+        roots
+            .iter()
+            .position(|r| *r == o.root)
+            .unwrap_or(roots.len())
+    });
+    overviews
+}
+
+/// True when `routes` holds at least two distinct routes.
+pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut routes = routes.into_iter();
+    match routes.next() {
+        Some(first) => routes.any(|r| r != first),
+        None => false,
+    }
+}
+
+/// The short name shown for each route (parallel to `routes`): the root's
+/// own folder name. Distinct routes that share a folder name keep their
+/// full stored string instead, so two rows never look the same.
+pub fn route_display(routes: &[&str]) -> Vec<String> {
+    let short = |r: &str| {
+        Path::new(r)
+            .file_name()
+            .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())
+    };
+    routes
+        .iter()
+        .map(|r| {
+            let name = short(r);
+            let clash = routes.iter().any(|o| o != r && short(o) == name);
+            if clash { r.to_string() } else { name }
+        })
+        .collect()
+}
+
+/// Appends an aligned `[route]` tag to each label; `labels` and `routes` are
+/// parallel.
+pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {
+    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    labels
+        .iter()
+        .zip(route_display(routes))
+        .map(|(l, r)| format!("{l:<width$}  [{r}]"))
+        .collect()
+}
+
 /// `start`'s per-state display word, exactly per CLAUDE.md: never-started
 /// (no record) -> `"Start"`; paused -> `"Resume"`; dropped or completed ->
 /// `"Rewatch?"`.
@@ -450,5 +501,90 @@ mod tests {
                 "{status:?}"
             );
         }
+    }
+
+    fn in_root(root: &str, name: &str) -> SeriesOverview {
+        SeriesOverview {
+            root: root.to_string(),
+            ..overview(name, None)
+        }
+    }
+
+    #[test]
+    fn group_by_root_makes_roots_contiguous_in_config_order_keeping_inner_order() {
+        let roots = vec!["~/Anime".to_string(), "/mnt/nas/Shows".to_string()];
+        let input = vec![
+            in_root("/mnt/nas/Shows", "Frieren"),
+            in_root("~/Anime", "Monster"),
+            in_root("/mnt/nas/Shows", "Nana"),
+            in_root("~/Anime", "Naruto"),
+        ];
+
+        let got: Vec<(String, String)> = group_by_root(input, &roots)
+            .into_iter()
+            .map(|o| (o.root, o.name))
+            .collect();
+
+        let want = [
+            ("~/Anime", "Monster"),
+            ("~/Anime", "Naruto"),
+            ("/mnt/nas/Shows", "Frieren"),
+            ("/mnt/nas/Shows", "Nana"),
+        ];
+        let want: Vec<(String, String)> = want
+            .iter()
+            .map(|(r, n)| (r.to_string(), n.to_string()))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn group_by_root_puts_unknown_roots_last_and_handles_empty_input() {
+        let roots = vec!["~/Anime".to_string()];
+        let got = group_by_root(vec![in_root("/gone", "A"), in_root("~/Anime", "B")], &roots);
+        let names: Vec<&str> = got.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["B", "A"]);
+        assert_eq!(group_by_root(Vec::new(), &roots), Vec::new());
+    }
+
+    #[test]
+    fn is_multi_route_needs_two_distinct_routes() {
+        assert!(!is_multi_route([]));
+        assert!(!is_multi_route(["~/Anime"]));
+        assert!(!is_multi_route(["~/Anime", "~/Anime"]));
+        assert!(is_multi_route(["~/Anime", "/mnt"]));
+        assert!(is_multi_route(["~/Anime", "~/Anime", "/mnt"]));
+    }
+
+    #[test]
+    fn tag_with_routes_pads_to_the_longest_label_plus_two_spaces() {
+        let labels = vec!["ab".to_string(), "abcd".to_string()];
+        assert_eq!(
+            tag_with_routes(&labels, &["~/A", "/b"]),
+            vec!["ab    [A]".to_string(), "abcd  [b]".to_string()]
+        );
+        assert_eq!(tag_with_routes(&[], &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn route_display_uses_the_root_folder_name() {
+        assert_eq!(
+            route_display(&["~/Anime", "/mnt/nas/Shows/", "Library"]),
+            vec!["Anime", "Shows", "Library"]
+        );
+    }
+
+    #[test]
+    fn route_display_keeps_the_full_root_only_for_routes_sharing_a_folder_name() {
+        assert_eq!(
+            route_display(&["~/Anime", "/mnt/Anime", "/mnt/Shows"]),
+            vec!["~/Anime", "/mnt/Anime", "Shows"]
+        );
+    }
+
+    #[test]
+    fn route_display_falls_back_to_the_stored_string_without_a_folder_name() {
+        assert_eq!(route_display(&["/", "/mnt/Shows"]), vec!["/", "Shows"]);
+        assert_eq!(route_display(&[]), Vec::<String>::new());
     }
 }

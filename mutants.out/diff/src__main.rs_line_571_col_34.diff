@@ -1,0 +1,21 @@
+--- src/main.rs
++++ replace == with != in resume_command
+@@ -563,17 +563,17 @@
+             "Resuming",
+         );
+     }
+ 
+     let overviews = overview::all_series(config, &state, home);
+     let in_progress: Vec<_> = overview::group_by_root(
+         overviews
+             .into_iter()
+-            .filter(|o| o.status == Some(Status::InProgress))
++            .filter(|o| o.status != /* ~ changed by cargo-mutants ~ */ Some(Status::InProgress))
+             .collect(),
+         &config.roots.paths,
+     );
+ 
+     match in_progress.len() {
+         // Zero `in_progress` series falls through to `start`'s behavior
+         // (design.md §6).
+         0 => start_command(None, None, config, state_path, home, is_tty),
