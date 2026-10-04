@@ -2216,6 +2216,195 @@ mod tests {
         assert!(client.get_calls.borrow().is_empty());
     }
 
+    fn run_one_linked(client: &FakeClient, state: &mut State) -> Vec<SeriesOutcome> {
+        run_sync_on_date(
+            client,
+            "token",
+            state,
+            &[("~/Anime".to_string(), "One Piece".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        )
+    }
+
+    fn linked_state(record: SeriesRecord) -> State {
+        State {
+            series: vec![record],
+            mal_links: vec![MalLink {
+                root: "~/Anime".to_string(),
+                name: "One Piece".to_string(),
+                mal_id: 42,
+            }],
+        }
+    }
+
+    fn one_patch(body: &str) -> Vec<(String, String)> {
+        vec![(
+            format!("{API_BASE}/anime/42/my_list_status"),
+            body.to_string(),
+        )]
+    }
+
+    #[test]
+    fn run_sync_stale_cursor_below_awareness_pushes_awareness_not_cursor_minus_one() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":18}}"#,
+        );
+        let mut record = base_record();
+        record.episode_number = Some(15);
+        record.mal_episode_awareness = Some(20);
+        let mut state = linked_state(record);
+
+        let outcomes = run_one_linked(&client, &mut state);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(20)
+            }
+        );
+        assert_eq!(
+            *client.patch_calls.borrow(),
+            one_patch("num_watched_episodes=20")
+        );
+        assert_eq!(state.series[0].mal_episode_awareness, Some(20));
+    }
+
+    #[test]
+    fn run_sync_dropped_finale_pushes_cursor_and_completes_the_mal_entry() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+        );
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.episode_number = Some(12);
+        record.position_seconds = 1400.0;
+        let mut state = linked_state(record);
+
+        let outcomes = run_one_linked(&client, &mut state);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(12)
+            }
+        );
+        assert_eq!(
+            *client.patch_calls.borrow(),
+            one_patch("num_watched_episodes=12&status=completed&finish_date=2026-09-23")
+        );
+        assert_eq!(state.series[0].mal_episode_awareness, Some(12));
+    }
+
+    #[test]
+    fn run_sync_dropped_untouched_cursor_pushes_cursor_minus_one_and_no_status() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+        );
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.episode_number = Some(12);
+        record.position_seconds = 0.0;
+        let mut state = linked_state(record);
+
+        let outcomes = run_one_linked(&client, &mut state);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(11)
+            }
+        );
+        assert_eq!(
+            *client.patch_calls.borrow(),
+            one_patch("num_watched_episodes=11")
+        );
+    }
+
+    #[test]
+    fn run_sync_rejected_patch_leaves_awareness_unset_and_retry_pushes_same_number() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":18}}"#,
+        );
+        client.patch_status.set(500);
+        let mut record = base_record();
+        record.episode_number = Some(21);
+        let mut state = linked_state(record.clone());
+
+        let outcomes = run_one_linked(&client, &mut state);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Failed("MyAnimeList rejected the request: HTTP 500: {}".to_string())
+        );
+        assert_eq!(state.series[0], record);
+
+        client.push_status_response(
+            200,
+            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":18}}"#,
+        );
+        client.patch_status.set(200);
+        let outcomes = run_one_linked(&client, &mut state);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 42,
+                action: MergeAction::Push(20)
+            }
+        );
+        assert_eq!(
+            *client.patch_calls.borrow(),
+            [
+                one_patch("num_watched_episodes=20")[0].clone(),
+                one_patch("num_watched_episodes=20")[0].clone()
+            ]
+        );
+        assert_eq!(state.series[0].mal_episode_awareness, Some(20));
+    }
+
+    #[test]
+    fn desired_status_unfinished_progress_only_moves_plan_to_watch_forward() {
+        assert_eq!(
+            desired_status(MalListStatus::PlanToWatch, 3, 12, false),
+            Some(MalListStatus::Watching)
+        );
+        for status in [
+            MalListStatus::Watching,
+            MalListStatus::OnHold,
+            MalListStatus::Dropped,
+            MalListStatus::Completed,
+            MalListStatus::Unknown,
+        ] {
+            assert_eq!(desired_status(status, 3, 12, false), None, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn desired_status_watched_count_reaching_or_passing_total_completes() {
+        assert_eq!(desired_status(MalListStatus::Watching, 11, 12, false), None);
+        assert_eq!(
+            desired_status(MalListStatus::Watching, 12, 12, false),
+            Some(MalListStatus::Completed)
+        );
+        assert_eq!(
+            desired_status(MalListStatus::Watching, 13, 12, false),
+            Some(MalListStatus::Completed)
+        );
+    }
+
     // --- Fakeable HTTP client for this module's own tests ---
 
     /// A small, queue-based fake: each `push_*_response` call queues one
@@ -2228,6 +2417,7 @@ mod tests {
         get_responses: RefCell<Vec<(u16, String)>>,
         get_calls: RefCell<Vec<String>>,
         patch_calls: RefCell<Vec<(String, String)>>,
+        patch_status: std::cell::Cell<u16>,
     }
 
     impl FakeClient {
@@ -2236,6 +2426,7 @@ mod tests {
                 get_responses: RefCell::new(Vec::new()),
                 get_calls: RefCell::new(Vec::new()),
                 patch_calls: RefCell::new(Vec::new()),
+                patch_status: std::cell::Cell::new(200),
             }
         }
 
@@ -2289,7 +2480,7 @@ mod tests {
                 .join("&");
             self.patch_calls.borrow_mut().push((url.to_string(), body));
             Ok(HttpResponse {
-                status: 200,
+                status: self.patch_status.get(),
                 body: "{}".to_string(),
             })
         }
