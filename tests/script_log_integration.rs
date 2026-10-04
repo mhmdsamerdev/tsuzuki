@@ -114,7 +114,7 @@ updated_at = 1700000000
 
     let state_contents = fs::read_to_string(&state_path).unwrap();
     assert!(
-        state_contents.contains("\"dropped\"") || state_contents.contains("dropped"),
+        state_contents.contains("status = \"dropped\""),
         "persisted state.toml contents:\n{state_contents}"
     );
     // Per CLAUDE.md's "pause/drop never zero the stored position" rule
@@ -122,7 +122,7 @@ updated_at = 1700000000
     // unchanged, not zeroed and not overwritten with the eof reading's own
     // value.
     assert!(
-        state_contents.contains("900"),
+        state_contents.contains("position_seconds = 900.0"),
         "the stored position must survive an auto-drop untouched:\n{state_contents}"
     );
 }

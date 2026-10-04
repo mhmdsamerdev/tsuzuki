@@ -568,10 +568,9 @@ updated_at = 1700000000
         let mut state = sample_state();
         state.series[0].status = Status::Dropped;
         state.series[0].mal_episode_awareness = Some(12);
-        let text = toml::to_string(&state).unwrap();
-        fs::write(&path, text).unwrap();
+        write(&path, &state).unwrap();
 
-        let read_back: State = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let read_back = read(&path).unwrap();
 
         assert_eq!(read_back, state);
     }

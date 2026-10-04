@@ -465,7 +465,10 @@ mod tests {
         // No Flatpak candidate can be computed without a home directory to
         // join it onto — this must degrade to just the native candidate
         // (if `dirs::data_dir()` itself resolves), not panic or error.
-        let expected: Vec<PathBuf> = native_mpv_log_dir().into_iter().collect();
+        let expected: Vec<PathBuf> = dirs::data_dir()
+            .map(|d| d.join("tsuzuki").join("mpv-log"))
+            .into_iter()
+            .collect();
         assert_eq!(mpv_log_dirs(None), expected);
     }
 

@@ -884,13 +884,9 @@ mod tests {
             *result_clone.lock().unwrap() = Some(outcome);
         });
 
-        // Wrong state: must be ignored, not accepted.
+        // Wrong state first: if it were accepted, the outcome below would
+        // carry its code instead of the real one.
         send_raw_callback(addr, "code=irrelevant&state=wrong-state-value");
-        thread::sleep(Duration::from_millis(300));
-        assert!(
-            result.lock().unwrap().is_none(),
-            "a state-mismatched callback must not resolve listen_for_callback"
-        );
 
         // Correct state: now it should resolve, with the real code.
         send_raw_callback(addr, "code=real-code-value&state=correct-state-value");
