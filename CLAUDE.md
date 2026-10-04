@@ -22,7 +22,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 
 ## Engineering choices
 - Local-first. No network at startup; only `sync` and `update` touch it, through `crate::http`. No async runtime.
-- State is one flat TOML, separate from the hand-edited `config.toml`. Every write goes through the single atomic temp-file-then-rename helper.
+- State is one flat TOML, separate from the hand-edited `config.toml`. Every state write goes through the single atomic temp-file-then-rename helper. `config.toml` is a hand-edited file written only by `add`/`exclude` with a plain write.
 - mpv is read-only: `watch_later` files (fixed per-install candidate list, freshest wins) plus the optional `contrib/mpv/tsuzuki.lua` log. No IPC. Resuming spawns mpv fire-and-forget.
 - Pure Rust only, no C/C++ dependencies. `vendor/anitomy` is read-only (edit only for a reproduced, blocking parsing bug). Distribution is prebuilt binaries via cargo-dist only.
 
