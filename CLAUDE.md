@@ -52,7 +52,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Assert whole values (`SeriesRecord`, classification enums, rendered lines), not single fields. `assert!(x.is_ok())` or `is_some()` alone is banned; unwrap or match and compare the payload.
 - Each non-trivial function gets a happy, an error, and an edge case. No test-count quotas.
 - Never infer a status from incidental fields (position, mtime). Tests build records through the real command or reconcile at least once, never only by hand-setting `status`.
-- Every predicate on a status or threshold is tested at each status and at 0, below, at and above the boundary, plus the excluded cases.
+- Every predicate on a status or threshold is tested at each status and at 0, below, at and above the boundary, plus the excluded cases. Vary fields that must be irrelevant and assert the decision is unchanged. Status tables use an exhaustive `match` (no `_`).
 - Unit tests stay inline (`#[cfg(test)] mod tests`). Integration tests go in `tests/`.
 
 **Isolation**

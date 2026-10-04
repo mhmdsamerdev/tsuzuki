@@ -2498,4 +2498,166 @@ mod tests {
             })
         }
     }
+
+    // --- Status-matrix / incidental-field guards ---
+
+    /// Every `Status`, with a wildcard-free `match` so a new variant fails
+    /// to compile until it is added here and given an expectation below.
+    fn all_statuses() -> [Status; 4] {
+        fn guard(status: Status) {
+            match status {
+                Status::InProgress | Status::Paused | Status::Dropped | Status::Completed => {}
+            }
+        }
+        let all = [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ];
+        all.into_iter().for_each(guard);
+        all
+    }
+
+    fn record_with(status: Status, cursor: u32, position_seconds: f64) -> SeriesRecord {
+        SeriesRecord {
+            status,
+            episode_number: Some(cursor),
+            position_seconds,
+            ..base_record()
+        }
+    }
+
+    const IRRELEVANT_POSITIONS: [f64; 4] = [0.0, 1.0, 120.0, 1380.0];
+    const CURSORS: [u32; 3] = [1, 5, 12];
+
+    #[test]
+    fn local_effective_episode_ignores_position_seconds_for_every_status() {
+        for status in all_statuses() {
+            for cursor in CURSORS {
+                let expected = match status {
+                    Status::Completed => cursor,
+                    Status::InProgress | Status::Paused | Status::Dropped => cursor - 1,
+                };
+                for position in IRRELEVANT_POSITIONS {
+                    assert_eq!(
+                        local_effective_episode(&record_with(status, cursor, position)),
+                        expected,
+                        "{status:?} cursor {cursor} position {position}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eligible_targets_by_status_matches_the_hand_written_table() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(root.join("One Piece")).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+
+        for status in all_statuses() {
+            let expected = match status {
+                Status::InProgress | Status::Completed => true,
+                Status::Paused | Status::Dropped => false,
+            };
+            let mut record = record_with(status, 3, 120.0);
+            record.root.clone_from(&root_string);
+            let state = State {
+                series: vec![record],
+                mal_links: Vec::new(),
+            };
+            assert_eq!(
+                !eligible_targets(&state, &config, Some(dir.path())).is_empty(),
+                expected,
+                "{status:?}"
+            );
+        }
+    }
+
+    fn pushed_count(body: &str) -> Option<u32> {
+        let rest = body.strip_prefix("num_watched_episodes=")?;
+        rest.split('&').next()?.parse().ok()
+    }
+
+    #[test]
+    fn sync_never_completes_or_overpushes_unless_the_record_is_completed() {
+        let mal_states = [
+            r#"{"id":42,"title":"T","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":0}}"#,
+            r#"{"id":42,"title":"T","num_episodes":12,"my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+        ];
+        for status in all_statuses() {
+            for cursor in CURSORS {
+                for position in IRRELEVANT_POSITIONS {
+                    for mal in mal_states {
+                        let client = FakeClient::new();
+                        client.push_status_response(200, mal);
+                        let mut state = linked_state(record_with(status, cursor, position));
+
+                        run_one_linked(&client, &mut state);
+
+                        for (_, body) in client.patch_calls.borrow().iter() {
+                            let context =
+                                format!("{status:?} cursor {cursor} pos {position}: {body}");
+                            if status != Status::Completed {
+                                assert!(!body.contains("status=completed"), "{context}");
+                                assert!(pushed_count(body).unwrap_or(0) < cursor, "{context}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sync_completes_the_mal_entry_for_a_completed_record_at_every_position() {
+        // Positive control for the grid above: the guard must not be vacuous.
+        for position in IRRELEVANT_POSITIONS {
+            let client = FakeClient::new();
+            client.push_status_response(
+                200,
+                r#"{"id":42,"title":"T","num_episodes":12,"my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+            );
+            let mut state = linked_state(record_with(Status::Completed, 12, position));
+
+            run_one_linked(&client, &mut state);
+
+            assert_eq!(
+                *client.patch_calls.borrow(),
+                one_patch("num_watched_episodes=12&status=completed&finish_date=2026-09-23"),
+                "position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_series_dropped_by_the_real_drop_command_is_never_a_sync_target_or_pushes_ahead() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(root.join("One Piece")).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths.push(root_string.clone());
+
+        for position in IRRELEVANT_POSITIONS {
+            let mut record = record_with(Status::InProgress, 1, position);
+            record.root.clone_from(&root_string);
+            let mut state = State {
+                series: vec![record],
+                mal_links: Vec::new(),
+            };
+            crate::pause_drop::drop_series(&mut state, &root_string, "One Piece").unwrap();
+
+            assert_eq!(
+                eligible_targets(&state, &config, Some(dir.path())),
+                Vec::<(String, String)>::new(),
+                "position {position}"
+            );
+            assert_eq!(local_effective_episode(&state.series[0]), 0);
+        }
+    }
 }

@@ -354,4 +354,50 @@ mod tests {
             100
         );
     }
+
+    #[test]
+    fn pause_and_drop_outcome_for_every_status_matches_the_hand_written_table() {
+        type Expected = Result<Outcome, ActionError>;
+        fn invalid(from: Status, action: &'static str) -> Expected {
+            Err(ActionError::InvalidTransition { from, action })
+        }
+        // Wildcard-free: a new `Status` variant must be added here.
+        fn expected(status: Status) -> (Expected, Expected) {
+            match status {
+                Status::InProgress => (Ok(Outcome::Changed), Ok(Outcome::Changed)),
+                Status::Paused => (Ok(Outcome::NoOp), Ok(Outcome::Changed)),
+                Status::Dropped => (invalid(Status::Dropped, "pause"), Ok(Outcome::NoOp)),
+                Status::Completed => (
+                    invalid(Status::Completed, "pause"),
+                    invalid(Status::Completed, "drop"),
+                ),
+            }
+        }
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ] {
+            let (expected_pause, expected_drop) = expected(status);
+            let mut state = State {
+                series: vec![record(status)],
+                mal_links: Vec::new(),
+            };
+            assert_eq!(
+                pause(&mut state, "~/Anime", "Monster"),
+                expected_pause,
+                "pause from {status:?}"
+            );
+            let mut state = State {
+                series: vec![record(status)],
+                mal_links: Vec::new(),
+            };
+            assert_eq!(
+                drop_series(&mut state, "~/Anime", "Monster"),
+                expected_drop,
+                "drop from {status:?}"
+            );
+        }
+    }
 }

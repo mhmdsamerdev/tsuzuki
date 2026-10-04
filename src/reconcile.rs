@@ -1294,6 +1294,8 @@ mod tests {
         // not updated to the Completed reading's own value.
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        // Sync reads the finale reconcile produced as fully watched.
+        assert_eq!(crate::sync::local_effective_episode(record), 1);
 
         // `overview.rs`'s display must show "Rewatch?" for this series
         // now, never "Resume" — the same word a manual `drop` produces.

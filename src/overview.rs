@@ -426,4 +426,29 @@ mod tests {
         let o = overview_for("~/Anime", "No Numbers", Some(&record), 3);
         assert_eq!(o.episode_number, Some(2));
     }
+
+    #[test]
+    fn list_group_and_start_word_for_every_status_match_the_hand_written_table() {
+        // Wildcard-free: a new `Status` variant must be added here.
+        fn expected(status: Status) -> (Option<Status>, &'static str) {
+            match status {
+                Status::InProgress => (Some(Status::InProgress), "Resume"),
+                Status::Paused => (Some(Status::Paused), "Resume"),
+                Status::Dropped => (Some(Status::Dropped), "Rewatch?"),
+                Status::Completed => (Some(Status::Dropped), "Rewatch?"),
+            }
+        }
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ] {
+            assert_eq!(
+                (list_group(Some(status)), start_display_word(Some(status))),
+                expected(status),
+                "{status:?}"
+            );
+        }
+    }
 }

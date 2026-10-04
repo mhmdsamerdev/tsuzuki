@@ -1078,6 +1078,49 @@ fn dropped_series_are_not_synced_but_completed_series_are() {
     );
 }
 
+#[test]
+fn dropped_at_every_depth_is_never_synced() {
+    // Dropped mid ep1; right after ep1 finished (cursor on ep2); mid last episode.
+    let names = ["MidFirst", "AfterFirst", "MidLast"];
+    for name in names {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let anime_root = home.join("Anime");
+        let ep1 = anime_root.join(name).join("ep01.mkv");
+        let ep2 = anime_root.join(name).join("ep02.mkv");
+        touch(&ep1);
+        touch(&ep2);
+        add_root(home, &anime_root);
+
+        match name {
+            "MidFirst" => write_watch_later(home, "e1", &ep1, 120.0),
+            "AfterFirst" => {
+                write_script_log(home, "l1", &ep1, Some(1420.0), Some(1415.0), "eof");
+            }
+            _ => {
+                write_script_log(home, "l1", &ep1, Some(1420.0), Some(1415.0), "eof");
+                run_ok(home, &["list"]);
+                ensure_next_write_is_strictly_fresher();
+                write_watch_later(home, "e2", &ep2, 700.0);
+            }
+        }
+        run_ok(home, &["list"]);
+        run_ok(home, &["drop", name]);
+        let before = fs::read_to_string(state_path(home)).unwrap();
+
+        assert_eq!(
+            run_ok(home, &["sync"]).trim(),
+            "Nothing eligible to sync.",
+            "{name}"
+        );
+        assert_eq!(
+            fs::read_to_string(state_path(home)).unwrap(),
+            before,
+            "{name}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // 14c. `pause`/`drop` never act on a finished series: Completed is reached
 //      only by watching the final episode.
