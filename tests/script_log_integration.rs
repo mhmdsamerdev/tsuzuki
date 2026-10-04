@@ -44,7 +44,7 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn script_only_eof_entry_with_zero_watch_later_trace_auto_drops_the_last_episode() {
+fn script_only_eof_entry_with_zero_watch_later_trace_completes_the_last_episode() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -108,18 +108,17 @@ updated_at = 1700000000
     let list_stdout = String::from_utf8_lossy(&list.stdout);
     assert!(
         list_stdout.contains("Dropped"),
-        "expected the script-only eof reading on the series' last episode to auto-Drop it, \
+        "expected the script-only eof reading on the series' last episode to complete it, \
          got: {list_stdout}"
     );
 
     let state_contents = fs::read_to_string(&state_path).unwrap();
     assert!(
-        state_contents.contains("status = \"dropped\""),
+        state_contents.contains("status = \"completed\""),
         "persisted state.toml contents:\n{state_contents}"
     );
-    // Per CLAUDE.md's "pause/drop never zero the stored position" rule
-    // (extended to auto-drop): the previously-real position/path survive
-    // unchanged, not zeroed and not overwritten with the eof reading's own
+    // Completion never zeroes the stored position: the previously-real
+    // position/path survive unchanged, not zeroed and not overwritten with the eof reading's own
     // value.
     assert!(
         state_contents.contains("position_seconds = 900.0"),

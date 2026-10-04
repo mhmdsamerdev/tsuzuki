@@ -93,13 +93,22 @@ fn overview_for(
     }
 }
 
-/// Sort rank for `list`'s grouping: `in_progress` -> `paused` -> `dropped`
-/// -> never-started, per CLAUDE.md.
-fn status_rank(status: Option<Status>) -> u8 {
+/// The status whose `list` group a series appears under: `Completed` shares
+/// the `Dropped` group, since both are "Rewatch?" candidates to the user.
+pub fn list_group(status: Option<Status>) -> Option<Status> {
     match status {
+        Some(Status::Completed) => Some(Status::Dropped),
+        other => other,
+    }
+}
+
+/// Sort rank for `list`'s grouping: `in_progress` -> `paused` -> `dropped`
+/// (with `completed`) -> never-started, per CLAUDE.md.
+fn status_rank(status: Option<Status>) -> u8 {
+    match list_group(status) {
         Some(Status::InProgress) => 0,
         Some(Status::Paused) => 1,
-        Some(Status::Dropped) => 2,
+        Some(Status::Dropped | Status::Completed) => 2,
         None => 3,
     }
 }
@@ -118,8 +127,8 @@ pub fn sorted_for_list(mut overviews: Vec<SeriesOverview>) -> Vec<SeriesOverview
 }
 
 /// `start`'s per-state display word, exactly per CLAUDE.md: never-started
-/// (no record) -> `"Start"`; paused -> `"Resume"`; dropped (manual or
-/// detected-completion — no distinction is made) -> `"Rewatch?"`.
+/// (no record) -> `"Start"`; paused -> `"Resume"`; dropped or completed ->
+/// `"Rewatch?"`.
 /// `in_progress` never legitimately reaches this function — those series
 /// belong to the automatic resume picker, not `start`'s listing — but it
 /// stays total (falls back to `"Resume"`, the same word a real resumable
@@ -128,7 +137,7 @@ pub fn start_display_word(status: Option<Status>) -> &'static str {
     match status {
         None => "Start",
         Some(Status::Paused) => "Resume",
-        Some(Status::Dropped) => "Rewatch?",
+        Some(Status::Dropped | Status::Completed) => "Rewatch?",
         Some(Status::InProgress) => "Resume",
     }
 }
@@ -189,6 +198,31 @@ mod tests {
     #[test]
     fn start_display_word_is_rewatch_for_dropped() {
         assert_eq!(start_display_word(Some(Status::Dropped)), "Rewatch?");
+    }
+
+    #[test]
+    fn start_display_word_is_rewatch_for_completed() {
+        assert_eq!(start_display_word(Some(Status::Completed)), "Rewatch?");
+    }
+
+    #[test]
+    fn list_group_folds_completed_into_dropped_and_leaves_the_rest() {
+        assert_eq!(
+            [
+                list_group(Some(Status::Completed)),
+                list_group(Some(Status::Dropped)),
+                list_group(Some(Status::Paused)),
+                list_group(Some(Status::InProgress)),
+                list_group(None),
+            ],
+            [
+                Some(Status::Dropped),
+                Some(Status::Dropped),
+                Some(Status::Paused),
+                Some(Status::InProgress),
+                None,
+            ]
+        );
     }
 
     #[test]
@@ -265,6 +299,18 @@ mod tests {
         let sorted = sorted_for_list(overviews);
         let names: Vec<_> = sorted.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, vec!["Alpha", "Charlie", "Delta", "Beta", "Zeta"]);
+    }
+
+    #[test]
+    fn sorted_for_list_places_completed_alphabetically_with_dropped() {
+        let sorted = sorted_for_list(vec![
+            overview("Zeta", None),
+            overview("Charlie", Some(Status::Completed)),
+            overview("Beta", Some(Status::Dropped)),
+            overview("Delta", Some(Status::Paused)),
+        ]);
+        let names: Vec<_> = sorted.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["Delta", "Beta", "Charlie", "Zeta"]);
     }
 
     #[test]

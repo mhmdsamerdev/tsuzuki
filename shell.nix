@@ -27,6 +27,9 @@ pkgs.mkShell {
     # Useful, not required: lets `cargo dist` (Phase 8) work without
     # reaching outside the shell for another toolchain.
     pkgs.cargo-dist
+
+    # Mutation testing (CLAUDE.md's verification step).
+    pkgs.cargo-mutants
   ];
 
   shellHook = ''

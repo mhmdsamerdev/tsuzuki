@@ -421,8 +421,8 @@ fn reconcile_one_series(
     let start_index = match existing_index {
         Some(i) => {
             let record = &state.series[i];
-            if record.status == Status::Dropped {
-                // Drop resets progress; any episode picking it back up
+            if matches!(record.status, Status::Dropped | Status::Completed) {
+                // Drop (or a finished series) resets progress; any episode picking it back up
                 // (including episode 1) must count as new real evidence —
                 // see CLAUDE.md's "Paused/dropped -> in_progress" note.
                 0
@@ -525,15 +525,17 @@ fn reconcile_one_series(
         // landing spot for `apply_completion_advance` to resolve — every
         // field on it is overwritten by that call before this function
         // returns, since `any_completed_found` guarantees at least one
-        // step of real advancement happens. `Dropped` stays excluded, as
-        // before: it's a deliberate dead end only a genuine `Resume`
+        // step of real advancement happens. `Dropped`/`Completed` stay excluded,
+        // as before: they're deliberate dead ends only a genuine `Resume`
         // reactivates (CLAUDE.md: no `dropped -> paused` transition), not
         // something a stray `Completed` reading should auto-undo.
         if !any_completed_found {
             return;
         }
         let index = match existing_index {
-            Some(i) if state.series[i].status == Status::Dropped => return,
+            Some(i) if matches!(state.series[i].status, Status::Dropped | Status::Completed) => {
+                return;
+            }
             Some(i) => i,
             None => {
                 state.series.push(SeriesRecord {
@@ -625,15 +627,14 @@ fn reconcile_one_series(
 /// walks forward past every consecutive episode that also currently has a
 /// real `Completed` reading, landing at position 0 of the first episode
 /// found with no such evidence (a genuinely blank, never-yet-touched
-/// episode) — or transitioning the record to `Dropped` if the walk runs
+/// episode) — or transitioning the record to `Completed` if the walk runs
 /// out of episodes entirely, i.e. the completed episode(s) were the actual
-/// end of the series. `Dropped` is deliberately reached the same way a
-/// manual `tsuzuki drop` reaches it (CLAUDE.md: no new state), and — like
-/// manual `drop` — never mutates the stored `current_relative_path`/
-/// `position_seconds` on the way there; only a landing on a real episode
-/// does. `episode_number` is the one exception: it always lands on the true
-/// final episode's own identity on this exit path too, regardless of how
-/// many already-completed episodes the walk chained through to get there.
+/// end of the series. That exit never mutates the stored
+/// `current_relative_path`/`position_seconds`; only a landing on a real
+/// episode does. `episode_number` is the one exception: it always lands on
+/// the true final episode's own identity on this exit path too, regardless
+/// of how many already-completed episodes the walk chained through to get
+/// there.
 #[allow(clippy::too_many_arguments)]
 fn apply_completion_advance(
     state: &mut State,
@@ -653,7 +654,7 @@ fn apply_completion_advance(
         if cursor + 1 >= ordered.len() {
             let episode_number = identities.get(cursor).map(|id| id.episode_number);
             let record = &mut state.series[i];
-            record.status = Status::Dropped;
+            record.status = Status::Completed;
             record.episode_number = episode_number;
             record.updated_at = now_unix();
             return;
@@ -1066,6 +1067,43 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_series_reopened_on_episode_one_restarts_as_in_progress() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        // Opens episode 1 directly (not even the last-watched one before finishing).
+        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::Completed,
+                current_relative_path: "Monster/ep02.mkv".to_string(),
+                position_seconds: 1400.0,
+                episode_number: Some(2),
+                updated_at: 1,
+                mal_episode_awareness: None,
+            }],
+
+            mal_links: Vec::new(),
+        };
+
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 400.0);
+    }
+
+    #[test]
     fn an_unchanged_bookmark_never_flips_a_paused_series_back_to_in_progress() {
         // Pausing doesn't touch mpv's own watch_later file — its entry for
         // the paused episode still sits there completely unchanged. Every
@@ -1199,8 +1237,8 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_reading_on_the_last_episode_auto_drops_instead_of_freezing_or_updating_in_place()
-    {
+    fn a_completed_reading_on_the_last_episode_marks_completed_instead_of_freezing_or_updating_in_place()
+     {
         // Supersedes an earlier version of this test from the completion-
         // freeze fix, which expected a `Completed` reading on the current
         // file to just update that file's own stored position and stay
@@ -1240,26 +1278,25 @@ mod tests {
 
         // Call 2: quit again, further in -> 4.0s -> 1.0s remaining ->
         // Completed. This is the actual last (only) episode in the series,
-        // so the record must auto-Drop, not freeze and not just update its
+        // so the record must become Completed, not freeze and not just update its
         // own position in place.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
-            Status::Dropped,
-            "completing the series' actual last episode must auto-Drop it"
+            Status::Completed,
+            "completing the series' actual last episode must mark it Completed"
         );
-        // Per CLAUDE.md's "pause/drop never zero the stored position" rule
-        // (extended to auto-drop for the same reconcile-diffing reason):
+        // Like `drop`, completion never zeroes the stored position (same
+        // reconcile-diffing reason):
         // the stored position is left exactly as it was, not zeroed and
         // not updated to the Completed reading's own value.
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
 
         // `overview.rs`'s display must show "Rewatch?" for this series
-        // now, never "Resume" — the same word a manual `drop` produces,
-        // since this is reached the same way.
+        // now, never "Resume" — the same word a manual `drop` produces.
         assert_eq!(
             crate::overview::start_display_word(Some(record.status)),
             "Rewatch?"
@@ -1267,13 +1304,14 @@ mod tests {
 
         // Call 3: nothing changed on disk (mpv's own entry for ep01 is
         // still sitting there unchanged) — must stay stable, no error, no
-        // further change. Dropped records use their own separate,
-        // already-tested reconcile path (start_index = 0, whole-series
-        // scan for genuinely new activity) — this confirms the auto-drop
-        // transition doesn't leave anything that path would misinterpret.
+        // further change. Completed records use the same separate,
+        // already-tested reconcile path as Dropped (start_index = 0,
+        // whole-series scan for genuinely new activity) — this confirms
+        // the finale transition doesn't leave anything that path would
+        // misinterpret.
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
-        assert_eq!(record.status, Status::Dropped);
+        assert_eq!(record.status, Status::Completed);
         assert_eq!(record.position_seconds, 1.5);
     }
 
@@ -1869,7 +1907,7 @@ mod tests {
     // --- End-to-end `reconcile()` behavior, both candidate sources ---
 
     #[test]
-    fn a_never_tracked_single_episode_series_completed_via_script_eof_auto_drops() {
+    fn a_never_tracked_single_episode_series_completed_via_script_eof_marks_completed() {
         // Regression test for a real gap found by dogfooding the actual
         // binary (not caught by any prior fabricated-entry test): a
         // brand-new series with NO existing `state.toml` record, whose
@@ -1916,8 +1954,8 @@ mod tests {
             .expect("a never-tracked series completed on its only episode must get a record");
         assert_eq!(
             record.status,
-            Status::Dropped,
-            "the series' one and only episode completing must auto-Drop it, not leave it \
+            Status::Completed,
+            "the series' one and only episode completing must mark it Completed, not leave it \
              invisible"
         );
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
@@ -1995,7 +2033,7 @@ mod tests {
         let record = state
             .find(&root.to_string_lossy(), "Monster")
             .expect("a never-tracked series completed via watch_later alone must get a record");
-        assert_eq!(record.status, Status::Dropped);
+        assert_eq!(record.status, Status::Completed);
     }
 
     #[test]
@@ -2058,7 +2096,66 @@ mod tests {
     }
 
     #[test]
-    fn script_only_eof_on_the_last_episode_auto_drops_flagship() {
+    fn a_genuinely_completed_record_is_not_reactivated_by_a_fresh_completed_reading() {
+        // The one case that must NOT change: `Dropped` stays a deliberate
+        // dead end reachable only by a genuine `Resume` (opening an
+        // episode directly), never by a `Completed` reading — the fix
+        // above must not accidentally start treating Dropped like
+        // never-tracked for this purpose.
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
+
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later"); // left empty
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        // A freshly-appearing eof reading on ep01, the record's own
+        // dropped-at position.
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+        );
+
+        let mut state = State {
+            series: vec![SeriesRecord {
+                root: root.to_string_lossy().into_owned(),
+                name: "Monster".to_string(),
+                status: Status::Completed,
+                current_relative_path: "Monster/ep01.mkv".to_string(),
+                position_seconds: 0.0,
+                episode_number: Some(1),
+                updated_at: 1,
+                mal_episode_awareness: None,
+            }],
+
+            mal_links: Vec::new(),
+        };
+
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(
+            record.status,
+            Status::Completed,
+            "a Completed reading must never reactivate a Completed record"
+        );
+        assert_eq!(record.updated_at, 1, "no genuine change occurred");
+    }
+
+    #[test]
+    fn script_only_eof_on_the_last_episode_marks_completed_flagship() {
         // The flagship test: a script-log-only `eof` reading, with zero
         // watch_later trace at all (mpv's own resume-playback deleted the
         // bookmark on load, exactly as it always does — CLAUDE.md's
@@ -2067,7 +2164,7 @@ mod tests {
         // alone is never proof of anything, so the record would freeze at
         // its old position forever with no way to ever confirm completion.
         // With the script installed, the direct `eof` signal now closes
-        // that gap completely — auto-Drop fires exactly as it would have
+        // that gap completely — completion fires exactly as it would have
         // for an ordinary duration-proximity `Completed` reading.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
@@ -2113,18 +2210,18 @@ mod tests {
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
-            Status::Dropped,
-            "a script-only eof reading on the series' last episode must auto-Drop it"
+            Status::Completed,
+            "a script-only eof reading on the series' last episode must mark it Completed"
         );
         // Per the pause/drop-never-zeroes-position rule (CLAUDE.md),
-        // extended to auto-drop: the stored position/path are untouched.
+        // extended to completion: the stored position/path are untouched.
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(record.position_seconds, 900.0);
     }
 
     #[test]
-    fn a_multi_hop_completion_chain_lands_episode_number_on_the_true_final_episode_before_dropping()
-    {
+    fn a_multi_hop_completion_chain_lands_episode_number_on_the_true_final_episode_before_completing()
+     {
         // Regression test for a real, reported bug: when the completion-chain
         // walk in `apply_completion_advance` runs through more than one
         // already-completed episode before running out of series (the
@@ -2190,8 +2287,8 @@ mod tests {
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
-            Status::Dropped,
-            "chaining through every remaining episode's completion must still auto-Drop"
+            Status::Completed,
+            "chaining through every remaining episode's completion must still mark it Completed"
         );
         assert_eq!(
             record.episode_number,
@@ -2563,6 +2660,10 @@ mod tests {
                     status: Status::Dropped,
                     ..idle_in_progress_record(Path::new("~/Anime"), "AlreadyDropped", ancient)
                 },
+                SeriesRecord {
+                    status: Status::Completed,
+                    ..idle_in_progress_record(Path::new("~/Anime"), "AlreadyCompleted", ancient)
+                },
             ],
             mal_links: Vec::new(),
         };
@@ -2576,6 +2677,11 @@ mod tests {
         assert_eq!(
             state.series[1].updated_at, ancient,
             "Dropped -> Paused does not exist; idleness must never invent it"
+        );
+        assert_eq!(state.series[2].status, Status::Completed);
+        assert_eq!(
+            state.series[2].updated_at, ancient,
+            "a finished series is never idle-paused"
         );
     }
 

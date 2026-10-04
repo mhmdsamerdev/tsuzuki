@@ -30,7 +30,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - A series is the depth-1 directory under a tracked root. Its name is the directory name verbatim. Odd layouts become their own root.
 - Thresholds are flat seconds (`resume_seconds`, `completion_remaining_seconds`), never percentages. Every tunable has a config field.
 - A moved or deleted series folder is a new series. The old record stays inert until `doctor --fix --forget-orphans`. No rename detection.
-- Paused series are excluded from sync. `pause`/`drop` never zero the stored position.
+- `Completed` is set only by reconcile when the final episode finishes; no command sets it, `pause`/`drop` reject it. Paused and dropped series are excluded from sync. `pause`/`drop` never zero the stored position.
 - Every state-touching command reconciles with mpv through the one shared function, then acts.
 - Episode duration comes from Symphonia content-probe (AVI header fallback), never `ffprobe`.
 - Symlinks are followed everywhere, with cycle protection. Roots are stored as the user typed them.
@@ -51,6 +51,8 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Name: `{subject}_{scenario}_{expected}`, e.g. `series_walk_orders_season_dir_files_before_loose_ova`. Never `test_x` or `it_works`.
 - Assert whole values (`SeriesRecord`, classification enums, rendered lines), not single fields. `assert!(x.is_ok())` or `is_some()` alone is banned; unwrap or match and compare the payload.
 - Each non-trivial function gets a happy, an error, and an edge case. No test-count quotas.
+- Never infer a status from incidental fields (position, mtime). Tests build records through the real command or reconcile at least once, never only by hand-setting `status`.
+- Every predicate on a status or threshold is tested at each status and at 0, below, at and above the boundary, plus the excluded cases.
 - Unit tests stay inline (`#[cfg(test)] mod tests`). Integration tests go in `tests/`.
 
 **Isolation**
@@ -67,7 +69,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Ordering: directories before a level's loose files; numbered natural sort; exclusions applied before sort; symlink cycle terminates.
 - `watch_later` parsing: redirect entries skipped; malformed entries skipped without aborting; missing `write-filename-in-watch-later-config` reported.
 - Thresholds: a position below `resume_seconds` never creates or overwrites state; `classify()` position check wins over completion on short files; script `eof` is `Completed`; absence alone never moves state.
-- MAL: never write a lower episode; paused excluded; push count is the watched count (cursor − 1, except `Dropped` with nonzero position); status moves forward only.
+- MAL: never write a lower episode; paused and dropped excluded; push count is the watched count (cursor − 1, or the cursor for `Completed`); only `Completed` marks a MAL entry finished; status moves forward only.
 - `exclude`/`pause`/`drop`: legal transitions only; no-record error; idempotent repeat; absolute exclude path rejected; `pause`/`drop` keep the stored position.
 - State: write is atomic (no partial file); unchanged script-log entries don't bump `updated_at`.
 

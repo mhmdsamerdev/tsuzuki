@@ -28,6 +28,9 @@ use crate::roots::normalize;
 pub enum Status {
     InProgress,
     Paused,
+    /// Reached only by reconcile confirming the series' final episode
+    /// finished; no command sets it.
+    Completed,
     Dropped,
 }
 
@@ -573,5 +576,21 @@ updated_at = 1700000000
         let read_back = read(&path).unwrap();
 
         assert_eq!(read_back, state);
+    }
+
+    #[test]
+    fn state_round_trips_completed_status_as_snake_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        let mut state = sample_state();
+        state.series[0].status = Status::Completed;
+        write(&path, &state).unwrap();
+
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("status = \"completed\"")
+        );
+        assert_eq!(read(&path).unwrap(), state);
     }
 }

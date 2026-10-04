@@ -272,11 +272,11 @@ fn first_time_onboarding_add_list_and_start_a_series() {
 // 2. Natural sort is the sole ordering authority (season folders decide
 //    position; Anitomy only annotates the displayed episode number) +
 //    a full binge chain resolved in single invocations, including
-//    auto-drop when the last episode completes.
+//    completion when the last episode finishes.
 // ---------------------------------------------------------------------
 
 #[test]
-fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_auto_drops() {
+fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_completes() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -344,9 +344,8 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     );
 
     // Season 2's episode is the *last* file in the whole series. Its own
-    // completion must auto-transition the series straight to Dropped —
-    // no next episode exists to advance to (CLAUDE.md's "No next episode
-    // -> series auto-transitions to Dropped, no manual drop needed").
+    // completion must transition the series straight to Completed — no
+    // next episode exists to advance to.
     ensure_next_write_is_strictly_fresher();
     write_script_log(
         home,
@@ -364,10 +363,14 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     );
     assert!(list3.contains("Dropped:"), "got: {list3}");
     assert!(list3.contains("Test Show"), "got: {list3}");
+    let state_contents = fs::read_to_string(state_path(home)).unwrap();
+    assert!(
+        state_contents.contains("status = \"completed\""),
+        "a finished series must persist as completed, not dropped:\n{state_contents}"
+    );
 
-    // `start`'s own documented display word for this exact situation
-    // (manual drop and detected-completion are indistinguishable by
-    // design) is "Rewatch?", never "Start".
+    // `start`'s display word for a completed series is "Rewatch?", never
+    // "Start".
     let start_listing = run(home, &["start"]);
     let start_stdout = stdout_of(&start_listing);
     assert!(
@@ -1021,6 +1024,90 @@ fn paused_series_are_not_synced_and_need_no_mal_login() {
         before,
         "sync must leave a paused record byte-for-byte unchanged"
     );
+}
+
+// ---------------------------------------------------------------------
+// 14b. A manually dropped series is abandoned, not finished: sync excludes
+//      it before MAL access, however far in it was dropped. A series that
+//      really finished is the only one sync will act on.
+// ---------------------------------------------------------------------
+
+#[test]
+fn dropped_series_are_not_synced_but_completed_series_are() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let anime_root = home.join("Anime");
+    let abandoned = anime_root.join("Abandoned").join("ep01.mkv");
+    touch(&abandoned);
+    touch(&anime_root.join("Abandoned").join("ep02.mkv"));
+    let finished = anime_root.join("Finished").join("ep01.mkv");
+    touch(&finished);
+    add_root(home, &anime_root);
+
+    // Two minutes into ep1 of a two-episode series, then a manual drop.
+    write_watch_later(home, "entry", &abandoned, 120.0);
+    run_ok(home, &["list"]);
+    run_ok(home, &["drop", "Abandoned"]);
+    let before = fs::read_to_string(state_path(home)).unwrap();
+
+    let stdout = run_ok(home, &["sync"]);
+    assert_eq!(stdout.trim(), "Nothing eligible to sync.");
+    assert_eq!(
+        fs::read_to_string(state_path(home)).unwrap(),
+        before,
+        "sync must leave a dropped record byte-for-byte unchanged"
+    );
+
+    // A one-episode series watched to its end becomes a sync target: with
+    // no MAL login the run now reaches authentication and fails there.
+    write_script_log(
+        home,
+        "log-finished",
+        &finished,
+        Some(1420.0),
+        Some(1415.0),
+        "eof",
+    );
+    let sync = run(home, &["sync"]);
+    assert!(!sync.status.success());
+    assert!(
+        stderr_of(&sync).contains("not logged in to MyAnimeList"),
+        "got: {}",
+        stderr_of(&sync)
+    );
+}
+
+// ---------------------------------------------------------------------
+// 14c. `pause`/`drop` never act on a finished series: Completed is reached
+//      only by watching the final episode.
+// ---------------------------------------------------------------------
+
+#[test]
+fn pause_and_drop_reject_a_completed_series_and_leave_state_unchanged() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let anime_root = home.join("Anime");
+    let file = anime_root.join("Monster").join("ep01.mkv");
+    touch(&file);
+    add_root(home, &anime_root);
+
+    write_script_log(home, "log-1", &file, Some(1420.0), Some(1415.0), "eof");
+    run_ok(home, &["list"]);
+    let before = fs::read_to_string(state_path(home)).unwrap();
+    assert!(before.contains("status = \"completed\""), "got: {before}");
+
+    for action in ["pause", "drop"] {
+        let out = run(home, &[action, "Monster"]);
+        assert!(!out.status.success(), "{action} must be rejected");
+        assert!(
+            stderr_of(&out).contains("currently completed"),
+            "got: {}",
+            stderr_of(&out)
+        );
+    }
+    assert_eq!(fs::read_to_string(state_path(home)).unwrap(), before);
 }
 
 // ---------------------------------------------------------------------

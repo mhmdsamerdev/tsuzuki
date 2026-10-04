@@ -378,7 +378,7 @@ fn playback_target(
     // found," which would have shown position 0 even for a record
     // genuinely paused/in-progress at episode 1's own real position).
     let resolved = record
-        .filter(|r| r.status != Status::Dropped)
+        .filter(|r| !matches!(r.status, Status::Dropped | Status::Completed))
         .and_then(|r| {
             let target = expanded_root.join(&r.current_relative_path);
             let real_target = roots::normalize(&target, home);
@@ -638,7 +638,10 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 
     let mut first_group = true;
     for (status, header) in GROUPS {
-        let items: Vec<_> = overviews.iter().filter(|o| o.status == status).collect();
+        let items: Vec<_> = overviews
+            .iter()
+            .filter(|o| overview::list_group(o.status) == status)
+            .collect();
         if items.is_empty() {
             continue;
         }
@@ -657,6 +660,15 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The progress verb `start` prints for a picked series.
+fn start_verb(status: Option<Status>) -> &'static str {
+    match status {
+        Some(Status::Paused) => "Resuming",
+        Some(Status::Dropped | Status::Completed) => "Rewatching",
+        _ => "Starting",
+    }
 }
 
 /// `tsuzuki start [series] [--root <root>]` — design.md §6, CLAUDE.md's
@@ -711,12 +723,7 @@ fn start_command(
     );
     match outcome {
         picker::PickerOutcome::Selected(o) => {
-            let verb = match o.status {
-                Some(Status::Paused) => "Resuming",
-                Some(Status::Dropped) => "Rewatching",
-                _ => "Starting",
-            };
-            play_series(config, &state, &o.root, &o.name, home, verb)
+            play_series(config, &state, &o.root, &o.name, home, start_verb(o.status))
         }
         picker::PickerOutcome::Listed => {
             println!();
@@ -1349,6 +1356,19 @@ mod tests {
     use std::fs;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    #[test]
+    fn start_verb_matches_each_status() {
+        assert_eq!(
+            [
+                start_verb(Some(Status::Paused)),
+                start_verb(Some(Status::Dropped)),
+                start_verb(Some(Status::Completed)),
+                start_verb(None),
+            ],
+            ["Resuming", "Rewatching", "Rewatching", "Starting"]
+        );
+    }
 
     fn touch(path: &Path) {
         if let Some(parent) = path.parent() {

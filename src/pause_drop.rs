@@ -4,8 +4,10 @@
 //!
 //! Allowed transitions only: `InProgress -> Paused`, `InProgress -> Dropped`,
 //! `Paused -> InProgress`, `Paused -> Dropped`. `Dropped -> Paused` does not
-//! exist — the only way back from `Dropped` to `InProgress` is opening an
-//! episode directly, which `reconcile` (not this module) picks up. Both
+//! exist, and neither command acts on a `Completed` series (only reconcile
+//! produces that status) — the only way back from `Dropped` or `Completed`
+//! to `InProgress` is opening an episode directly, which `reconcile` (not
+//! this module) picks up. Both
 //! commands act only on *existing* progress: a series with no `state.toml`
 //! record at all is always an error, never a silently-manufactured record.
 //!
@@ -25,8 +27,8 @@ pub enum ActionError {
     /// starting point.
     NoRecord,
     /// The record exists but isn't in a state this action can start from
-    /// (only `pause` on an already-`Dropped` record hits this — `Dropped ->
-    /// Paused` doesn't exist).
+    /// (`pause` on a `Dropped` record — `Dropped -> Paused` doesn't exist —
+    /// and either command on a `Completed` record).
     InvalidTransition { from: Status, action: &'static str },
 }
 
@@ -41,6 +43,7 @@ impl fmt::Display for ActionError {
                 let from = match from {
                     Status::InProgress => "in progress",
                     Status::Paused => "paused",
+                    Status::Completed => "completed",
                     Status::Dropped => "dropped",
                 };
                 write!(f, "cannot {action} a series that's currently {from}")
@@ -69,15 +72,16 @@ pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, Actio
             record.updated_at = now_unix();
             Ok(Outcome::Changed)
         }
-        Status::Dropped => Err(ActionError::InvalidTransition {
-            from: Status::Dropped,
+        from @ (Status::Dropped | Status::Completed) => Err(ActionError::InvalidTransition {
+            from,
             action: "pause",
         }),
     }
 }
 
 /// `InProgress -> Dropped`, `Paused -> Dropped`. `Dropped -> Dropped` is
-/// idempotent. Only a missing record errors — unlike `pause`, dropping an
+/// idempotent; a `Completed` series errors — it is finished, not abandoned.
+/// Otherwise only a missing record errors — unlike `pause`, dropping an
 /// already-dropped series is a legitimate no-op, not an invalid source
 /// state (CLAUDE.md: "re-invoking ... drop on an already-dropped one is
 /// idempotent").
@@ -104,6 +108,10 @@ pub fn drop_series(state: &mut State, root: &str, name: &str) -> Result<Outcome,
             record.updated_at = now_unix();
             Ok(Outcome::Changed)
         }
+        Status::Completed => Err(ActionError::InvalidTransition {
+            from: Status::Completed,
+            action: "drop",
+        }),
     }
 }
 
@@ -187,6 +195,43 @@ mod tests {
                 action: "pause"
             }
         );
+    }
+
+    #[test]
+    fn pause_on_completed_is_an_invalid_transition_error() {
+        let mut state = State {
+            series: vec![record(Status::Completed)],
+            mal_links: Vec::new(),
+        };
+        let err = pause(&mut state, "~/Anime", "Monster").unwrap_err();
+        assert_eq!(
+            err,
+            ActionError::InvalidTransition {
+                from: Status::Completed,
+                action: "pause"
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "cannot pause a series that's currently completed"
+        );
+    }
+
+    #[test]
+    fn drop_on_completed_is_an_invalid_transition_error_and_leaves_the_record() {
+        let mut state = State {
+            series: vec![record(Status::Completed)],
+            mal_links: Vec::new(),
+        };
+        let err = drop_series(&mut state, "~/Anime", "Monster").unwrap_err();
+        assert_eq!(
+            err,
+            ActionError::InvalidTransition {
+                from: Status::Completed,
+                action: "drop"
+            }
+        );
+        assert_eq!(state.series, vec![record(Status::Completed)]);
     }
 
     #[test]

@@ -619,18 +619,12 @@ fn transition_dates(
 ///
 /// **One exception:** `apply_completion_advance` (`reconcile.rs`) has no
 /// next episode to advance a completed series to, so it leaves the cursor
-/// sitting on the finale it just confirmed complete and transitions straight
-/// to `Dropped` — the only case where the cursor's own episode genuinely
-/// *is* the watched count, not one short of it. That state is identifiable
-/// without guessing: `Dropped` with a real (nonzero) `position_seconds`, the
-/// same nonzero near-the-end position `classify()` used to confirm
-/// completion. A `Dropped` record with `position_seconds == 0.0` never
-/// touched its cursor episode at all (advanced to a fresh next episode by
-/// completion, then dropped before opening it — or dropped right at the
-/// index-0 baseline) and still gets the ordinary `-1`.
+/// sitting on the finale it just confirmed complete and marks the record
+/// `Completed` — the only case where the cursor's own episode genuinely
+/// *is* the watched count, not one short of it.
 pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     let cursor = record.episode_number.unwrap_or(0);
-    let watched = if record.status == Status::Dropped && record.position_seconds > 0.0 {
+    let watched = if record.status == Status::Completed {
         cursor
     } else {
         cursor.saturating_sub(1)
@@ -650,8 +644,8 @@ pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
 /// first entry whose episode number is greater than MAL's watched count; it
 /// never reorders the list. The cursor moves only when that entry is later
 /// than the currently stored file, so sync can never regress local progress.
-/// Paused records stay paused, and dropped records remain deliberate dead
-/// ends. If the next episode is not on disk yet, the record is left alone;
+/// Paused records stay paused, and dropped and completed records remain
+/// deliberate dead ends. If the next episode is not on disk yet, the record is left alone;
 /// the retained `mal_episode_awareness` lets a later sync try again after new
 /// files arrive.
 fn advance_local_cursor(
@@ -669,7 +663,10 @@ fn advance_local_cursor(
     else {
         return false;
     };
-    if state.series[record_index].status == Status::Dropped {
+    if matches!(
+        state.series[record_index].status,
+        Status::Dropped | Status::Completed
+    ) {
         return false;
     }
 
@@ -899,11 +896,11 @@ pub struct SeriesOutcome {
 
 /// Returns the state records eligible for a MAL progress merge.
 ///
-/// Pausing is an explicit request to preserve a series' local progress
-/// without MAL changing it (and without that stale local cursor changing
-/// MAL). An orphaned record is inert everywhere outside `doctor`, so its
-/// series directory must also exist at sync time. Dropped records remain
-/// eligible when their directory is still present.
+/// Pausing or dropping is an explicit request to preserve a series' local
+/// progress without MAL changing it (and without that stale local cursor
+/// changing MAL). An orphaned record is inert everywhere outside `doctor`,
+/// so its series directory must also exist at sync time. Completed records
+/// stay eligible so the finished series reaches MAL.
 pub fn eligible_targets(
     state: &State,
     config: &Config,
@@ -913,7 +910,7 @@ pub fn eligible_targets(
         .series
         .iter()
         .filter(|record| {
-            record.status != Status::Paused
+            !matches!(record.status, Status::Paused | Status::Dropped)
                 && config.roots.paths.contains(&record.root)
                 && expand_tilde(Path::new(&record.root), home)
                     .join(&record.name)
@@ -927,7 +924,7 @@ pub fn eligible_targets(
 /// this phase's own instructions: attempt linking first if not already
 /// linked, then merge if linked; one series failing never aborts the rest.
 /// `targets` is expected to come from [`eligible_targets`]: a never-started
-/// series has no record, while paused and orphaned records are deliberately
+/// series has no record, while paused, dropped and orphaned records are deliberately
 /// excluded before this network-facing layer runs.
 ///
 /// The bulk list (needed only for not-yet-linked series) is fetched **at
@@ -987,9 +984,9 @@ fn run_sync_on_date(
             .find(root, name)
             .map(local_effective_episode)
             .unwrap_or(0);
-        let local_finished = state.find(root, name).is_some_and(|record| {
-            record.status == Status::Dropped && record.position_seconds > 0.0
-        });
+        let local_finished = state
+            .find(root, name)
+            .is_some_and(|record| record.status == Status::Completed);
 
         let mal_id = match state.find_mal_link(root, name).map(|l| l.mal_id) {
             Some(id) => id,
@@ -1411,23 +1408,37 @@ mod tests {
     }
 
     #[test]
-    fn local_effective_uses_cursor_as_is_when_dropped_on_a_completed_finale() {
+    fn local_effective_uses_cursor_as_is_when_completed_on_the_finale() {
         // The apply_completion_advance terminal case: no next episode, so
         // reconcile leaves the cursor sitting on the finale it just
-        // confirmed complete (a real, nonzero position) and transitions
-        // straight to Dropped. That finale genuinely was watched in full.
+        // confirmed complete. That finale genuinely was watched in full.
         let mut record = base_record();
-        record.status = Status::Dropped;
-        record.position_seconds = 1380.0; // near-the-end position, not 0
+        record.status = Status::Completed;
+        record.position_seconds = 1380.0;
         assert_eq!(local_effective_episode(&record), 9);
     }
 
     #[test]
-    fn local_effective_still_subtracts_one_when_dropped_at_a_fresh_untouched_cursor() {
-        // Dropped right after an auto-advance to the next (unwatched)
-        // episode, or dropped before ever really opening the cursor episode
-        // — position_seconds == 0.0 means the cursor episode was never
-        // touched, so it still doesn't count as watched.
+    fn local_effective_subtracts_one_when_dropped_mid_episode_one() {
+        // A manual drop two minutes into ep1 never watched ep1.
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.episode_number = Some(1);
+        record.position_seconds = 120.0;
+        assert_eq!(local_effective_episode(&record), 0);
+    }
+
+    #[test]
+    fn local_effective_subtracts_one_when_dropped_late_in_an_episode() {
+        // Position alone never proves the cursor episode finished.
+        let mut record = base_record();
+        record.status = Status::Dropped;
+        record.position_seconds = 1380.0;
+        assert_eq!(local_effective_episode(&record), 8);
+    }
+
+    #[test]
+    fn local_effective_subtracts_one_when_dropped_at_a_fresh_untouched_cursor() {
         let mut record = base_record();
         record.status = Status::Dropped;
         record.position_seconds = 0.0;
@@ -1535,7 +1546,7 @@ mod tests {
     fn paused_and_orphaned_series_are_excluded_from_sync_targets() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
-        for name in ["Watching", "Local Rewatch", "Finished"] {
+        for name in ["Watching", "Local Rewatch", "Abandoned", "Finished"] {
             fs::create_dir_all(root.join(name)).unwrap();
         }
         let root_string = root.to_string_lossy().into_owned();
@@ -1553,15 +1564,20 @@ mod tests {
 
         let mut dropped = base_record();
         dropped.root.clone_from(&root_string);
-        dropped.name = "Finished".to_string();
+        dropped.name = "Abandoned".to_string();
         dropped.status = Status::Dropped;
+
+        let mut completed = base_record();
+        completed.root.clone_from(&root_string);
+        completed.name = "Finished".to_string();
+        completed.status = Status::Completed;
 
         let mut orphaned = base_record();
         orphaned.root.clone_from(&root_string);
         orphaned.name = "Deleted".to_string();
 
         let state = State {
-            series: vec![in_progress, paused, dropped, orphaned],
+            series: vec![in_progress, paused, dropped, completed, orphaned],
             mal_links: Vec::new(),
         };
 
@@ -2275,14 +2291,14 @@ mod tests {
     }
 
     #[test]
-    fn run_sync_dropped_finale_pushes_cursor_and_completes_the_mal_entry() {
+    fn run_sync_completed_finale_pushes_cursor_and_completes_the_mal_entry() {
         let client = FakeClient::new();
         client.push_status_response(
             200,
             r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
         );
         let mut record = base_record();
-        record.status = Status::Dropped;
+        record.status = Status::Completed;
         record.episode_number = Some(12);
         record.position_seconds = 1400.0;
         let mut state = linked_state(record);
@@ -2304,16 +2320,16 @@ mod tests {
     }
 
     #[test]
-    fn run_sync_dropped_untouched_cursor_pushes_cursor_minus_one_and_no_status() {
+    fn run_sync_dropped_mid_episode_one_never_completes_or_pushes_to_mal() {
         let client = FakeClient::new();
         client.push_status_response(
             200,
-            r#"{"id":42,"title":"T","my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+            r#"{"id":42,"title":"T","num_episodes":12,"my_list_status":{"status":"plan_to_watch","num_episodes_watched":0}}"#,
         );
         let mut record = base_record();
         record.status = Status::Dropped;
-        record.episode_number = Some(12);
-        record.position_seconds = 0.0;
+        record.episode_number = Some(1);
+        record.position_seconds = 120.0;
         let mut state = linked_state(record);
 
         let outcomes = run_one_linked(&client, &mut state);
@@ -2322,13 +2338,10 @@ mod tests {
             outcomes[0].kind,
             OutcomeKind::Merged {
                 mal_id: 42,
-                action: MergeAction::Push(11)
+                action: MergeAction::NoOp
             }
         );
-        assert_eq!(
-            *client.patch_calls.borrow(),
-            one_patch("num_watched_episodes=11")
-        );
+        assert_eq!(*client.patch_calls.borrow(), Vec::new());
     }
 
     #[test]
