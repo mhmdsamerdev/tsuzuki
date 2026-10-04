@@ -1,0 +1,9 @@
+src/main.rs:84:5: replace dispatch -> ExitCode with Default::default()
+src/main.rs:100:43: replace match guard paths.is_empty() with true in dispatch
+src/main.rs:100:43: replace match guard paths.is_empty() with false in dispatch
+src/main.rs:133:5: replace add_command -> ExitCode with Default::default()
+src/main.rs:164:5: replace exit_code -> ExitCode with Default::default()
+src/main.rs:184:5: replace exclude_command -> ExitCode with Default::default()
+src/main.rs:779:5: replace pause_command -> ExitCode with Default::default()
+src/main.rs:802:5: replace drop_command -> ExitCode with Default::default()
+src/main.rs:836:5: replace transition_series -> ExitCode with Default::default()

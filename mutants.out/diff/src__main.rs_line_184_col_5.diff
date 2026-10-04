@@ -1,0 +1,68 @@
+--- src/main.rs
++++ replace exclude_command -> ExitCode with Default::default()
+@@ -176,64 +176,17 @@
+ /// failing path doesn't stop the rest; config is written once, and the
+ /// per-path lines are printed only after that write succeeds.
+ fn exclude_command(
+     paths: &[String],
+     root: Option<&Path>,
+     config: &mut Config,
+     config_path: &Path,
+ ) -> ExitCode {
+-    let mut lines = Vec::new();
+-    let mut changed = false;
+-    let mut failed = false;
+-    for path in paths {
+-        match exclude::exclude(config, Path::new(path), root) {
+-            Ok(exclude::ExcludeOutcome::AlreadyExcluded {
+-                root,
+-                relative_path,
+-            }) => {
+-                lines.push((
+-                    format!("\"{relative_path}\""),
+-                    format!("already excluded (under {root})"),
+-                ));
+-            }
+-            Ok(exclude::ExcludeOutcome::Excluded {
+-                root,
+-                relative_path,
+-            }) => {
+-                changed = true;
+-                lines.push((
+-                    format!("\"{relative_path}\""),
+-                    format!("excluded (under {root})"),
+-                ));
+-            }
+-            Err(exclude::ExcludeError::Ambiguous {
+-                relative_path,
+-                matches,
+-            }) => {
+-                let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();
+-                print_ambiguous(&relative_path, "exclude", &roots);
+-                failed = true;
+-            }
+-            Err(e) => {
+-                fail(&e.to_string());
+-                failed = true;
+-            }
+-        }
+-    }
+-    if changed && let Err(e) = config::write(config_path, config) {
+-        return fail(&format!(
+-            "could not write config at {}: {e}",
+-            config_path.display()
+-        ));
+-    }
+-    for (subject, result) in &lines {
+-        confirm(subject, result);
+-    }
+-    exit_code(failed)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Bare `tsuzuki exclude` (no path) — lists Anitomy-suggested OVA/Special/
+ /// Movie/etc candidates plus the exact `tsuzuki exclude "<path>"` command
+ /// for each (CLAUDE.md's "Anitomy-candidate confirmation stays list-only,
+ /// not interactive", design.md §5). Never mutates `config` or excludes
+ /// anything itself — confirming a candidate is a separate, explicit
+ /// re-invocation of `exclude` with a path.

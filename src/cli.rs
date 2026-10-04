@@ -33,10 +33,11 @@ pub enum Command {
     /// List all tracked series and their progress/status
     List,
 
-    /// Register a tracked root
+    /// Register one or more tracked roots
     Add {
-        /// Directory to track; its immediate children become series
-        path: PathBuf,
+        /// Directories to track; their immediate children become series
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
     },
 
     /// List series outside the automatic resume picker (never-started,
@@ -52,10 +53,11 @@ pub enum Command {
         root: Option<PathBuf>,
     },
 
-    /// Remove a series from the resume picker, keeping its saved position
+    /// Remove series from the resume picker, keeping their saved positions
     Pause {
-        /// Series name (a tracked root's immediate child directory name)
-        series: String,
+        /// Series names (a tracked root's immediate child directory names)
+        #[arg(required = true)]
+        series: Vec<String>,
 
         /// Tracked root to resolve `series` against, when it exists under
         /// more than one
@@ -63,10 +65,11 @@ pub enum Command {
         root: Option<PathBuf>,
     },
 
-    /// Reset a series' progress; it reappears in `start` as if new
+    /// Reset series' progress; they reappear in `start` as if new
     Drop {
-        /// Series name (a tracked root's immediate child directory name)
-        series: String,
+        /// Series names (a tracked root's immediate child directory names)
+        #[arg(required = true)]
+        series: Vec<String>,
 
         /// Tracked root to resolve `series` against, when it exists under
         /// more than one
@@ -74,13 +77,13 @@ pub enum Command {
         root: Option<PathBuf>,
     },
 
-    /// Exclude a file or directory from ordering. Bare invocation surfaces
+    /// Exclude files or directories from ordering. Bare invocation surfaces
     /// Anitomy-suggested candidates for confirmation
     Exclude {
-        /// Path relative to a tracked root; omit to see suggested candidates
-        path: Option<String>,
+        /// Paths relative to a tracked root; omit to see suggested candidates
+        paths: Vec<String>,
 
-        /// Tracked root to resolve `path` against, when it exists under
+        /// Tracked root to resolve `paths` against, when they exist under
         /// more than one (see the ambiguous-match error for the exact
         /// invocation to use)
         #[arg(long)]

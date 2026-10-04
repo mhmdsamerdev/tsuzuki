@@ -1,0 +1,62 @@
+--- src/main.rs
++++ replace dispatch -> ExitCode with Default::default()
+@@ -76,58 +76,17 @@
+ fn dispatch(
+     command: Command,
+     config: &mut Config,
+     config_path: &Path,
+     state_path: &Path,
+     home: Option<&Path>,
+     is_tty: bool,
+ ) -> ExitCode {
+-    match command {
+-        Command::Resume { series, root } => {
+-            resume_command(series, root, config, state_path, home, is_tty)
+-        }
+-        Command::Status => status_command(config, state_path, home),
+-        Command::List => list_command(config, state_path, home),
+-        Command::Add { paths } => add_command(&paths, config, config_path),
+-        Command::Start { series, root } => {
+-            start_command(series, root, config, state_path, home, is_tty)
+-        }
+-        Command::Pause { series, root } => {
+-            pause_command(&series, root.as_deref(), config, state_path, home)
+-        }
+-        Command::Drop { series, root } => {
+-            drop_command(&series, root.as_deref(), config, state_path, home)
+-        }
+-        Command::Exclude { paths, .. } if paths.is_empty() => {
+-            suggest_candidates_command(config);
+-            ExitCode::SUCCESS
+-        }
+-        Command::Exclude { paths, root } => {
+-            exclude_command(&paths, root.as_deref(), config, config_path)
+-        }
+-        Command::Sync { action } => match action {
+-            None => sync_command(config, state_path, home),
+-            Some(SyncCommand::Login) => sync_login_command(config),
+-            Some(SyncCommand::Link {
+-                series,
+-                mal_id,
+-                root,
+-            }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
+-        },
+-        Command::Config { action } => match action {
+-            None => config_show_command(config, config_path),
+-            Some(ConfigCommand::Edit) => config_edit_command(config_path),
+-        },
+-        Command::Doctor {
+-            fix,
+-            forget_orphans,
+-        } => doctor_command(fix, forget_orphans, config, state_path, home),
+-        Command::Update => update_command(),
+-    }
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `tsuzuki add <path>...` — validates, checks idempotency, and persists new
+ /// tracked roots (CLAUDE.md's "`tsuzuki add` validation and idempotency").
+ /// A failing path doesn't stop the rest; config is written once, and the
+ /// per-path lines are printed only after that write succeeds.
+ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+     let mut lines = Vec::new();

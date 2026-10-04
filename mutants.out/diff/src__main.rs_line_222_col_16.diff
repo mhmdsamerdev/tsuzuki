@@ -1,0 +1,21 @@
+--- src/main.rs
++++ replace && with || in exclude_command
+@@ -214,17 +214,17 @@
+                 failed = true;
+             }
+             Err(e) => {
+                 fail(&e.to_string());
+                 failed = true;
+             }
+         }
+     }
+-    if changed && let Err(e) = config::write(config_path, config) {
++    if changed || /* ~ changed by cargo-mutants ~ */ let Err(e) = config::write(config_path, config) {
+         return fail(&format!(
+             "could not write config at {}: {e}",
+             config_path.display()
+         ));
+     }
+     for (subject, result) in &lines {
+         confirm(subject, result);
+     }

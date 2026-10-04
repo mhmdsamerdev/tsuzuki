@@ -1251,3 +1251,274 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
     assert!(state_after.contains("600"), "got:\n{state_after}");
     assert!(state_after.contains("ep01.mkv"), "got:\n{state_after}");
 }
+
+// ---------------------------------------------------------------------
+// 16. `add`, `exclude`, `pause` and `drop` take several arguments: each is
+//     handled independently, a failing one never blocks the rest, and the
+//     exit code is non-zero only if something failed.
+// ---------------------------------------------------------------------
+
+/// Tracks `Anime/{names}` with one episode each and persists an
+/// `in_progress` record per series through the real `list` reconcile.
+fn start_series(home: &Path, names: &[&str]) -> PathBuf {
+    let anime_root = home.join("Anime");
+    for (i, name) in names.iter().enumerate() {
+        let file = anime_root.join(name).join("ep01.mkv");
+        touch(&file);
+        if i == 0 {
+            add_root(home, &anime_root);
+        }
+        write_watch_later(home, &format!("entry-{i}"), &file, 300.0);
+    }
+    run_ok(home, &["list"]);
+    anime_root
+}
+
+fn count_status(home: &Path, status: &str) -> usize {
+    fs::read_to_string(state_path(home))
+        .unwrap()
+        .matches(&format!("status = \"{status}\""))
+        .count()
+}
+
+#[test]
+fn pause_multiple_series_pauses_each_and_persists_both() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    start_series(home, &["Alpha", "Beta"]);
+
+    let out = run_ok(home, &["pause", "Alpha", "Beta"]);
+    assert_eq!(out, "✓ \"Alpha\" — paused\n✓ \"Beta\" — paused\n");
+    assert_eq!(count_status(home, "paused"), 2);
+    assert_eq!(count_status(home, "in_progress"), 0);
+
+    let again = run_ok(home, &["pause", "Alpha", "Beta"]);
+    assert_eq!(
+        again,
+        "✓ \"Alpha\" — already paused\n✓ \"Beta\" — already paused\n"
+    );
+}
+
+#[test]
+fn drop_multiple_series_drops_each_and_persists_both() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    start_series(home, &["Alpha", "Beta"]);
+
+    let out = run_ok(home, &["drop", "Alpha", "Beta"]);
+    assert_eq!(out, "✓ \"Alpha\" — dropped\n✓ \"Beta\" — dropped\n");
+    assert_eq!(count_status(home, "dropped"), 2);
+}
+
+#[test]
+fn pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    start_series(home, &["Alpha", "Beta"]);
+
+    let out = run(home, &["pause", "Alpha", "Nope", "Beta"]);
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        "✓ \"Alpha\" — paused\n✓ \"Beta\" — paused\n"
+    );
+    assert_eq!(stderr_of(&out), "error: no tracked series named \"Nope\"\n");
+    assert_eq!(count_status(home, "paused"), 2);
+}
+
+#[test]
+fn drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let anime_root = start_series(home, &["Alpha", "Beta"]);
+    touch(&anime_root.join("Fresh").join("ep01.mkv"));
+
+    let out = run(home, &["drop", "Alpha", "Fresh", "Beta"]);
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        "✓ \"Alpha\" — dropped\n✓ \"Beta\" — dropped\n"
+    );
+    assert_eq!(
+        stderr_of(&out),
+        "error: no progress to act on for this series — it was never started\n"
+    );
+    assert_eq!(count_status(home, "dropped"), 2);
+}
+
+#[test]
+fn pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_position() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    start_series(home, &["Alpha", "Beta"]);
+    run_ok(home, &["drop", "Alpha"]);
+    let position_before = fs::read_to_string(state_path(home))
+        .unwrap()
+        .matches("300")
+        .count();
+
+    let out = run(home, &["pause", "Alpha", "Beta"]);
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "✓ \"Beta\" — paused\n");
+    assert_eq!(
+        stderr_of(&out),
+        "error: cannot pause a series that's currently dropped\n"
+    );
+    assert_eq!(count_status(home, "dropped"), 1);
+    assert_eq!(count_status(home, "paused"), 1);
+    let position_after = fs::read_to_string(state_path(home))
+        .unwrap()
+        .matches("300")
+        .count();
+    assert_eq!(position_before, position_after);
+}
+
+#[test]
+fn pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root_a = home.join("Anime");
+    let root_b = home.join("MoreAnime");
+    let overlap_a = root_a.join("Overlap").join("ep01.mkv");
+    let overlap_b = root_b.join("Overlap").join("ep01.mkv");
+    let solo = root_a.join("Solo").join("ep01.mkv");
+    for f in [&overlap_a, &overlap_b, &solo] {
+        touch(f);
+    }
+    add_root(home, &root_a);
+    add_root(home, &root_b);
+    write_watch_later(home, "entry-a", &overlap_a, 300.0);
+    write_watch_later(home, "entry-b", &overlap_b, 400.0);
+    write_watch_later(home, "entry-c", &solo, 500.0);
+    run_ok(home, &["list"]);
+
+    let out = run(home, &["pause", "Overlap", "Solo"]);
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "✓ \"Solo\" — paused\n");
+    assert!(
+        stderr_of(&out).starts_with("✗ \"Overlap\" is ambiguous — tracked under 2 roots\n"),
+        "got: {}",
+        stderr_of(&out)
+    );
+    assert_eq!(count_status(home, "paused"), 1);
+    assert_eq!(count_status(home, "in_progress"), 2);
+}
+
+#[test]
+fn pause_without_series_is_a_usage_error() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let out = run(home_dir.path(), &["pause"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let a = home.join("A");
+    let b = home.join("B");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let (a_s, b_s) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+    let out = run_ok(home, &["add", a_s, b_s]);
+    assert_eq!(out, format!("✓ {a_s} — added\n✓ {b_s} — added\n"));
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    assert!(
+        config.contains(a_s) && config.contains(b_s),
+        "got: {config}"
+    );
+
+    let again = run_ok(home, &["add", a_s, b_s]);
+    assert_eq!(
+        again,
+        format!("✓ {a_s} — already tracked\n✓ {b_s} — already tracked\n")
+    );
+}
+
+#[test]
+fn add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let a = home.join("A");
+    let b = home.join("B");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let missing = home.join("Missing");
+    let (a_s, b_s) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+    let out = run(home, &["add", a_s, missing.to_str().unwrap(), b_s]);
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!("✓ {a_s} — added\n✓ {b_s} — added\n")
+    );
+    assert!(
+        stderr_of(&out).starts_with("error: "),
+        "got: {}",
+        stderr_of(&out)
+    );
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    assert!(
+        config.contains(a_s) && config.contains(b_s),
+        "got: {config}"
+    );
+    assert!(!config.contains("Missing"), "got: {config}");
+}
+
+#[test]
+fn exclude_multiple_paths_excludes_each_and_rejects_only_the_absolute_one() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let anime_root = home.join("Anime");
+    for rel in ["Show/ova1.mkv", "Show/ova2.mkv", "Show/ep01.mkv"] {
+        touch(&anime_root.join(rel));
+    }
+    add_root(home, &anime_root);
+    let root_s = anime_root.to_str().unwrap();
+
+    let out = run(
+        home,
+        &["exclude", "Show/ova1.mkv", "/abs/path.mkv", "Show/ova2.mkv"],
+    );
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "✓ \"Show/ova1.mkv\" — excluded (under {root_s})\n✓ \"Show/ova2.mkv\" — excluded (under {root_s})\n"
+        )
+    );
+    assert!(
+        stderr_of(&out).starts_with("error: "),
+        "got: {}",
+        stderr_of(&out)
+    );
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    assert!(config.contains("Show/ova1.mkv") && config.contains("Show/ova2.mkv"));
+    assert!(!config.contains("/abs/path.mkv"), "got: {config}");
+
+    let again = run_ok(home, &["exclude", "Show/ova1.mkv", "Show/ova2.mkv"]);
+    assert_eq!(
+        again,
+        format!(
+            "✓ \"Show/ova1.mkv\" — already excluded (under {root_s})\n✓ \"Show/ova2.mkv\" — already excluded (under {root_s})\n"
+        )
+    );
+}
+
+#[test]
+fn exclude_without_paths_still_lists_candidates_and_never_mutates_config() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let anime_root = home.join("Anime");
+    touch(&anime_root.join("Show").join("ep01.mkv"));
+    add_root(home, &anime_root);
+    let before = fs::read_to_string(config_path(home)).unwrap();
+
+    let out = run_ok(home, &["exclude"]);
+    assert_eq!(
+        out,
+        "No Anitomy-suggested candidates found under any tracked root.\n"
+    );
+    assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
+}

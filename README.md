@@ -75,10 +75,10 @@ that noticeably improves how well the tool works day to day.
 | `tsuzuki start` | Nothing in progress? See what's available and begin. |
 | `tsuzuki status` | What's currently in progress. |
 | `tsuzuki list` | Everything you're tracking, at a glance. |
-| `tsuzuki pause <series>` | Set something aside without losing your place. |
-| `tsuzuki drop <series>` | Done with it, or starting fresh. |
-| `tsuzuki add <path>` | Start tracking a folder. |
-| `tsuzuki exclude <path>` | Keep specials/OVAs out of the episode order. |
+| `tsuzuki pause <series>...` | Set something aside without losing your place. |
+| `tsuzuki drop <series>...` | Done with it, or starting fresh. |
+| `tsuzuki add <path>...` | Start tracking a folder. |
+| `tsuzuki exclude <path>...` | Keep specials/OVAs out of the episode order. |
 | `tsuzuki config` | See and edit your settings. |
 | `tsuzuki doctor` | Make sure everything's set up right. |
 

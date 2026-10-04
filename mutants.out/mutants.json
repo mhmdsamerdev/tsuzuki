@@ -1,0 +1,386 @@
+[
+  {
+    "diff": "--- src/main.rs\n+++ replace dispatch -> ExitCode with Default::default()\n@@ -76,58 +76,17 @@\n fn dispatch(\n     command: Command,\n     config: &mut Config,\n     config_path: &Path,\n     state_path: &Path,\n     home: Option<&Path>,\n     is_tty: bool,\n ) -> ExitCode {\n-    match command {\n-        Command::Resume { series, root } => {\n-            resume_command(series, root, config, state_path, home, is_tty)\n-        }\n-        Command::Status => status_command(config, state_path, home),\n-        Command::List => list_command(config, state_path, home),\n-        Command::Add { paths } => add_command(&paths, config, config_path),\n-        Command::Start { series, root } => {\n-            start_command(series, root, config, state_path, home, is_tty)\n-        }\n-        Command::Pause { series, root } => {\n-            pause_command(&series, root.as_deref(), config, state_path, home)\n-        }\n-        Command::Drop { series, root } => {\n-            drop_command(&series, root.as_deref(), config, state_path, home)\n-        }\n-        Command::Exclude { paths, .. } if paths.is_empty() => {\n-            suggest_candidates_command(config);\n-            ExitCode::SUCCESS\n-        }\n-        Command::Exclude { paths, root } => {\n-            exclude_command(&paths, root.as_deref(), config, config_path)\n-        }\n-        Command::Sync { action } => match action {\n-            None => sync_command(config, state_path, home),\n-            Some(SyncCommand::Login) => sync_login_command(config),\n-            Some(SyncCommand::Link {\n-                series,\n-                mal_id,\n-                root,\n-            }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),\n-        },\n-        Command::Config { action } => match action {\n-            None => config_show_command(config, config_path),\n-            Some(ConfigCommand::Edit) => config_edit_command(config_path),\n-        },\n-        Command::Doctor {\n-            fix,\n-            forget_orphans,\n-        } => doctor_command(fix, forget_orphans, config, state_path, home),\n-        Command::Update => update_command(),\n-    }\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// `tsuzuki add <path>...` — validates, checks idempotency, and persists new\n /// tracked roots (CLAUDE.md's \"`tsuzuki add` validation and idempotency\").\n /// A failing path doesn't stop the rest; config is written once, and the\n /// per-path lines are printed only after that write succeeds.\n fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {\n     let mut lines = Vec::new();\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "dispatch",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 126
+        },
+        "start": {
+          "column": 1,
+          "line": 70
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:84:5: replace dispatch -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 125
+      },
+      "start": {
+        "column": 5,
+        "line": 84
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace match guard paths.is_empty() with true in dispatch\n@@ -92,17 +92,17 @@\n             start_command(series, root, config, state_path, home, is_tty)\n         }\n         Command::Pause { series, root } => {\n             pause_command(&series, root.as_deref(), config, state_path, home)\n         }\n         Command::Drop { series, root } => {\n             drop_command(&series, root.as_deref(), config, state_path, home)\n         }\n-        Command::Exclude { paths, .. } if paths.is_empty() => {\n+        Command::Exclude { paths, .. } if true /* ~ changed by cargo-mutants ~ */ => {\n             suggest_candidates_command(config);\n             ExitCode::SUCCESS\n         }\n         Command::Exclude { paths, root } => {\n             exclude_command(&paths, root.as_deref(), config, config_path)\n         }\n         Command::Sync { action } => match action {\n             None => sync_command(config, state_path, home),\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "dispatch",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 126
+        },
+        "start": {
+          "column": 1,
+          "line": 70
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "src/main.rs:100:43: replace match guard paths.is_empty() with true in dispatch",
+    "package": "tsuzuki",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 100
+      },
+      "start": {
+        "column": 43,
+        "line": 100
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace match guard paths.is_empty() with false in dispatch\n@@ -92,17 +92,17 @@\n             start_command(series, root, config, state_path, home, is_tty)\n         }\n         Command::Pause { series, root } => {\n             pause_command(&series, root.as_deref(), config, state_path, home)\n         }\n         Command::Drop { series, root } => {\n             drop_command(&series, root.as_deref(), config, state_path, home)\n         }\n-        Command::Exclude { paths, .. } if paths.is_empty() => {\n+        Command::Exclude { paths, .. } if false /* ~ changed by cargo-mutants ~ */ => {\n             suggest_candidates_command(config);\n             ExitCode::SUCCESS\n         }\n         Command::Exclude { paths, root } => {\n             exclude_command(&paths, root.as_deref(), config, config_path)\n         }\n         Command::Sync { action } => match action {\n             None => sync_command(config, state_path, home),\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "dispatch",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 126
+        },
+        "start": {
+          "column": 1,
+          "line": 70
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "src/main.rs:100:43: replace match guard paths.is_empty() with false in dispatch",
+    "package": "tsuzuki",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 100
+      },
+      "start": {
+        "column": 43,
+        "line": 100
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace add_command -> ExitCode with Default::default()\n@@ -125,44 +125,17 @@\n     }\n }\n \n /// `tsuzuki add <path>...` — validates, checks idempotency, and persists new\n /// tracked roots (CLAUDE.md's \"`tsuzuki add` validation and idempotency\").\n /// A failing path doesn't stop the rest; config is written once, and the\n /// per-path lines are printed only after that write succeeds.\n fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {\n-    let mut lines = Vec::new();\n-    let mut changed = false;\n-    let mut failed = false;\n-    for path in paths {\n-        match roots::add_root(config, path) {\n-            Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {\n-                lines.push((as_typed.display().to_string(), \"already tracked\"));\n-            }\n-            Ok(roots::AddOutcome::Added(as_typed)) => {\n-                changed = true;\n-                lines.push((as_typed.display().to_string(), \"added\"));\n-            }\n-            Err(e) => {\n-                fail(&e.to_string());\n-                failed = true;\n-            }\n-        }\n-    }\n-    if changed && let Err(e) = config::write(config_path, config) {\n-        return fail(&format!(\n-            \"could not write config at {}: {e}\",\n-            config_path.display()\n-        ));\n-    }\n-    for (subject, result) in &lines {\n-        confirm(subject, result);\n-    }\n-    exit_code(failed)\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n fn exit_code(failed: bool) -> ExitCode {\n     if failed {\n         ExitCode::FAILURE\n     } else {\n         ExitCode::SUCCESS\n     }\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "add_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 161
+        },
+        "start": {
+          "column": 1,
+          "line": 128
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:133:5: replace add_command -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 160
+      },
+      "start": {
+        "column": 5,
+        "line": 133
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace && with || in add_command\n@@ -143,17 +143,17 @@\n                 lines.push((as_typed.display().to_string(), \"added\"));\n             }\n             Err(e) => {\n                 fail(&e.to_string());\n                 failed = true;\n             }\n         }\n     }\n-    if changed && let Err(e) = config::write(config_path, config) {\n+    if changed || /* ~ changed by cargo-mutants ~ */ let Err(e) = config::write(config_path, config) {\n         return fail(&format!(\n             \"could not write config at {}: {e}\",\n             config_path.display()\n         ));\n     }\n     for (subject, result) in &lines {\n         confirm(subject, result);\n     }\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "add_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 161
+        },
+        "start": {
+          "column": 1,
+          "line": 128
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/main.rs:151:16: replace && with || in add_command",
+    "package": "tsuzuki",
+    "replacement": "||",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 151
+      },
+      "start": {
+        "column": 16,
+        "line": 151
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace exit_code -> ExitCode with Default::default()\n@@ -156,21 +156,17 @@\n     }\n     for (subject, result) in &lines {\n         confirm(subject, result);\n     }\n     exit_code(failed)\n }\n \n fn exit_code(failed: bool) -> ExitCode {\n-    if failed {\n-        ExitCode::FAILURE\n-    } else {\n-        ExitCode::SUCCESS\n-    }\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// `tsuzuki exclude <path>... [--root <root>]` — resolves each path against\n /// tracked roots and persists the exclusions (CLAUDE.md's \"Exclusion\n /// persistence and disambiguation\"). Ambiguous matches and validation\n /// failures print `ExcludeError`'s `Display` output as-is — it already\n /// includes the exact `--root` re-invocations design.md §3 specifies. A\n /// failing path doesn't stop the rest; config is written once, and the\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "exit_code",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 169
+        },
+        "start": {
+          "column": 1,
+          "line": 163
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:164:5: replace exit_code -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 168
+      },
+      "start": {
+        "column": 5,
+        "line": 164
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace exclude_command -> ExitCode with Default::default()\n@@ -176,64 +176,17 @@\n /// failing path doesn't stop the rest; config is written once, and the\n /// per-path lines are printed only after that write succeeds.\n fn exclude_command(\n     paths: &[String],\n     root: Option<&Path>,\n     config: &mut Config,\n     config_path: &Path,\n ) -> ExitCode {\n-    let mut lines = Vec::new();\n-    let mut changed = false;\n-    let mut failed = false;\n-    for path in paths {\n-        match exclude::exclude(config, Path::new(path), root) {\n-            Ok(exclude::ExcludeOutcome::AlreadyExcluded {\n-                root,\n-                relative_path,\n-            }) => {\n-                lines.push((\n-                    format!(\"\\\"{relative_path}\\\"\"),\n-                    format!(\"already excluded (under {root})\"),\n-                ));\n-            }\n-            Ok(exclude::ExcludeOutcome::Excluded {\n-                root,\n-                relative_path,\n-            }) => {\n-                changed = true;\n-                lines.push((\n-                    format!(\"\\\"{relative_path}\\\"\"),\n-                    format!(\"excluded (under {root})\"),\n-                ));\n-            }\n-            Err(exclude::ExcludeError::Ambiguous {\n-                relative_path,\n-                matches,\n-            }) => {\n-                let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();\n-                print_ambiguous(&relative_path, \"exclude\", &roots);\n-                failed = true;\n-            }\n-            Err(e) => {\n-                fail(&e.to_string());\n-                failed = true;\n-            }\n-        }\n-    }\n-    if changed && let Err(e) = config::write(config_path, config) {\n-        return fail(&format!(\n-            \"could not write config at {}: {e}\",\n-            config_path.display()\n-        ));\n-    }\n-    for (subject, result) in &lines {\n-        confirm(subject, result);\n-    }\n-    exit_code(failed)\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// Bare `tsuzuki exclude` (no path) — lists Anitomy-suggested OVA/Special/\n /// Movie/etc candidates plus the exact `tsuzuki exclude \"<path>\"` command\n /// for each (CLAUDE.md's \"Anitomy-candidate confirmation stays list-only,\n /// not interactive\", design.md §5). Never mutates `config` or excludes\n /// anything itself — confirming a candidate is a separate, explicit\n /// re-invocation of `exclude` with a path.\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "exclude_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 232
+        },
+        "start": {
+          "column": 1,
+          "line": 171
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:184:5: replace exclude_command -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 231
+      },
+      "start": {
+        "column": 5,
+        "line": 184
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace && with || in exclude_command\n@@ -214,17 +214,17 @@\n                 failed = true;\n             }\n             Err(e) => {\n                 fail(&e.to_string());\n                 failed = true;\n             }\n         }\n     }\n-    if changed && let Err(e) = config::write(config_path, config) {\n+    if changed || /* ~ changed by cargo-mutants ~ */ let Err(e) = config::write(config_path, config) {\n         return fail(&format!(\n             \"could not write config at {}: {e}\",\n             config_path.display()\n         ));\n     }\n     for (subject, result) in &lines {\n         confirm(subject, result);\n     }\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "exclude_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 232
+        },
+        "start": {
+          "column": 1,
+          "line": 171
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/main.rs:222:16: replace && with || in exclude_command",
+    "package": "tsuzuki",
+    "replacement": "||",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 222
+      },
+      "start": {
+        "column": 16,
+        "line": 222
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace pause_command -> ExitCode with Default::default()\n@@ -771,29 +771,17 @@\n /// `tsuzuki pause <series>... [--root <root>]`.\n fn pause_command(\n     series: &[String],\n     root_arg: Option<&Path>,\n     config: &Config,\n     state_path: &Path,\n     home: Option<&Path>,\n ) -> ExitCode {\n-    transition_series(\n-        series,\n-        root_arg,\n-        config,\n-        state_path,\n-        home,\n-        &Transition {\n-            command_name: \"pause\",\n-            apply: pause_drop::pause,\n-            changed: \"paused\",\n-            already: \"already paused\",\n-        },\n-    )\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// `tsuzuki drop <series>... [--root <root>]`.\n fn drop_command(\n     series: &[String],\n     root_arg: Option<&Path>,\n     config: &Config,\n     state_path: &Path,\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "pause_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 792
+        },
+        "start": {
+          "column": 1,
+          "line": 771
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:779:5: replace pause_command -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 791
+      },
+      "start": {
+        "column": 5,
+        "line": 779
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace drop_command -> ExitCode with Default::default()\n@@ -794,29 +794,17 @@\n /// `tsuzuki drop <series>... [--root <root>]`.\n fn drop_command(\n     series: &[String],\n     root_arg: Option<&Path>,\n     config: &Config,\n     state_path: &Path,\n     home: Option<&Path>,\n ) -> ExitCode {\n-    transition_series(\n-        series,\n-        root_arg,\n-        config,\n-        state_path,\n-        home,\n-        &Transition {\n-            command_name: \"drop\",\n-            apply: pause_drop::drop_series,\n-            changed: \"dropped\",\n-            already: \"already dropped\",\n-        },\n-    )\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// What distinguishes `pause` from `drop` for `transition_series`.\n struct Transition {\n     command_name: &'static str,\n     apply: fn(&mut State, &str, &str) -> Result<pause_drop::Outcome, pause_drop::ActionError>,\n     changed: &'static str,\n     already: &'static str,\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "drop_command",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 815
+        },
+        "start": {
+          "column": 1,
+          "line": 794
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:802:5: replace drop_command -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 814
+      },
+      "start": {
+        "column": 5,
+        "line": 802
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace transition_series -> ExitCode with Default::default()\n@@ -828,59 +828,17 @@\n fn transition_series(\n     series: &[String],\n     root_arg: Option<&Path>,\n     config: &Config,\n     state_path: &Path,\n     home: Option<&Path>,\n     transition: &Transition,\n ) -> ExitCode {\n-    let (mut state, warning) = match reconcile_state(config, state_path, home) {\n-        Ok(v) => v,\n-        Err(code) => return code,\n-    };\n-    if let Some(w) = &warning {\n-        print_scan_warning(w);\n-    }\n-\n-    let mut lines = Vec::new();\n-    let mut changed = false;\n-    let mut failed = false;\n-    for name in series {\n-        let root = match target::resolve_series_root(config, name, root_arg, home) {\n-            Ok(r) => r,\n-            Err(e) => {\n-                print_target_error(&e, transition.command_name);\n-                failed = true;\n-                continue;\n-            }\n-        };\n-        match (transition.apply)(&mut state, &root, name) {\n-            Ok(pause_drop::Outcome::Changed) => {\n-                changed = true;\n-                lines.push((name, transition.changed));\n-            }\n-            Ok(pause_drop::Outcome::NoOp) => lines.push((name, transition.already)),\n-            Err(e) => {\n-                fail(&e.to_string());\n-                failed = true;\n-            }\n-        }\n-    }\n-\n-    if changed && let Err(e) = state::write(state_path, &state) {\n-        return fail(&format!(\n-            \"could not write state at {}: {e}\",\n-            state_path.display()\n-        ));\n-    }\n-    for (name, result) in lines {\n-        confirm(&format!(\"\\\"{name}\\\"\"), result);\n-    }\n-    exit_code(failed)\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n // --- Phase 8a: MAL OAuth login ---\n \n /// `tsuzuki sync login` — design.md §7's one-time OAuth authorization,\n /// Authorization Code grant with PKCE (`code_challenge_method=plain`, MAL\n /// doesn't support S256). Orchestration lives here, matching this project's\n /// existing convention (`doctor_command` does the same): `mal.rs` exposes\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "transition_series",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 879
+        },
+        "start": {
+          "column": 1,
+          "line": 825
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/main.rs:836:5: replace transition_series -> ExitCode with Default::default()",
+    "package": "tsuzuki",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 878
+      },
+      "start": {
+        "column": 5,
+        "line": 836
+      }
+    }
+  },
+  {
+    "diff": "--- src/main.rs\n+++ replace && with || in transition_series\n@@ -861,17 +861,17 @@\n             Ok(pause_drop::Outcome::NoOp) => lines.push((name, transition.already)),\n             Err(e) => {\n                 fail(&e.to_string());\n                 failed = true;\n             }\n         }\n     }\n \n-    if changed && let Err(e) = state::write(state_path, &state) {\n+    if changed || /* ~ changed by cargo-mutants ~ */ let Err(e) = state::write(state_path, &state) {\n         return fail(&format!(\n             \"could not write state at {}: {e}\",\n             state_path.display()\n         ));\n     }\n     for (name, result) in lines {\n         confirm(&format!(\"\\\"{name}\\\"\"), result);\n     }\n",
+    "file": "src/main.rs",
+    "function": {
+      "function_name": "transition_series",
+      "return_type": "-> ExitCode",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 879
+        },
+        "start": {
+          "column": 1,
+          "line": 825
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/main.rs:869:16: replace && with || in transition_series",
+    "package": "tsuzuki",
+    "replacement": "||",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 869
+      },
+      "start": {
+        "column": 16,
+        "line": 869
+      }
+    }
+  }
+]

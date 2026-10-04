@@ -1,0 +1,4148 @@
+
+*** src/main.rs:84:5: replace dispatch -> ExitCode with Default::default()
+
+*** mutation diff:
+--- src/main.rs
++++ replace dispatch -> ExitCode with Default::default()
+@@ -76,58 +76,17 @@
+ fn dispatch(
+     command: Command,
+     config: &mut Config,
+     config_path: &Path,
+     state_path: &Path,
+     home: Option<&Path>,
+     is_tty: bool,
+ ) -> ExitCode {
+-    match command {
+-        Command::Resume { series, root } => {
+-            resume_command(series, root, config, state_path, home, is_tty)
+-        }
+-        Command::Status => status_command(config, state_path, home),
+-        Command::List => list_command(config, state_path, home),
+-        Command::Add { paths } => add_command(&paths, config, config_path),
+-        Command::Start { series, root } => {
+-            start_command(series, root, config, state_path, home, is_tty)
+-        }
+-        Command::Pause { series, root } => {
+-            pause_command(&series, root.as_deref(), config, state_path, home)
+-        }
+-        Command::Drop { series, root } => {
+-            drop_command(&series, root.as_deref(), config, state_path, home)
+-        }
+-        Command::Exclude { paths, .. } if paths.is_empty() => {
+-            suggest_candidates_command(config);
+-            ExitCode::SUCCESS
+-        }
+-        Command::Exclude { paths, root } => {
+-            exclude_command(&paths, root.as_deref(), config, config_path)
+-        }
+-        Command::Sync { action } => match action {
+-            None => sync_command(config, state_path, home),
+-            Some(SyncCommand::Login) => sync_login_command(config),
+-            Some(SyncCommand::Link {
+-                series,
+-                mal_id,
+-                root,
+-            }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
+-        },
+-        Command::Config { action } => match action {
+-            None => config_show_command(config, config_path),
+-            Some(ConfigCommand::Edit) => config_edit_command(config_path),
+-        },
+-        Command::Doctor {
+-            fix,
+-            forget_orphans,
+-        } => doctor_command(fix, forget_orphans, config, state_path, home),
+-        Command::Update => update_command(),
+-    }
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `tsuzuki add <path>...` — validates, checks idempotency, and persists new
+ /// tracked roots (CLAUDE.md's "`tsuzuki add` validation and idempotency").
+ /// A failing path doesn't stop the rest; config is written once, and the
+ /// per-path lines are printed only after that write succeeds.
+ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+     let mut lines = Vec::new();
+
+
+*** /home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=tsuzuki@0.1.2
+       Fresh unicode-ident v1.0.24
+       Fresh stable_deref_trait v1.2.1
+       Fresh cfg-if v1.0.4
+       Fresh bitflags v2.13.1
+       Fresh smallvec v1.15.2
+       Fresh autocfg v1.5.1
+       Fresh proc-macro2 v1.0.107
+       Fresh find-msvc-tools v0.1.11
+       Fresh shlex v2.0.1
+       Fresh litemap v0.8.3
+       Fresh version_check v0.9.5
+       Fresh log v0.4.33
+       Fresh quote v1.0.47
+       Fresh libc v0.2.189
+       Fresh cc v1.4.3
+       Fresh writeable v0.6.4
+       Fresh vcpkg v0.2.15
+       Fresh syn v2.0.119
+       Fresh syn v3.0.3
+       Fresh openssl-src v300.6.1+3.6.3
+       Fresh num-traits v0.2.19
+       Fresh pkg-config v0.3.34
+       Fresh utf8_iter v1.0.4
+       Fresh synstructure v0.13.2
+       Fresh zerovec-derive v0.11.5
+       Fresh displaydoc v0.2.7
+       Fresh num-complex v0.4.6
+       Fresh icu_properties_data v2.3.0
+       Fresh icu_normalizer_data v2.3.0
+       Fresh uncased v0.9.10
+       Fresh zerofrom-derive v0.1.7
+       Fresh yoke-derive v0.8.2
+       Fresh siphasher v1.0.3
+       Fresh bytemuck v1.25.2
+       Fresh lazy_static v1.5.0
+       Fresh memchr v2.8.3
+       Fresh zerofrom v0.1.8
+       Fresh symphonia-core v0.6.1
+       Fresh serde_core v1.0.229
+       Fresh regex-lite v0.1.9
+       Fresh utf8parse v0.2.2
+       Fresh percent-encoding v2.3.2
+       Fresh yoke v0.8.3
+       Fresh symphonia-metadata v0.6.1
+       Fresh foreign-types-shared v0.1.1
+       Fresh form_urlencoded v1.2.2
+       Fresh anstyle-parse v1.0.0
+       Fresh zerovec v0.11.7
+       Fresh zerotrie v0.2.5
+       Fresh foreign-types v0.3.2
+       Fresh phf_generator v0.12.1
+       Fresh symphonia-common v0.6.1
+       Fresh tinystr v0.8.4
+       Fresh potential_utf v0.1.6
+       Fresh zerocopy v0.8.56
+       Fresh aho-corasick v1.1.5
+       Fresh openssl-sys v0.9.117
+       Fresh openssl-macros v0.1.1
+       Fresh getrandom v0.2.17
+       Fresh linux-raw-sys v0.12.1
+       Fresh icu_locale_core v2.3.0
+       Fresh icu_collections v2.3.0
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh anstyle-query v1.1.5
+       Fresh regex-syntax v0.8.11
+       Fresh once_cell v1.21.4
+       Fresh colorchoice v1.0.5
+       Fresh anstyle v1.0.14
+       Fresh icu_provider v2.3.0
+       Fresh simd-adler32 v0.3.10
+       Fresh adler2 v2.0.1
+       Fresh regex-automata v0.4.18
+       Fresh anstream v1.0.0
+       Fresh rand_core v0.6.4
+       Fresh rustix v1.1.4
+       Fresh icu_properties v2.3.0
+       Fresh icu_normalizer v2.3.0
+       Fresh miniz_oxide v0.8.9
+       Fresh ppv-lite86 v0.2.21
+       Fresh openssl v0.10.81
+       Fresh phf_macros v0.12.1
+       Fresh crc32fast v1.5.0
+       Fresh getrandom v0.4.3
+       Fresh phf_shared v0.12.1
+       Fresh idna_adapter v1.2.2
+       Fresh unicode-width v0.2.2
+       Fresh heck v0.5.0
+       Fresh strsim v0.11.1
+       Fresh openssl-probe v0.2.1
+       Fresh winnow v1.0.4
+       Fresh fastrand v2.5.0
+       Fresh idna v1.1.0
+       Fresh option-ext v0.2.0
+       Fresh clap_lex v1.1.0
+       Fresh console v0.16.4
+       Fresh tempfile v3.27.0
+       Fresh toml_parser v1.1.3+spec-1.1.0
+       Fresh clap_derive v4.6.4
+       Fresh url v2.5.8
+       Fresh clap_builder v4.6.6
+       Fresh dirs-sys v0.5.0
+       Fresh native-tls v0.2.18
+       Fresh rand_chacha v0.3.1
+       Fresh flate2 v1.1.9
+       Fresh phf v0.12.1
+       Fresh zmij v1.0.23
+       Fresh regex v1.13.1
+       Fresh symphonia-format-mkv v0.6.1
+       Fresh symphonia-format-isomp4 v0.6.1
+       Fresh serde_spanned v1.1.1
+       Fresh toml_datetime v1.1.1+spec-1.1.0
+       Fresh serde_derive v1.0.229
+       Fresh shell-words v1.1.1
+       Fresh base64 v0.22.1
+       Fresh itoa v1.0.18
+       Fresh iana-time-zone v0.1.65
+       Fresh zeroize v1.9.0
+       Fresh toml_writer v1.1.2+spec-1.1.0
+       Fresh serde v1.0.229
+       Fresh serde_json v1.0.151
+       Fresh symphonia v0.6.1
+       Fresh ureq v2.12.1
+       Fresh chrono v0.4.45
+       Fresh dirs v6.0.0
+       Fresh clap v4.6.6
+       Fresh dialoguer v0.12.0
+       Fresh toml v1.1.4+spec-1.1.0
+       Fresh webbrowser v1.2.4
+       Fresh rand v0.8.7
+       Fresh tsuzuki-anitomy v0.1.0 (/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/vendor/anitomy)
+       Fresh natord v1.0.9
+       Dirty tsuzuki v0.1.2 (/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp): the file `src/main.rs` has changed (1791144590.070938422s, 11s after last build at 1791144579.085819938s)
+   Compiling tsuzuki v0.1.2 (/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp)
+     Running `/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name tsuzuki --edition=2024 src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=f45573f9bbc5acca -C extra-filename=-d7105051b3d92596 --out-dir /tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps -C incremental=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/incremental -L dependency=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps --extern chrono=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libchrono-ad40cbaa40210ef4.rlib --extern clap=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libclap-756e4d2eecc1c433.rlib --extern dialoguer=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libdialoguer-05a83a547d7e4425.rlib --extern dirs=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libdirs-74925d238905fca8.rlib --extern native_tls=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libnative_tls-420552df014d0696.rlib --extern natord=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libnatord-995f4af36db94e48.rlib --extern openssl=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libopenssl-0310d2926c605e71.rlib --extern rand=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/librand-d2d897849a853885.rlib --extern serde=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libserde-368a1f797d5a19fa.rlib --extern serde_json=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libserde_json-daf607016eb36342.rlib --extern symphonia=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libsymphonia-d68754c432ae3032.rlib --extern tempfile=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtempfile-9536fa684b3153e7.rlib --extern toml=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtoml-4f30f9c9e5bfd56f.rlib --extern tsuzuki_anitomy=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtsuzuki_anitomy.rlib --extern ureq=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libureq-35327728450517bd.rlib --extern webbrowser=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libwebbrowser-3cb1a2e05f3ee947.rlib -L native=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/build/openssl-sys-7bc074bdd6ac3b64/out/openssl-build/install/lib`
+     Running `/home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name tsuzuki --edition=2024 src/main.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=eba96181b5d6c065 -C extra-filename=-84e7f8ccf549cf5c --out-dir /tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps -C incremental=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/incremental -L dependency=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps --extern chrono=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libchrono-ad40cbaa40210ef4.rlib --extern clap=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libclap-756e4d2eecc1c433.rlib --extern dialoguer=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libdialoguer-05a83a547d7e4425.rlib --extern dirs=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libdirs-74925d238905fca8.rlib --extern native_tls=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libnative_tls-420552df014d0696.rlib --extern natord=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libnatord-995f4af36db94e48.rlib --extern openssl=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libopenssl-0310d2926c605e71.rlib --extern rand=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/librand-d2d897849a853885.rlib --extern serde=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libserde-368a1f797d5a19fa.rlib --extern serde_json=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libserde_json-daf607016eb36342.rlib --extern symphonia=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libsymphonia-d68754c432ae3032.rlib --extern tempfile=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtempfile-9536fa684b3153e7.rlib --extern toml=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtoml-4f30f9c9e5bfd56f.rlib --extern tsuzuki_anitomy=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libtsuzuki_anitomy.rlib --extern ureq=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libureq-35327728450517bd.rlib --extern webbrowser=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/libwebbrowser-3cb1a2e05f3ee947.rlib -L native=/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/build/openssl-sys-7bc074bdd6ac3b64/out/openssl-build/install/lib`
+warning: unused imports: `ConfigCommand` and `SyncCommand`
+  --> src/main.rs:28:25
+   |
+28 | use cli::{Cli, Command, ConfigCommand, SyncCommand};
+   |                         ^^^^^^^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `command`
+  --> src/main.rs:77:5
+   |
+77 |     command: Command,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_command`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `config`
+  --> src/main.rs:78:5
+   |
+78 |     config: &mut Config,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config_path`
+  --> src/main.rs:79:5
+   |
+79 |     config_path: &Path,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_config_path`
+
+warning: unused variable: `state_path`
+  --> src/main.rs:80:5
+   |
+80 |     state_path: &Path,
+   |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_state_path`
+
+warning: unused variable: `home`
+  --> src/main.rs:81:5
+   |
+81 |     home: Option<&Path>,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_home`
+
+warning: unused variable: `is_tty`
+  --> src/main.rs:82:5
+   |
+82 |     is_tty: bool,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_tty`
+
+warning: function `add_command` is never used
+  --> src/main.rs:91:4
+   |
+91 | fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+   |    ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `exit_code` is never used
+   --> src/main.rs:122:4
+    |
+122 | fn exit_code(failed: bool) -> ExitCode {
+    |    ^^^^^^^^^
+
+warning: function `exclude_command` is never used
+   --> src/main.rs:137:4
+    |
+137 | fn exclude_command(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `suggest_candidates_command` is never used
+   --> src/main.rs:199:4
+    |
+199 | fn suggest_candidates_command(config: &Config) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `config_show_command` is never used
+   --> src/main.rs:222:4
+    |
+222 | fn config_show_command(config: &Config, config_path: &Path) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `config_edit_command` is never used
+   --> src/main.rs:243:4
+    |
+243 | fn config_edit_command(config_path: &Path) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `confirm` is never used
+   --> src/main.rs:275:4
+    |
+275 | fn confirm(subject: &str, result: &str) {
+    |    ^^^^^^^
+
+warning: function `reconcile_state` is never used
+   --> src/main.rs:287:4
+    |
+287 | fn reconcile_state(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `print_scan_warning` is never used
+   --> src/main.rs:314:4
+    |
+314 | fn print_scan_warning(warning: &mpv::ScanWarning) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PlaybackTarget` is never constructed
+   --> src/main.rs:327:8
+    |
+327 | struct PlaybackTarget {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `playback_target` is never used
+   --> src/main.rs:348:4
+    |
+348 | fn playback_target(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `format_timestamp` is never used
+   --> src/main.rs:400:4
+    |
+400 | fn format_timestamp(seconds: f64) -> String {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `play_series` is never used
+   --> src/main.rs:416:4
+    |
+416 | fn play_series(
+    |    ^^^^^^^^^^^
+
+warning: function `explicit_play` is never used
+   --> src/main.rs:452:4
+    |
+452 | fn explicit_play(
+    |    ^^^^^^^^^^^^^
+
+warning: function `print_target_error` is never used
+   --> src/main.rs:467:4
+    |
+467 | fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `print_ambiguous` is never used
+   --> src/main.rs:485:4
+    |
+485 | fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `resume_command` is never used
+   --> src/main.rs:498:4
+    |
+498 | fn resume_command(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `status_command` is never used
+   --> src/main.rs:572:4
+    |
+572 | fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `list_command` is never used
+   --> src/main.rs:609:4
+    |
+609 | fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^
+
+warning: function `start_verb` is never used
+   --> src/main.rs:659:4
+    |
+659 | fn start_verb(status: Option<Status>) -> &'static str {
+    |    ^^^^^^^^^^
+
+warning: function `start_command` is never used
+   --> src/main.rs:670:4
+    |
+670 | fn start_command(
+    |    ^^^^^^^^^^^^^
+
+warning: function `pause_command` is never used
+   --> src/main.rs:731:4
+    |
+731 | fn pause_command(
+    |    ^^^^^^^^^^^^^
+
+warning: function `drop_command` is never used
+   --> src/main.rs:754:4
+    |
+754 | fn drop_command(
+    |    ^^^^^^^^^^^^
+
+warning: struct `Transition` is never constructed
+   --> src/main.rs:777:8
+    |
+777 | struct Transition {
+    |        ^^^^^^^^^^
+
+warning: function `transition_series` is never used
+   --> src/main.rs:787:4
+    |
+787 | fn transition_series(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `sync_login_command` is never used
+   --> src/main.rs:848:4
+    |
+848 | fn sync_login_command(config: &Config) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `ensure_sync_access_token` is never used
+   --> src/main.rs:919:4
+    |
+919 | fn ensure_sync_access_token(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_command` is never used
+   --> src/main.rs:940:4
+    |
+940 | fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^
+
+warning: function `sync_summary_line` is never used
+    --> src/main.rs:1040:4
+     |
+1040 | fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `sync_outcome_lines` is never used
+    --> src/main.rs:1062:4
+     |
+1062 | fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>) -> Vec<String> {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_link_command` is never used
+    --> src/main.rs:1102:4
+     |
+1102 | fn sync_link_command(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `doctor_command` is never used
+    --> src/main.rs:1169:4
+     |
+1169 | fn doctor_command(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `doctor_summary_line` is never used
+    --> src/main.rs:1327:4
+     |
+1327 | fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `update_command` is never used
+    --> src/main.rs:1350:4
+     |
+1350 | fn update_command() -> ExitCode {
+     |    ^^^^^^^^^^^^^^
+
+warning: constant `BUNDLED_SCRIPT` is never used
+  --> src/doctor.rs:39:11
+   |
+39 | pub const BUNDLED_SCRIPT: &str = include_str!("../contrib/mpv/tsuzuki.lua");
+   |           ^^^^^^^^^^^^^^
+
+warning: enum `Level` is never used
+  --> src/doctor.rs:45:10
+   |
+45 | pub enum Level {
+   |          ^^^^^
+
+warning: struct `CheckResult` is never constructed
+  --> src/doctor.rs:61:12
+   |
+61 | pub struct CheckResult {
+   |            ^^^^^^^^^^^
+
+warning: associated items `ok`, `warn`, `fail`, `with_action`, and `render` are never used
+   --> src/doctor.rs:69:12
+    |
+ 68 | impl CheckResult {
+    | ---------------- associated items in this implementation
+ 69 |     pub fn ok(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^
+...
+ 77 |     pub fn warn(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^^^
+...
+ 85 |     pub fn fail(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^^^
+...
+ 96 |     pub fn with_action(mut self, action: impl Into<String>) -> Self {
+    |            ^^^^^^^^^^^
+...
+104 |     pub fn render(&self) -> String {
+    |            ^^^^^^
+
+warning: function `combine` is never used
+   --> src/doctor.rs:127:8
+    |
+127 | pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResult]) -> CheckResult {
+    |        ^^^^^^^
+
+warning: struct `MpvPresence` is never constructed
+   --> src/doctor.rs:155:12
+    |
+155 | pub struct MpvPresence {
+    |            ^^^^^^^^^^^
+
+warning: function `check_mpv_availability` is never used
+   --> src/doctor.rs:169:8
+    |
+169 | pub fn check_mpv_availability(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `command_override_resolves` is never used
+   --> src/doctor.rs:198:8
+    |
+198 | pub fn command_override_resolves(command_override: &str) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MpvInstall` is never constructed
+   --> src/doctor.rs:218:12
+    |
+218 | pub struct MpvInstall {
+    |            ^^^^^^^^^^
+
+warning: function `detected_mpv_installs` is never used
+   --> src/doctor.rs:226:8
+    |
+226 | pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<MpvInstall> {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `write_filename_flag_state` is never used
+   --> src/doctor.rs:254:4
+    |
+254 | fn write_filename_flag_state(contents: &str) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_mpv_conf` is never used
+   --> src/doctor.rs:276:8
+    |
+276 | pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_watch_later` is never used
+   --> src/doctor.rs:325:8
+    |
+325 | pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `check_flatpak_permissions` is never used
+   --> src/doctor.rs:350:8
+    |
+350 | pub fn check_flatpak_permissions(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ScriptCheckOutcome` is never constructed
+   --> src/doctor.rs:390:12
+    |
+390 | pub struct ScriptCheckOutcome {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `check_tsuzuki_lua` is never used
+   --> src/doctor.rs:402:8
+    |
+402 | pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `install_script` is never used
+   --> src/doctor.rs:428:8
+    |
+428 | pub fn install_script(scripts_dir: &Path) -> io::Result<()> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_mpv_log_dirs` is never used
+   --> src/doctor.rs:444:8
+    |
+444 | pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `RootCheck` is never constructed
+   --> src/doctor.rs:467:12
+    |
+467 | pub struct RootCheck {
+    |            ^^^^^^^^^
+
+warning: function `check_tracked_roots` is never used
+   --> src/doctor.rs:472:8
+    |
+472 | pub fn check_tracked_roots(config: &Config, home: Option<&Path>) -> Vec<RootCheck> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `summarize_tracked_roots` is never used
+   --> src/doctor.rs:493:8
+    |
+493 | pub fn summarize_tracked_roots(checks: &[RootCheck]) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Orphan` is never constructed
+   --> src/doctor.rs:518:12
+    |
+518 | pub struct Orphan {
+    |            ^^^^^^
+
+warning: constant `FORGET_ORPHANS_COMMAND` is never used
+   --> src/doctor.rs:526:11
+    |
+526 | pub const FORGET_ORPHANS_COMMAND: &str = "tsuzuki doctor --fix --forget-orphans";
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_orphans` is never used
+   --> src/doctor.rs:535:8
+    |
+535 | pub fn find_orphans(
+    |        ^^^^^^^^^^^^
+
+warning: function `orphan_check_result` is never used
+   --> src/doctor.rs:568:8
+    |
+568 | pub fn orphan_check_result(orphans: &[Orphan]) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `forget_orphans` is never used
+   --> src/doctor.rs:587:8
+    |
+587 | pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_mal_auth` is never used
+   --> src/doctor.rs:618:8
+    |
+618 | pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
+    |        ^^^^^^^^^^^^^^
+
+warning: struct `Match` is never constructed
+  --> src/exclude.rs:23:12
+   |
+23 | pub struct Match {
+   |            ^^^^^
+
+warning: enum `ExcludeOutcome` is never used
+  --> src/exclude.rs:34:10
+   |
+34 | pub enum ExcludeOutcome {
+   |          ^^^^^^^^^^^^^^
+
+warning: enum `ExcludeError` is never used
+  --> src/exclude.rs:42:10
+   |
+42 | pub enum ExcludeError {
+   |          ^^^^^^^^^^^^
+
+warning: function `exclude` is never used
+   --> src/exclude.rs:123:8
+    |
+123 | pub fn exclude(
+    |        ^^^^^^^
+
+warning: function `exclude_with_home` is never used
+   --> src/exclude.rs:131:4
+    |
+131 | fn exclude_with_home(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `is_whole_series_exclusion` is never used
+   --> src/exclude.rs:213:4
+    |
+213 | fn is_whole_series_exclusion(relative_path: &Path, resolved: &Path) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_matches` is never used
+   --> src/exclude.rs:220:4
+    |
+220 | fn find_matches(config: &Config, relative_path: &Path, home: Option<&Path>) -> Vec<Match> {
+    |    ^^^^^^^^^^^^
+
+warning: function `find_tracked_root` is never used
+   --> src/exclude.rs:240:4
+    |
+240 | fn find_tracked_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `excluded_paths_for_root` is never used
+   --> src/exclude.rs:255:8
+    |
+255 | pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SUGGEST_WORTHY_TYPES` is never used
+   --> src/exclude.rs:285:7
+    |
+285 | const SUGGEST_WORTHY_TYPES: &[&str] = &[
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Candidate` is never constructed
+   --> src/exclude.rs:300:12
+    |
+300 | pub struct Candidate {
+    |            ^^^^^^^^^
+
+warning: function `suggest_candidates` is never used
+   --> src/exclude.rs:315:8
+    |
+315 | pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `is_suggest_worthy` is never used
+   --> src/exclude.rs:362:4
+    |
+362 | fn is_suggest_worthy(path: &Path) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: struct `HttpResponse` is never constructed
+  --> src/http.rs:22:12
+   |
+22 | pub struct HttpResponse {
+   |            ^^^^^^^^^^^^
+
+warning: struct `HttpError` is never constructed
+  --> src/http.rs:28:12
+   |
+28 | pub struct HttpError(pub String);
+   |            ^^^^^^^^^
+
+warning: function `build_agent` is never used
+  --> src/http.rs:42:8
+   |
+42 | pub fn build_agent() -> Result<ureq::Agent, HttpError> {
+   |        ^^^^^^^^^^^
+
+warning: function `map_ureq_result` is never used
+  --> src/http.rs:54:8
+   |
+54 | pub fn map_ureq_result(
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `ResolvedMpv` is never constructed
+  --> src/launch.rs:24:12
+   |
+24 | pub struct ResolvedMpv {
+   |            ^^^^^^^^^^^
+
+warning: enum `LaunchError` is never used
+  --> src/launch.rs:30:10
+   |
+30 | pub enum LaunchError {
+   |          ^^^^^^^^^^^
+
+warning: function `resolve_mpv_command` is never used
+  --> src/launch.rs:58:8
+   |
+58 | pub fn resolve_mpv_command(
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `native_mpv_on_path` is never used
+  --> src/launch.rs:91:15
+   |
+91 | pub(crate) fn native_mpv_on_path() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `program_on_path` is never used
+  --> src/launch.rs:98:15
+   |
+98 | pub(crate) fn program_on_path(name: &str) -> bool {
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `is_executable_file` is never used
+   --> src/launch.rs:114:15
+    |
+114 | pub(crate) fn is_executable_file(path: &Path) -> bool {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `flatpak_mpv_installed` is never used
+   --> src/launch.rs:129:15
+    |
+129 | pub(crate) fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn` is never used
+   --> src/launch.rs:160:4
+    |
+160 | fn spawn(resolved: &ResolvedMpv, file: &Path, start_seconds: f64) -> io::Result<()> {
+    |    ^^^^^
+
+warning: function `resume_playback` is never used
+   --> src/launch.rs:178:8
+    |
+178 | pub fn resume_playback(
+    |        ^^^^^^^^^^^^^^^
+
+warning: constant `AUTHORIZE_URL` is never used
+  --> src/mal.rs:39:11
+   |
+39 | pub const AUTHORIZE_URL: &str = "https://myanimelist.net/v1/oauth2/authorize";
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TOKEN_URL` is never used
+  --> src/mal.rs:40:11
+   |
+40 | pub const TOKEN_URL: &str = "https://myanimelist.net/v1/oauth2/token";
+   |           ^^^^^^^^^
+
+warning: constant `DEFAULT_CLIENT_ID` is never used
+  --> src/mal.rs:76:18
+   |
+76 | pub(crate) const DEFAULT_CLIENT_ID: &str = "1c0e2546c3b0f9e8cfd215ba17fd0b15";
+   |                  ^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_client_id` is never used
+  --> src/mal.rs:83:15
+   |
+83 | pub(crate) fn resolve_client_id(config: &Config) -> &str {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: constant `EXPIRY_SAFETY_MARGIN_SECS` is never used
+  --> src/mal.rs:94:7
+   |
+94 | const EXPIRY_SAFETY_MARGIN_SECS: u64 = 60;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LOGIN_TIMEOUT` is never used
+  --> src/mal.rs:98:11
+   |
+98 | pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
+   |           ^^^^^^^^^^^^^
+
+warning: struct `TokenRecord` is never constructed
+   --> src/mal.rs:111:12
+    |
+111 | pub struct TokenRecord {
+    |            ^^^^^^^^^^^
+
+warning: function `mal_token_path` is never used
+   --> src/mal.rs:130:8
+    |
+130 | pub fn mal_token_path() -> io::Result<PathBuf> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `read_token` is never used
+   --> src/mal.rs:140:8
+    |
+140 | pub fn read_token(path: &Path) -> io::Result<Option<TokenRecord>> {
+    |        ^^^^^^^^^^
+
+warning: function `write_token` is never used
+   --> src/mal.rs:156:8
+    |
+156 | pub fn write_token(path: &Path, token: &TokenRecord) -> io::Result<()> {
+    |        ^^^^^^^^^^^
+
+warning: struct `Pkce` is never constructed
+   --> src/mal.rs:164:12
+    |
+164 | pub struct Pkce {
+    |            ^^^^
+
+warning: function `generate_pkce` is never used
+   --> src/mal.rs:174:8
+    |
+174 | pub fn generate_pkce() -> Pkce {
+    |        ^^^^^^^^^^^^^
+
+warning: function `generate_state` is never used
+   --> src/mal.rs:183:8
+    |
+183 | pub fn generate_state() -> String {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `random_alphanumeric` is never used
+   --> src/mal.rs:187:4
+    |
+187 | fn random_alphanumeric(len: usize) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `redirect_uri` is never used
+   --> src/mal.rs:197:8
+    |
+197 | pub fn redirect_uri(port: u16) -> String {
+    |        ^^^^^^^^^^^^
+
+warning: function `authorize_url` is never used
+   --> src/mal.rs:204:8
+    |
+204 | pub fn authorize_url(client_id: &str, port: u16, code_challenge: &str, state: &str) -> String {
+    |        ^^^^^^^^^^^^^
+
+warning: function `percent_encode` is never used
+   --> src/mal.rs:216:4
+    |
+216 | fn percent_encode(input: &str) -> String {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `percent_decode` is never used
+   --> src/mal.rs:234:4
+    |
+234 | fn percent_decode(input: &str) -> String {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `parse_query` is never used
+   --> src/mal.rs:262:4
+    |
+262 | fn parse_query(query: &str) -> HashMap<String, String> {
+    |    ^^^^^^^^^^^
+
+warning: enum `CallbackOutcome` is never used
+   --> src/mal.rs:278:10
+    |
+278 | pub enum CallbackOutcome {
+    |          ^^^^^^^^^^^^^^^
+
+warning: enum `ListenError` is never used
+   --> src/mal.rs:288:10
+    |
+288 | pub enum ListenError {
+    |          ^^^^^^^^^^^
+
+warning: enum `HandleOutcome` is never used
+   --> src/mal.rs:306:6
+    |
+306 | enum HandleOutcome {
+    |      ^^^^^^^^^^^^^
+
+warning: function `listen_for_callback` is never used
+   --> src/mal.rs:318:8
+    |
+318 | pub fn listen_for_callback(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_connection` is never used
+   --> src/mal.rs:345:4
+    |
+345 | fn handle_connection(stream: TcpStream, expected_state: &str) -> HandleOutcome {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `write_http_response` is never used
+   --> src/mal.rs:408:4
+    |
+408 | fn write_http_response(stream: &mut TcpStream, status: u16, message: &str) -> io::Result<()> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: trait `MalHttpClient` is never used
+   --> src/mal.rs:439:11
+    |
+439 | pub trait MalHttpClient {
+    |           ^^^^^^^^^^^^^
+
+warning: struct `UreqClient` is never constructed
+   --> src/mal.rs:470:12
+    |
+470 | pub struct UreqClient;
+    |            ^^^^^^^^^^
+
+warning: enum `TokenExchangeError` is never used
+   --> src/mal.rs:511:10
+    |
+511 | pub enum TokenExchangeError {
+    |          ^^^^^^^^^^^^^^^^^^
+
+warning: struct `TokenResponse` is never constructed
+   --> src/mal.rs:536:8
+    |
+536 | struct TokenResponse {
+    |        ^^^^^^^^^^^^^
+
+warning: function `parse_token_response` is never used
+   --> src/mal.rs:542:4
+    |
+542 | fn parse_token_response(resp: &HttpResponse, now: u64) -> Result<TokenRecord, TokenExchangeError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exchange_code` is never used
+   --> src/mal.rs:561:8
+    |
+561 | pub fn exchange_code(
+    |        ^^^^^^^^^^^^^
+
+warning: function `refresh_with_token` is never used
+   --> src/mal.rs:584:8
+    |
+584 | pub fn refresh_with_token(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: enum `TokenStatus` is never used
+   --> src/mal.rs:610:10
+    |
+610 | pub enum TokenStatus {
+    |          ^^^^^^^^^^^
+
+warning: function `token_status` is never used
+   --> src/mal.rs:645:8
+    |
+645 | pub fn token_status(
+    |        ^^^^^^^^^^^^
+
+warning: enum `EnsureOutcome` is never used
+   --> src/mal.rs:673:6
+    |
+673 | enum EnsureOutcome {
+    |      ^^^^^^^^^^^^^
+
+warning: function `ensure_token` is never used
+   --> src/mal.rs:681:4
+    |
+681 | fn ensure_token(
+    |    ^^^^^^^^^^^^
+
+warning: enum `AccessTokenError` is never used
+   --> src/mal.rs:711:10
+    |
+711 | pub enum AccessTokenError {
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `ensure_access_token` is never used
+   --> src/mal.rs:742:8
+    |
+742 | pub fn ensure_access_token(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SeriesOverview` is never constructed
+  --> src/overview.rs:22:12
+   |
+22 | pub struct SeriesOverview {
+   |            ^^^^^^^^^^^^^^
+
+warning: function `all_series` is never used
+  --> src/overview.rs:36:8
+   |
+36 | pub fn all_series(config: &Config, state: &State, home: Option<&Path>) -> Vec<SeriesOverview> {
+   |        ^^^^^^^^^^
+
+warning: function `overview_for` is never used
+  --> src/overview.rs:70:4
+   |
+70 | fn overview_for(
+   |    ^^^^^^^^^^^^
+
+warning: function `list_group` is never used
+  --> src/overview.rs:98:8
+   |
+98 | pub fn list_group(status: Option<Status>) -> Option<Status> {
+   |        ^^^^^^^^^^
+
+warning: function `status_rank` is never used
+   --> src/overview.rs:107:4
+    |
+107 | fn status_rank(status: Option<Status>) -> u8 {
+    |    ^^^^^^^^^^^
+
+warning: function `sorted_for_list` is never used
+   --> src/overview.rs:119:8
+    |
+119 | pub fn sorted_for_list(mut overviews: Vec<SeriesOverview>) -> Vec<SeriesOverview> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `start_display_word` is never used
+   --> src/overview.rs:136:8
+    |
+136 | pub fn start_display_word(status: Option<Status>) -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `eligible_for_start` is never used
+   --> src/overview.rs:148:8
+    |
+148 | pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `start_line` is never used
+   --> src/overview.rs:159:8
+    |
+159 | pub fn start_line(overview: &SeriesOverview) -> String {
+    |        ^^^^^^^^^^
+
+warning: enum `ActionError` is never used
+  --> src/pause_drop.rs:24:10
+   |
+24 | pub enum ActionError {
+   |          ^^^^^^^^^^^
+
+warning: enum `Outcome` is never used
+  --> src/pause_drop.rs:56:10
+   |
+56 | pub enum Outcome {
+   |          ^^^^^^^
+
+warning: function `pause` is never used
+  --> src/pause_drop.rs:66:8
+   |
+66 | pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
+   |        ^^^^^
+
+warning: function `drop_series` is never used
+   --> src/pause_drop.rs:102:8
+    |
+102 | pub fn drop_series(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
+    |        ^^^^^^^^^^^
+
+warning: enum `PickerOutcome` is never used
+  --> src/picker.rs:13:10
+   |
+13 | pub enum PickerOutcome<T> {
+   |          ^^^^^^^^^^^^^
+
+warning: function `pick` is never used
+  --> src/picker.rs:44:8
+   |
+44 | pub fn pick<T: Clone>(
+   |        ^^^^
+
+warning: function `dialoguer_select` is never used
+  --> src/picker.rs:70:8
+   |
+70 | pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: struct `ReconcileOutcome` is never constructed
+  --> src/reconcile.rs:76:12
+   |
+76 | pub struct ReconcileOutcome {
+   |            ^^^^^^^^^^^^^^^^
+
+warning: enum `Candidate` is never used
+  --> src/reconcile.rs:83:6
+   |
+83 | enum Candidate {
+   |      ^^^^^^^^^
+
+warning: methods `source_path`, `mtime`, and `is_real_activity` are never used
+   --> src/reconcile.rs:89:8
+    |
+ 88 | impl Candidate {
+    | -------------- methods in this implementation
+ 89 |     fn source_path(&self) -> &Path {
+    |        ^^^^^^^^^^^
+...
+ 96 |     fn mtime(&self) -> SystemTime {
+    |        ^^^^^
+...
+111 |     fn is_real_activity(&self, resume_seconds: u64) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `merge_candidates` is never used
+   --> src/reconcile.rs:127:4
+    |
+127 | fn merge_candidates(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `classify_candidate` is never used
+   --> src/reconcile.rs:156:4
+    |
+156 | fn classify_candidate(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile` is never used
+   --> src/reconcile.rs:202:8
+    |
+202 | pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
+    |        ^^^^^^^^^
+
+warning: function `reconcile_with_script_log_dirs` is never used
+   --> src/reconcile.rs:215:4
+    |
+215 | fn reconcile_with_script_log_dirs(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_idle_auto_pause` is never used
+   --> src/reconcile.rs:285:4
+    |
+285 | fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `classify_root_and_series` is never used
+   --> src/reconcile.rs:321:4
+    |
+321 | fn classify_root_and_series(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `consider_match` is never used
+   --> src/reconcile.rs:366:4
+    |
+366 | fn consider_match(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `reconcile_one_series` is never used
+   --> src/reconcile.rs:387:4
+    |
+387 | fn reconcile_one_series(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_completion_advance` is never used
+   --> src/reconcile.rs:639:4
+    |
+639 | fn apply_completion_advance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `AddOutcome` is never used
+  --> src/roots.rs:16:10
+   |
+16 | pub enum AddOutcome {
+   |          ^^^^^^^^^^
+
+warning: enum `AddError` is never used
+  --> src/roots.rs:29:10
+   |
+29 | pub enum AddError {
+   |          ^^^^^^^^
+
+warning: function `add_root` is never used
+  --> src/roots.rs:56:8
+   |
+56 | pub fn add_root(config: &mut Config, path: &Path) -> Result<AddOutcome, AddError> {
+   |        ^^^^^^^^
+
+warning: function `add_root_with_home` is never used
+  --> src/roots.rs:60:4
+   |
+60 | fn add_root_with_home(
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: struct `FlatpakCandidate` is never constructed
+  --> src/script_log.rs:86:8
+   |
+86 | struct FlatpakCandidate {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: constant `FLATPAK_CANDIDATES` is never used
+  --> src/script_log.rs:96:7
+   |
+96 | const FLATPAK_CANDIDATES: &[FlatpakCandidate] = &[FlatpakCandidate {
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: struct `ScriptLogEntry` is never constructed
+   --> src/script_log.rs:103:12
+    |
+103 | pub struct ScriptLogEntry {
+    |            ^^^^^^^^^^^^^^
+
+warning: function `native_mpv_log_dir` is never used
+   --> src/script_log.rs:127:4
+    |
+127 | fn native_mpv_log_dir() -> io::Result<PathBuf> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `mpv_log_dirs` is never used
+   --> src/script_log.rs:141:8
+    |
+141 | pub fn mpv_log_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    |        ^^^^^^^^^^^^
+
+warning: function `parse_entry_file` is never used
+   --> src/script_log.rs:164:4
+    |
+164 | fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `scan_script_log` is never used
+   --> src/script_log.rs:217:8
+    |
+217 | pub fn scan_script_log(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `merge_freshest_wins` is never used
+   --> src/script_log.rs:252:4
+    |
+252 | fn merge_freshest_wins(entries: Vec<ScriptLogEntry>, home: Option<&Path>) -> Vec<ScriptLogEntry> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `Status` is never used
+  --> src/state.rs:28:10
+   |
+28 | pub enum Status {
+   |          ^^^^^^
+
+warning: struct `SeriesRecord` is never constructed
+  --> src/state.rs:44:12
+   |
+44 | pub struct SeriesRecord {
+   |            ^^^^^^^^^^^^
+
+warning: struct `MalLink` is never constructed
+  --> src/state.rs:90:12
+   |
+90 | pub struct MalLink {
+   |            ^^^^^^^
+
+warning: struct `State` is never constructed
+  --> src/state.rs:97:12
+   |
+97 | pub struct State {
+   |            ^^^^^
+
+warning: methods `find`, `find_mut`, `find_mal_link`, and `find_mal_link_mut` are never used
+   --> src/state.rs:105:12
+    |
+104 | impl State {
+    | ---------- methods in this implementation
+105 |     pub fn find(&self, root: &str, name: &str) -> Option<&SeriesRecord> {
+    |            ^^^^
+...
+111 |     pub fn find_mut(&mut self, root: &str, name: &str) -> Option<&mut SeriesRecord> {
+    |            ^^^^^^^^
+...
+117 |     pub fn find_mal_link(&self, root: &str, name: &str) -> Option<&MalLink> {
+    |            ^^^^^^^^^^^^^
+...
+123 |     pub fn find_mal_link_mut(&mut self, root: &str, name: &str) -> Option<&mut MalLink> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `now_unix` is never used
+   --> src/state.rs:131:8
+    |
+131 | pub fn now_unix() -> u64 {
+    |        ^^^^^^^^
+
+warning: function `resolve_root_arg` is never used
+   --> src/state.rs:146:8
+    |
+146 | pub fn resolve_root_arg(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `read` is never used
+   --> src/state.rs:166:8
+    |
+166 | pub fn read(path: &Path) -> io::Result<State> {
+    |        ^^^^
+
+warning: function `write` is never used
+   --> src/state.rs:179:8
+    |
+179 | pub fn write(path: &Path, state: &State) -> io::Result<()> {
+    |        ^^^^^
+
+warning: function `atomic_write` is never used
+   --> src/state.rs:192:8
+    |
+192 | pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: Option<u32>) -> io::Result<()> {
+    |        ^^^^^^^^^^^^
+
+warning: constant `API_BASE` is never used
+  --> src/sync.rs:61:11
+   |
+61 | pub const API_BASE: &str = "https://api.myanimelist.net/v2";
+   |           ^^^^^^^^
+
+warning: constant `API_CALL_DELAY` is never used
+  --> src/sync.rs:71:11
+   |
+71 | pub const API_CALL_DELAY: Duration = Duration::from_millis(300);
+   |           ^^^^^^^^^^^^^^
+
+warning: function `throttle` is never used
+  --> src/sync.rs:77:4
+   |
+77 | fn throttle(is_first: &mut bool, delay: Duration) {
+   |    ^^^^^^^^
+
+warning: function `normalize_title` is never used
+  --> src/sync.rs:92:8
+   |
+92 | pub fn normalize_title(input: &str) -> String {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `AnimeTitles` is never constructed
+   --> src/sync.rs:110:12
+    |
+110 | pub struct AnimeTitles {
+    |            ^^^^^^^^^^^
+
+warning: struct `AnimeListEntry` is never constructed
+   --> src/sync.rs:118:12
+    |
+118 | pub struct AnimeListEntry {
+    |            ^^^^^^^^^^^^^^
+
+warning: enum `MalListStatus` is never used
+   --> src/sync.rs:131:10
+    |
+131 | pub enum MalListStatus {
+    |          ^^^^^^^^^^^^^
+
+warning: methods `api_value` and `display_name` are never used
+   --> src/sync.rs:143:8
+    |
+142 | impl MalListStatus {
+    | ------------------ methods in this implementation
+143 |     fn api_value(self) -> Option<&'static str> {
+    |        ^^^^^^^^^
+...
+154 |     pub fn display_name(self) -> &'static str {
+    |            ^^^^^^^^^^^^
+
+warning: function `candidate_titles` is never used
+   --> src/sync.rs:169:4
+    |
+169 | fn candidate_titles(entry: &AnimeListEntry) -> Vec<&str> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `find_exact_match` is never used
+   --> src/sync.rs:183:8
+    |
+183 | pub fn find_exact_match<'a>(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `levenshtein` is never used
+   --> src/sync.rs:199:4
+    |
+199 | fn levenshtein(a: &str, b: &str) -> usize {
+    |    ^^^^^^^^^^^
+
+warning: function `title_similarity` is never used
+   --> src/sync.rs:218:8
+    |
+218 | pub fn title_similarity(a: &str, b: &str) -> f64 {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `Candidate` is never constructed
+   --> src/sync.rs:228:12
+    |
+228 | pub struct Candidate {
+    |            ^^^^^^^^^
+
+warning: function `rank_candidates` is never used
+   --> src/sync.rs:240:8
+    |
+240 | pub fn rank_candidates(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `best_candidate` is never used
+   --> src/sync.rs:275:8
+    |
+275 | pub fn best_candidate(
+    |        ^^^^^^^^^^^^^^
+
+warning: enum `SyncApiError` is never used
+   --> src/sync.rs:289:10
+    |
+289 | pub enum SyncApiError {
+    |          ^^^^^^^^^^^^
+
+warning: struct `AlternativeTitlesJson` is never constructed
+   --> src/sync.rs:309:8
+    |
+309 | struct AlternativeTitlesJson {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MyListStatusJson` is never constructed
+   --> src/sync.rs:319:8
+    |
+319 | struct MyListStatusJson {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `AnimeNodeJson` is never constructed
+   --> src/sync.rs:327:8
+    |
+327 | struct AnimeNodeJson {
+    |        ^^^^^^^^^^^^^
+
+warning: struct `AnimeListEntryJson` is never constructed
+   --> src/sync.rs:339:8
+    |
+339 | struct AnimeListEntryJson {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PagingJson` is never constructed
+   --> src/sync.rs:348:8
+    |
+348 | struct PagingJson {
+    |        ^^^^^^^^^^
+
+warning: struct `AnimeListResponseJson` is never constructed
+   --> src/sync.rs:354:8
+    |
+354 | struct AnimeListResponseJson {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `to_anime_list_entry` is never used
+   --> src/sync.rs:360:4
+    |
+360 | fn to_anime_list_entry(entry: AnimeListEntryJson) -> AnimeListEntry {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_LIST_PAGES` is never used
+   --> src/sync.rs:388:7
+    |
+388 | const MAX_LIST_PAGES: usize = 200;
+    |       ^^^^^^^^^^^^^^
+
+warning: function `fetch_anime_list` is never used
+   --> src/sync.rs:395:8
+    |
+395 | pub fn fetch_anime_list(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `require_success` is never used
+   --> src/sync.rs:434:4
+    |
+434 | fn require_success(resp: &HttpResponse) -> Result<(), SyncApiError> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: struct `AnimeStatus` is never constructed
+   --> src/sync.rs:445:12
+    |
+445 | pub struct AnimeStatus {
+    |            ^^^^^^^^^^^
+
+warning: function `fetch_anime_status` is never used
+   --> src/sync.rs:460:8
+    |
+460 | pub fn fetch_anime_status(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `update_mal_entry` is never used
+   --> src/sync.rs:506:4
+    |
+506 | fn update_mal_entry(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `MergeAction` is never used
+   --> src/sync.rs:543:10
+    |
+543 | pub enum MergeAction {
+    |          ^^^^^^^^^^^
+
+warning: function `decide_merge` is never used
+   --> src/sync.rs:556:8
+    |
+556 | pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
+    |        ^^^^^^^^^^^^
+
+warning: function `desired_status` is never used
+   --> src/sync.rs:568:4
+    |
+568 | fn desired_status(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `transition_dates` is never used
+   --> src/sync.rs:591:4
+    |
+591 | fn transition_dates(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `local_effective_episode` is never used
+   --> src/sync.rs:625:8
+    |
+625 | pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `advance_local_cursor` is never used
+   --> src/sync.rs:651:4
+    |
+651 | fn advance_local_cursor(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_synced_progress` is never used
+   --> src/sync.rs:722:8
+    |
+722 | pub fn apply_synced_progress(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `merge_and_maybe_update` is never used
+   --> src/sync.rs:758:4
+    |
+758 | fn merge_and_maybe_update(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_merge_result` is never used
+   --> src/sync.rs:801:4
+    |
+801 | fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: enum `ManualLinkError` is never used
+   --> src/sync.rs:815:10
+    |
+815 | pub enum ManualLinkError {
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `manual_link` is never used
+   --> src/sync.rs:844:8
+    |
+844 | pub fn manual_link(
+    |        ^^^^^^^^^^^
+
+warning: function `upsert_link` is never used
+   --> src/sync.rs:860:4
+    |
+860 | fn upsert_link(state: &mut State, root: &str, name: &str, mal_id: u32) {
+    |    ^^^^^^^^^^^
+
+warning: enum `OutcomeKind` is never used
+   --> src/sync.rs:875:10
+    |
+875 | pub enum OutcomeKind {
+    |          ^^^^^^^^^^^
+
+warning: struct `SeriesOutcome` is never constructed
+   --> src/sync.rs:891:12
+    |
+891 | pub struct SeriesOutcome {
+    |            ^^^^^^^^^^^^^
+
+warning: function `eligible_targets` is never used
+   --> src/sync.rs:904:8
+    |
+904 | pub fn eligible_targets(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `run_sync` is never used
+   --> src/sync.rs:935:8
+    |
+935 | pub fn run_sync(
+    |        ^^^^^^^^
+
+warning: function `run_sync_on_date` is never used
+   --> src/sync.rs:957:4
+    |
+957 | fn run_sync_on_date(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `TargetError` is never used
+  --> src/target.rs:17:10
+   |
+17 | pub enum TargetError {
+   |          ^^^^^^^^^^^
+
+warning: function `resolve_series_root` is never used
+  --> src/target.rs:35:8
+   |
+35 | pub fn resolve_series_root(
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `current_version` is never used
+  --> src/update.rs:27:8
+   |
+27 | pub fn current_version() -> &'static str {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `GithubRepo` is never constructed
+  --> src/update.rs:32:8
+   |
+32 | struct GithubRepo {
+   |        ^^^^^^^^^^
+
+warning: function `parse_repository_url` is never used
+  --> src/update.rs:44:4
+   |
+44 | fn parse_repository_url(url: &str) -> Option<GithubRepo> {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `github_repo` is never used
+  --> src/update.rs:65:4
+   |
+65 | fn github_repo() -> GithubRepo {
+   |    ^^^^^^^^^^^
+
+warning: methods `latest_release_api_url` and `install_script_url` are never used
+  --> src/update.rs:72:8
+   |
+71 | impl GithubRepo {
+   | --------------- methods in this implementation
+72 |     fn latest_release_api_url(&self) -> String {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     fn install_script_url(&self) -> String {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `user_agent` is never used
+  --> src/update.rs:89:4
+   |
+89 | fn user_agent() -> String {
+   |    ^^^^^^^^^^
+
+warning: function `parse_semver_tag` is never used
+   --> src/update.rs:104:4
+    |
+104 | fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `UpdateStatus` is never used
+   --> src/update.rs:119:10
+    |
+119 | pub enum UpdateStatus {
+    |          ^^^^^^^^^^^^
+
+warning: method `render` is never used
+   --> src/update.rs:136:12
+    |
+132 | impl UpdateStatus {
+    | ----------------- method in this implementation
+...
+136 |     pub fn render(&self, current: &str) -> String {
+    |            ^^^^^^
+
+warning: enum `UpdateCheckError` is never used
+   --> src/update.rs:164:10
+    |
+164 | pub enum UpdateCheckError {
+    |          ^^^^^^^^^^^^^^^^
+
+warning: struct `ReleaseJson` is never constructed
+   --> src/update.rs:181:8
+    |
+181 | struct ReleaseJson {
+    |        ^^^^^^^^^^^
+
+warning: function `fetch_latest_release` is never used
+   --> src/update.rs:189:4
+    |
+189 | fn fetch_latest_release(repo: &GithubRepo) -> Result<HttpResponse, UpdateCheckError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_latest_release_tag` is never used
+   --> src/update.rs:201:4
+    |
+201 | fn parse_latest_release_tag(resp: &HttpResponse) -> Result<String, UpdateCheckError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compare_to_latest_tag` is never used
+   --> src/update.rs:210:4
+    |
+210 | fn compare_to_latest_tag(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_for_update` is never used
+   --> src/update.rs:232:8
+    |
+232 | pub fn check_for_update() -> Result<UpdateStatus, UpdateCheckError> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `install_command_line` is never used
+   --> src/update.rs:245:4
+    |
+245 | fn install_command_line() -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `InstallError` is never used
+   --> src/update.rs:254:10
+    |
+254 | pub enum InstallError {
+    |          ^^^^^^^^^^^^
+
+warning: function `run_install` is never used
+   --> src/update.rs:276:8
+    |
+276 | pub fn run_install() -> Result<(), InstallError> {
+    |        ^^^^^^^^^^^
+
+warning: variant `Transport` is never constructed
+   --> src/update.rs:165:5
+    |
+164 | pub enum UpdateCheckError {
+    |          ---------------- variant in this enum
+165 |     Transport(String),
+    |     ^^^^^^^^^
+    |
+    = note: `UpdateCheckError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: `tsuzuki` (bin "tsuzuki") generated 248 warnings (run `cargo fix --bin "tsuzuki" -p tsuzuki` to apply 7 suggestions)
+warning: `tsuzuki` (bin "tsuzuki" test) generated 26 warnings (25 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/tsuzuki-84e7f8ccf549cf5c`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/cli-2e31225079aa5969`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/config_integration-06b7ef685c6f2b04`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/doctor_integration-dca5ffb54672066e`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/invariants_binary-49246a6b3eda17d7`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/mal_login_integration-ba2407d0f8231e26`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/mal_sync_integration-87e75ed165df7e68`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/script_log_integration-3a1f4517ea4ed403`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/state_persistence-9136076bb6928417`
+  Executable `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/update_integration-bba2ed28f47c03f2`
+
+*** result: Success
+
+*** /home/mhmdsamer/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --verbose --package=tsuzuki@0.1.2
+       Fresh unicode-ident v1.0.24
+       Fresh stable_deref_trait v1.2.1
+       Fresh bitflags v2.13.1
+       Fresh smallvec v1.15.2
+       Fresh cfg-if v1.0.4
+       Fresh autocfg v1.5.1
+       Fresh proc-macro2 v1.0.107
+       Fresh find-msvc-tools v0.1.11
+       Fresh shlex v2.0.1
+       Fresh litemap v0.8.3
+       Fresh version_check v0.9.5
+       Fresh log v0.4.33
+       Fresh quote v1.0.47
+       Fresh libc v0.2.189
+       Fresh cc v1.4.3
+       Fresh writeable v0.6.4
+       Fresh vcpkg v0.2.15
+       Fresh pkg-config v0.3.34
+       Fresh syn v2.0.119
+       Fresh syn v3.0.3
+       Fresh openssl-src v300.6.1+3.6.3
+       Fresh num-traits v0.2.19
+       Fresh utf8_iter v1.0.4
+       Fresh synstructure v0.13.2
+       Fresh zerovec-derive v0.11.5
+       Fresh displaydoc v0.2.7
+       Fresh icu_normalizer_data v2.3.0
+       Fresh uncased v0.9.10
+       Fresh num-complex v0.4.6
+       Fresh zerofrom-derive v0.1.7
+       Fresh yoke-derive v0.8.2
+       Fresh icu_properties_data v2.3.0
+       Fresh siphasher v1.0.3
+       Fresh bytemuck v1.25.2
+       Fresh lazy_static v1.5.0
+       Fresh serde_core v1.0.229
+       Fresh memchr v2.8.3
+       Fresh zerofrom v0.1.8
+       Fresh symphonia-core v0.6.1
+       Fresh regex-lite v0.1.9
+       Fresh percent-encoding v2.3.2
+       Fresh utf8parse v0.2.2
+       Fresh yoke v0.8.3
+       Fresh symphonia-metadata v0.6.1
+       Fresh foreign-types-shared v0.1.1
+       Fresh form_urlencoded v1.2.2
+       Fresh zerovec v0.11.7
+       Fresh zerotrie v0.2.5
+       Fresh foreign-types v0.3.2
+       Fresh phf_generator v0.12.1
+       Fresh symphonia-common v0.6.1
+       Fresh zerocopy v0.8.56
+       Fresh tinystr v0.8.4
+       Fresh potential_utf v0.1.6
+       Fresh anstyle-parse v1.0.0
+       Fresh aho-corasick v1.1.5
+       Fresh openssl-sys v0.9.117
+       Fresh openssl-macros v0.1.1
+       Fresh getrandom v0.2.17
+       Fresh regex-syntax v0.8.11
+       Fresh is_terminal_polyfill v1.70.2
+       Fresh icu_locale_core v2.3.0
+       Fresh icu_collections v2.3.0
+       Fresh anstyle-query v1.1.5
+       Fresh once_cell v1.21.4
+       Fresh simd-adler32 v0.3.10
+       Fresh adler2 v2.0.1
+       Fresh colorchoice v1.0.5
+       Fresh anstyle v1.0.14
+       Fresh icu_provider v2.3.0
+       Fresh linux-raw-sys v0.12.1
+       Fresh miniz_oxide v0.8.9
+       Fresh anstream v1.0.0
+       Fresh rand_core v0.6.4
+       Fresh openssl v0.10.81
+       Fresh regex-automata v0.4.18
+       Fresh icu_properties v2.3.0
+       Fresh icu_normalizer v2.3.0
+       Fresh rustix v1.1.4
+       Fresh phf_macros v0.12.1
+       Fresh crc32fast v1.5.0
+       Fresh ppv-lite86 v0.2.21
+       Fresh getrandom v0.4.3
+       Fresh phf_shared v0.12.1
+       Fresh idna_adapter v1.2.2
+       Fresh clap_lex v1.1.0
+       Fresh unicode-width v0.2.2
+       Fresh openssl-probe v0.2.1
+       Fresh heck v0.5.0
+       Fresh winnow v1.0.4
+       Fresh strsim v0.11.1
+       Fresh idna v1.1.0
+       Fresh fastrand v2.5.0
+       Fresh option-ext v0.2.0
+       Fresh console v0.16.4
+       Fresh clap_builder v4.6.6
+       Fresh toml_parser v1.1.3+spec-1.1.0
+       Fresh clap_derive v4.6.4
+       Fresh url v2.5.8
+       Fresh tempfile v3.27.0
+       Fresh dirs-sys v0.5.0
+       Fresh native-tls v0.2.18
+       Fresh flate2 v1.1.9
+       Fresh phf v0.12.1
+       Fresh rand_chacha v0.3.1
+       Fresh zmij v1.0.23
+       Fresh regex v1.13.1
+       Fresh symphonia-format-isomp4 v0.6.1
+       Fresh symphonia-format-mkv v0.6.1
+       Fresh serde_spanned v1.1.1
+       Fresh toml_datetime v1.1.1+spec-1.1.0
+       Fresh serde_derive v1.0.229
+       Fresh base64 v0.22.1
+       Fresh itoa v1.0.18
+       Fresh shell-words v1.1.1
+       Fresh iana-time-zone v0.1.65
+       Fresh zeroize v1.9.0
+       Fresh toml_writer v1.1.2+spec-1.1.0
+       Fresh chrono v0.4.45
+       Fresh serde v1.0.229
+       Fresh serde_json v1.0.151
+       Fresh symphonia v0.6.1
+       Fresh ureq v2.12.1
+       Fresh dirs v6.0.0
+       Fresh webbrowser v1.2.4
+       Fresh dialoguer v0.12.0
+       Fresh toml v1.1.4+spec-1.1.0
+       Fresh rand v0.8.7
+       Fresh tsuzuki-anitomy v0.1.0 (/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/vendor/anitomy)
+       Fresh clap v4.6.6
+       Fresh natord v1.0.9
+warning: unused imports: `ConfigCommand` and `SyncCommand`
+  --> src/main.rs:28:25
+   |
+28 | use cli::{Cli, Command, ConfigCommand, SyncCommand};
+   |                         ^^^^^^^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `command`
+  --> src/main.rs:77:5
+   |
+77 |     command: Command,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_command`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `config`
+  --> src/main.rs:78:5
+   |
+78 |     config: &mut Config,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+
+warning: unused variable: `config_path`
+  --> src/main.rs:79:5
+   |
+79 |     config_path: &Path,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_config_path`
+
+warning: unused variable: `state_path`
+  --> src/main.rs:80:5
+   |
+80 |     state_path: &Path,
+   |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_state_path`
+
+warning: unused variable: `home`
+  --> src/main.rs:81:5
+   |
+81 |     home: Option<&Path>,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_home`
+
+warning: unused variable: `is_tty`
+  --> src/main.rs:82:5
+   |
+82 |     is_tty: bool,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_tty`
+
+warning: function `add_command` is never used
+  --> src/main.rs:91:4
+   |
+91 | fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+   |    ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `exit_code` is never used
+   --> src/main.rs:122:4
+    |
+122 | fn exit_code(failed: bool) -> ExitCode {
+    |    ^^^^^^^^^
+
+warning: function `exclude_command` is never used
+   --> src/main.rs:137:4
+    |
+137 | fn exclude_command(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `suggest_candidates_command` is never used
+   --> src/main.rs:199:4
+    |
+199 | fn suggest_candidates_command(config: &Config) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `config_show_command` is never used
+   --> src/main.rs:222:4
+    |
+222 | fn config_show_command(config: &Config, config_path: &Path) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `config_edit_command` is never used
+   --> src/main.rs:243:4
+    |
+243 | fn config_edit_command(config_path: &Path) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `confirm` is never used
+   --> src/main.rs:275:4
+    |
+275 | fn confirm(subject: &str, result: &str) {
+    |    ^^^^^^^
+
+warning: function `reconcile_state` is never used
+   --> src/main.rs:287:4
+    |
+287 | fn reconcile_state(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `print_scan_warning` is never used
+   --> src/main.rs:314:4
+    |
+314 | fn print_scan_warning(warning: &mpv::ScanWarning) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PlaybackTarget` is never constructed
+   --> src/main.rs:327:8
+    |
+327 | struct PlaybackTarget {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `playback_target` is never used
+   --> src/main.rs:348:4
+    |
+348 | fn playback_target(
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `format_timestamp` is never used
+   --> src/main.rs:400:4
+    |
+400 | fn format_timestamp(seconds: f64) -> String {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `play_series` is never used
+   --> src/main.rs:416:4
+    |
+416 | fn play_series(
+    |    ^^^^^^^^^^^
+
+warning: function `explicit_play` is never used
+   --> src/main.rs:452:4
+    |
+452 | fn explicit_play(
+    |    ^^^^^^^^^^^^^
+
+warning: function `print_target_error` is never used
+   --> src/main.rs:467:4
+    |
+467 | fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `print_ambiguous` is never used
+   --> src/main.rs:485:4
+    |
+485 | fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `resume_command` is never used
+   --> src/main.rs:498:4
+    |
+498 | fn resume_command(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `status_command` is never used
+   --> src/main.rs:572:4
+    |
+572 | fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `list_command` is never used
+   --> src/main.rs:609:4
+    |
+609 | fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^
+
+warning: function `start_verb` is never used
+   --> src/main.rs:659:4
+    |
+659 | fn start_verb(status: Option<Status>) -> &'static str {
+    |    ^^^^^^^^^^
+
+warning: function `start_command` is never used
+   --> src/main.rs:670:4
+    |
+670 | fn start_command(
+    |    ^^^^^^^^^^^^^
+
+warning: function `pause_command` is never used
+   --> src/main.rs:731:4
+    |
+731 | fn pause_command(
+    |    ^^^^^^^^^^^^^
+
+warning: function `drop_command` is never used
+   --> src/main.rs:754:4
+    |
+754 | fn drop_command(
+    |    ^^^^^^^^^^^^
+
+warning: struct `Transition` is never constructed
+   --> src/main.rs:777:8
+    |
+777 | struct Transition {
+    |        ^^^^^^^^^^
+
+warning: function `transition_series` is never used
+   --> src/main.rs:787:4
+    |
+787 | fn transition_series(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `sync_login_command` is never used
+   --> src/main.rs:848:4
+    |
+848 | fn sync_login_command(config: &Config) -> ExitCode {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `ensure_sync_access_token` is never used
+   --> src/main.rs:919:4
+    |
+919 | fn ensure_sync_access_token(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_command` is never used
+   --> src/main.rs:940:4
+    |
+940 | fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
+    |    ^^^^^^^^^^^^
+
+warning: function `sync_summary_line` is never used
+    --> src/main.rs:1040:4
+     |
+1040 | fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `sync_outcome_lines` is never used
+    --> src/main.rs:1062:4
+     |
+1062 | fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>) -> Vec<String> {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `sync_link_command` is never used
+    --> src/main.rs:1102:4
+     |
+1102 | fn sync_link_command(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `doctor_command` is never used
+    --> src/main.rs:1169:4
+     |
+1169 | fn doctor_command(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `doctor_summary_line` is never used
+    --> src/main.rs:1327:4
+     |
+1327 | fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `update_command` is never used
+    --> src/main.rs:1350:4
+     |
+1350 | fn update_command() -> ExitCode {
+     |    ^^^^^^^^^^^^^^
+
+warning: constant `BUNDLED_SCRIPT` is never used
+  --> src/doctor.rs:39:11
+   |
+39 | pub const BUNDLED_SCRIPT: &str = include_str!("../contrib/mpv/tsuzuki.lua");
+   |           ^^^^^^^^^^^^^^
+
+warning: enum `Level` is never used
+  --> src/doctor.rs:45:10
+   |
+45 | pub enum Level {
+   |          ^^^^^
+
+warning: struct `CheckResult` is never constructed
+  --> src/doctor.rs:61:12
+   |
+61 | pub struct CheckResult {
+   |            ^^^^^^^^^^^
+
+warning: associated items `ok`, `warn`, `fail`, `with_action`, and `render` are never used
+   --> src/doctor.rs:69:12
+    |
+ 68 | impl CheckResult {
+    | ---------------- associated items in this implementation
+ 69 |     pub fn ok(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^
+...
+ 77 |     pub fn warn(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^^^
+...
+ 85 |     pub fn fail(label: impl Into<String>, message: impl Into<String>) -> Self {
+    |            ^^^^
+...
+ 96 |     pub fn with_action(mut self, action: impl Into<String>) -> Self {
+    |            ^^^^^^^^^^^
+...
+104 |     pub fn render(&self) -> String {
+    |            ^^^^^^
+
+warning: function `combine` is never used
+   --> src/doctor.rs:127:8
+    |
+127 | pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResult]) -> CheckResult {
+    |        ^^^^^^^
+
+warning: struct `MpvPresence` is never constructed
+   --> src/doctor.rs:155:12
+    |
+155 | pub struct MpvPresence {
+    |            ^^^^^^^^^^^
+
+warning: function `check_mpv_availability` is never used
+   --> src/doctor.rs:169:8
+    |
+169 | pub fn check_mpv_availability(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `command_override_resolves` is never used
+   --> src/doctor.rs:198:8
+    |
+198 | pub fn command_override_resolves(command_override: &str) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MpvInstall` is never constructed
+   --> src/doctor.rs:218:12
+    |
+218 | pub struct MpvInstall {
+    |            ^^^^^^^^^^
+
+warning: function `detected_mpv_installs` is never used
+   --> src/doctor.rs:226:8
+    |
+226 | pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<MpvInstall> {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `write_filename_flag_state` is never used
+   --> src/doctor.rs:254:4
+    |
+254 | fn write_filename_flag_state(contents: &str) -> Option<bool> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_mpv_conf` is never used
+   --> src/doctor.rs:276:8
+    |
+276 | pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_watch_later` is never used
+   --> src/doctor.rs:325:8
+    |
+325 | pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `check_flatpak_permissions` is never used
+   --> src/doctor.rs:350:8
+    |
+350 | pub fn check_flatpak_permissions(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ScriptCheckOutcome` is never constructed
+   --> src/doctor.rs:390:12
+    |
+390 | pub struct ScriptCheckOutcome {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: function `check_tsuzuki_lua` is never used
+   --> src/doctor.rs:402:8
+    |
+402 | pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `install_script` is never used
+   --> src/doctor.rs:428:8
+    |
+428 | pub fn install_script(scripts_dir: &Path) -> io::Result<()> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_mpv_log_dirs` is never used
+   --> src/doctor.rs:444:8
+    |
+444 | pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `RootCheck` is never constructed
+   --> src/doctor.rs:467:12
+    |
+467 | pub struct RootCheck {
+    |            ^^^^^^^^^
+
+warning: function `check_tracked_roots` is never used
+   --> src/doctor.rs:472:8
+    |
+472 | pub fn check_tracked_roots(config: &Config, home: Option<&Path>) -> Vec<RootCheck> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `summarize_tracked_roots` is never used
+   --> src/doctor.rs:493:8
+    |
+493 | pub fn summarize_tracked_roots(checks: &[RootCheck]) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Orphan` is never constructed
+   --> src/doctor.rs:518:12
+    |
+518 | pub struct Orphan {
+    |            ^^^^^^
+
+warning: constant `FORGET_ORPHANS_COMMAND` is never used
+   --> src/doctor.rs:526:11
+    |
+526 | pub const FORGET_ORPHANS_COMMAND: &str = "tsuzuki doctor --fix --forget-orphans";
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_orphans` is never used
+   --> src/doctor.rs:535:8
+    |
+535 | pub fn find_orphans(
+    |        ^^^^^^^^^^^^
+
+warning: function `orphan_check_result` is never used
+   --> src/doctor.rs:568:8
+    |
+568 | pub fn orphan_check_result(orphans: &[Orphan]) -> CheckResult {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `forget_orphans` is never used
+   --> src/doctor.rs:587:8
+    |
+587 | pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `check_mal_auth` is never used
+   --> src/doctor.rs:618:8
+    |
+618 | pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
+    |        ^^^^^^^^^^^^^^
+
+warning: struct `Match` is never constructed
+  --> src/exclude.rs:23:12
+   |
+23 | pub struct Match {
+   |            ^^^^^
+
+warning: enum `ExcludeOutcome` is never used
+  --> src/exclude.rs:34:10
+   |
+34 | pub enum ExcludeOutcome {
+   |          ^^^^^^^^^^^^^^
+
+warning: enum `ExcludeError` is never used
+  --> src/exclude.rs:42:10
+   |
+42 | pub enum ExcludeError {
+   |          ^^^^^^^^^^^^
+
+warning: function `exclude` is never used
+   --> src/exclude.rs:123:8
+    |
+123 | pub fn exclude(
+    |        ^^^^^^^
+
+warning: function `exclude_with_home` is never used
+   --> src/exclude.rs:131:4
+    |
+131 | fn exclude_with_home(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `is_whole_series_exclusion` is never used
+   --> src/exclude.rs:213:4
+    |
+213 | fn is_whole_series_exclusion(relative_path: &Path, resolved: &Path) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_matches` is never used
+   --> src/exclude.rs:220:4
+    |
+220 | fn find_matches(config: &Config, relative_path: &Path, home: Option<&Path>) -> Vec<Match> {
+    |    ^^^^^^^^^^^^
+
+warning: function `find_tracked_root` is never used
+   --> src/exclude.rs:240:4
+    |
+240 | fn find_tracked_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `excluded_paths_for_root` is never used
+   --> src/exclude.rs:255:8
+    |
+255 | pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SUGGEST_WORTHY_TYPES` is never used
+   --> src/exclude.rs:285:7
+    |
+285 | const SUGGEST_WORTHY_TYPES: &[&str] = &[
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Candidate` is never constructed
+   --> src/exclude.rs:300:12
+    |
+300 | pub struct Candidate {
+    |            ^^^^^^^^^
+
+warning: function `suggest_candidates` is never used
+   --> src/exclude.rs:315:8
+    |
+315 | pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `is_suggest_worthy` is never used
+   --> src/exclude.rs:362:4
+    |
+362 | fn is_suggest_worthy(path: &Path) -> bool {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: struct `HttpResponse` is never constructed
+  --> src/http.rs:22:12
+   |
+22 | pub struct HttpResponse {
+   |            ^^^^^^^^^^^^
+
+warning: struct `HttpError` is never constructed
+  --> src/http.rs:28:12
+   |
+28 | pub struct HttpError(pub String);
+   |            ^^^^^^^^^
+
+warning: function `build_agent` is never used
+  --> src/http.rs:42:8
+   |
+42 | pub fn build_agent() -> Result<ureq::Agent, HttpError> {
+   |        ^^^^^^^^^^^
+
+warning: function `map_ureq_result` is never used
+  --> src/http.rs:54:8
+   |
+54 | pub fn map_ureq_result(
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `ResolvedMpv` is never constructed
+  --> src/launch.rs:24:12
+   |
+24 | pub struct ResolvedMpv {
+   |            ^^^^^^^^^^^
+
+warning: enum `LaunchError` is never used
+  --> src/launch.rs:30:10
+   |
+30 | pub enum LaunchError {
+   |          ^^^^^^^^^^^
+
+warning: function `resolve_mpv_command` is never used
+  --> src/launch.rs:58:8
+   |
+58 | pub fn resolve_mpv_command(
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `native_mpv_on_path` is never used
+  --> src/launch.rs:91:15
+   |
+91 | pub(crate) fn native_mpv_on_path() -> bool {
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `program_on_path` is never used
+  --> src/launch.rs:98:15
+   |
+98 | pub(crate) fn program_on_path(name: &str) -> bool {
+   |               ^^^^^^^^^^^^^^^
+
+warning: function `is_executable_file` is never used
+   --> src/launch.rs:114:15
+    |
+114 | pub(crate) fn is_executable_file(path: &Path) -> bool {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `flatpak_mpv_installed` is never used
+   --> src/launch.rs:129:15
+    |
+129 | pub(crate) fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `spawn` is never used
+   --> src/launch.rs:160:4
+    |
+160 | fn spawn(resolved: &ResolvedMpv, file: &Path, start_seconds: f64) -> io::Result<()> {
+    |    ^^^^^
+
+warning: function `resume_playback` is never used
+   --> src/launch.rs:178:8
+    |
+178 | pub fn resume_playback(
+    |        ^^^^^^^^^^^^^^^
+
+warning: constant `AUTHORIZE_URL` is never used
+  --> src/mal.rs:39:11
+   |
+39 | pub const AUTHORIZE_URL: &str = "https://myanimelist.net/v1/oauth2/authorize";
+   |           ^^^^^^^^^^^^^
+
+warning: constant `TOKEN_URL` is never used
+  --> src/mal.rs:40:11
+   |
+40 | pub const TOKEN_URL: &str = "https://myanimelist.net/v1/oauth2/token";
+   |           ^^^^^^^^^
+
+warning: constant `DEFAULT_CLIENT_ID` is never used
+  --> src/mal.rs:76:18
+   |
+76 | pub(crate) const DEFAULT_CLIENT_ID: &str = "1c0e2546c3b0f9e8cfd215ba17fd0b15";
+   |                  ^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_client_id` is never used
+  --> src/mal.rs:83:15
+   |
+83 | pub(crate) fn resolve_client_id(config: &Config) -> &str {
+   |               ^^^^^^^^^^^^^^^^^
+
+warning: constant `EXPIRY_SAFETY_MARGIN_SECS` is never used
+  --> src/mal.rs:94:7
+   |
+94 | const EXPIRY_SAFETY_MARGIN_SECS: u64 = 60;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LOGIN_TIMEOUT` is never used
+  --> src/mal.rs:98:11
+   |
+98 | pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
+   |           ^^^^^^^^^^^^^
+
+warning: struct `TokenRecord` is never constructed
+   --> src/mal.rs:111:12
+    |
+111 | pub struct TokenRecord {
+    |            ^^^^^^^^^^^
+
+warning: function `mal_token_path` is never used
+   --> src/mal.rs:130:8
+    |
+130 | pub fn mal_token_path() -> io::Result<PathBuf> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `read_token` is never used
+   --> src/mal.rs:140:8
+    |
+140 | pub fn read_token(path: &Path) -> io::Result<Option<TokenRecord>> {
+    |        ^^^^^^^^^^
+
+warning: function `write_token` is never used
+   --> src/mal.rs:156:8
+    |
+156 | pub fn write_token(path: &Path, token: &TokenRecord) -> io::Result<()> {
+    |        ^^^^^^^^^^^
+
+warning: struct `Pkce` is never constructed
+   --> src/mal.rs:164:12
+    |
+164 | pub struct Pkce {
+    |            ^^^^
+
+warning: function `generate_pkce` is never used
+   --> src/mal.rs:174:8
+    |
+174 | pub fn generate_pkce() -> Pkce {
+    |        ^^^^^^^^^^^^^
+
+warning: function `generate_state` is never used
+   --> src/mal.rs:183:8
+    |
+183 | pub fn generate_state() -> String {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `random_alphanumeric` is never used
+   --> src/mal.rs:187:4
+    |
+187 | fn random_alphanumeric(len: usize) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `redirect_uri` is never used
+   --> src/mal.rs:197:8
+    |
+197 | pub fn redirect_uri(port: u16) -> String {
+    |        ^^^^^^^^^^^^
+
+warning: function `authorize_url` is never used
+   --> src/mal.rs:204:8
+    |
+204 | pub fn authorize_url(client_id: &str, port: u16, code_challenge: &str, state: &str) -> String {
+    |        ^^^^^^^^^^^^^
+
+warning: function `percent_encode` is never used
+   --> src/mal.rs:216:4
+    |
+216 | fn percent_encode(input: &str) -> String {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `percent_decode` is never used
+   --> src/mal.rs:234:4
+    |
+234 | fn percent_decode(input: &str) -> String {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `parse_query` is never used
+   --> src/mal.rs:262:4
+    |
+262 | fn parse_query(query: &str) -> HashMap<String, String> {
+    |    ^^^^^^^^^^^
+
+warning: enum `CallbackOutcome` is never used
+   --> src/mal.rs:278:10
+    |
+278 | pub enum CallbackOutcome {
+    |          ^^^^^^^^^^^^^^^
+
+warning: enum `ListenError` is never used
+   --> src/mal.rs:288:10
+    |
+288 | pub enum ListenError {
+    |          ^^^^^^^^^^^
+
+warning: enum `HandleOutcome` is never used
+   --> src/mal.rs:306:6
+    |
+306 | enum HandleOutcome {
+    |      ^^^^^^^^^^^^^
+
+warning: function `listen_for_callback` is never used
+   --> src/mal.rs:318:8
+    |
+318 | pub fn listen_for_callback(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_connection` is never used
+   --> src/mal.rs:345:4
+    |
+345 | fn handle_connection(stream: TcpStream, expected_state: &str) -> HandleOutcome {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `write_http_response` is never used
+   --> src/mal.rs:408:4
+    |
+408 | fn write_http_response(stream: &mut TcpStream, status: u16, message: &str) -> io::Result<()> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: trait `MalHttpClient` is never used
+   --> src/mal.rs:439:11
+    |
+439 | pub trait MalHttpClient {
+    |           ^^^^^^^^^^^^^
+
+warning: struct `UreqClient` is never constructed
+   --> src/mal.rs:470:12
+    |
+470 | pub struct UreqClient;
+    |            ^^^^^^^^^^
+
+warning: enum `TokenExchangeError` is never used
+   --> src/mal.rs:511:10
+    |
+511 | pub enum TokenExchangeError {
+    |          ^^^^^^^^^^^^^^^^^^
+
+warning: struct `TokenResponse` is never constructed
+   --> src/mal.rs:536:8
+    |
+536 | struct TokenResponse {
+    |        ^^^^^^^^^^^^^
+
+warning: function `parse_token_response` is never used
+   --> src/mal.rs:542:4
+    |
+542 | fn parse_token_response(resp: &HttpResponse, now: u64) -> Result<TokenRecord, TokenExchangeError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `exchange_code` is never used
+   --> src/mal.rs:561:8
+    |
+561 | pub fn exchange_code(
+    |        ^^^^^^^^^^^^^
+
+warning: function `refresh_with_token` is never used
+   --> src/mal.rs:584:8
+    |
+584 | pub fn refresh_with_token(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: enum `TokenStatus` is never used
+   --> src/mal.rs:610:10
+    |
+610 | pub enum TokenStatus {
+    |          ^^^^^^^^^^^
+
+warning: function `token_status` is never used
+   --> src/mal.rs:645:8
+    |
+645 | pub fn token_status(
+    |        ^^^^^^^^^^^^
+
+warning: enum `EnsureOutcome` is never used
+   --> src/mal.rs:673:6
+    |
+673 | enum EnsureOutcome {
+    |      ^^^^^^^^^^^^^
+
+warning: function `ensure_token` is never used
+   --> src/mal.rs:681:4
+    |
+681 | fn ensure_token(
+    |    ^^^^^^^^^^^^
+
+warning: enum `AccessTokenError` is never used
+   --> src/mal.rs:711:10
+    |
+711 | pub enum AccessTokenError {
+    |          ^^^^^^^^^^^^^^^^
+
+warning: function `ensure_access_token` is never used
+   --> src/mal.rs:742:8
+    |
+742 | pub fn ensure_access_token(
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SeriesOverview` is never constructed
+  --> src/overview.rs:22:12
+   |
+22 | pub struct SeriesOverview {
+   |            ^^^^^^^^^^^^^^
+
+warning: function `all_series` is never used
+  --> src/overview.rs:36:8
+   |
+36 | pub fn all_series(config: &Config, state: &State, home: Option<&Path>) -> Vec<SeriesOverview> {
+   |        ^^^^^^^^^^
+
+warning: function `overview_for` is never used
+  --> src/overview.rs:70:4
+   |
+70 | fn overview_for(
+   |    ^^^^^^^^^^^^
+
+warning: function `list_group` is never used
+  --> src/overview.rs:98:8
+   |
+98 | pub fn list_group(status: Option<Status>) -> Option<Status> {
+   |        ^^^^^^^^^^
+
+warning: function `status_rank` is never used
+   --> src/overview.rs:107:4
+    |
+107 | fn status_rank(status: Option<Status>) -> u8 {
+    |    ^^^^^^^^^^^
+
+warning: function `sorted_for_list` is never used
+   --> src/overview.rs:119:8
+    |
+119 | pub fn sorted_for_list(mut overviews: Vec<SeriesOverview>) -> Vec<SeriesOverview> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `start_display_word` is never used
+   --> src/overview.rs:136:8
+    |
+136 | pub fn start_display_word(status: Option<Status>) -> &'static str {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `eligible_for_start` is never used
+   --> src/overview.rs:148:8
+    |
+148 | pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `start_line` is never used
+   --> src/overview.rs:159:8
+    |
+159 | pub fn start_line(overview: &SeriesOverview) -> String {
+    |        ^^^^^^^^^^
+
+warning: enum `ActionError` is never used
+  --> src/pause_drop.rs:24:10
+   |
+24 | pub enum ActionError {
+   |          ^^^^^^^^^^^
+
+warning: enum `Outcome` is never used
+  --> src/pause_drop.rs:56:10
+   |
+56 | pub enum Outcome {
+   |          ^^^^^^^
+
+warning: function `pause` is never used
+  --> src/pause_drop.rs:66:8
+   |
+66 | pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
+   |        ^^^^^
+
+warning: function `drop_series` is never used
+   --> src/pause_drop.rs:102:8
+    |
+102 | pub fn drop_series(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
+    |        ^^^^^^^^^^^
+
+warning: enum `PickerOutcome` is never used
+  --> src/picker.rs:13:10
+   |
+13 | pub enum PickerOutcome<T> {
+   |          ^^^^^^^^^^^^^
+
+warning: function `pick` is never used
+  --> src/picker.rs:44:8
+   |
+44 | pub fn pick<T: Clone>(
+   |        ^^^^
+
+warning: function `dialoguer_select` is never used
+  --> src/picker.rs:70:8
+   |
+70 | pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: struct `ReconcileOutcome` is never constructed
+  --> src/reconcile.rs:76:12
+   |
+76 | pub struct ReconcileOutcome {
+   |            ^^^^^^^^^^^^^^^^
+
+warning: enum `Candidate` is never used
+  --> src/reconcile.rs:83:6
+   |
+83 | enum Candidate {
+   |      ^^^^^^^^^
+
+warning: methods `source_path`, `mtime`, and `is_real_activity` are never used
+   --> src/reconcile.rs:89:8
+    |
+ 88 | impl Candidate {
+    | -------------- methods in this implementation
+ 89 |     fn source_path(&self) -> &Path {
+    |        ^^^^^^^^^^^
+...
+ 96 |     fn mtime(&self) -> SystemTime {
+    |        ^^^^^
+...
+111 |     fn is_real_activity(&self, resume_seconds: u64) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `merge_candidates` is never used
+   --> src/reconcile.rs:127:4
+    |
+127 | fn merge_candidates(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `classify_candidate` is never used
+   --> src/reconcile.rs:156:4
+    |
+156 | fn classify_candidate(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `reconcile` is never used
+   --> src/reconcile.rs:202:8
+    |
+202 | pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
+    |        ^^^^^^^^^
+
+warning: function `reconcile_with_script_log_dirs` is never used
+   --> src/reconcile.rs:215:4
+    |
+215 | fn reconcile_with_script_log_dirs(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_idle_auto_pause` is never used
+   --> src/reconcile.rs:285:4
+    |
+285 | fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `classify_root_and_series` is never used
+   --> src/reconcile.rs:321:4
+    |
+321 | fn classify_root_and_series(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `consider_match` is never used
+   --> src/reconcile.rs:366:4
+    |
+366 | fn consider_match(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `reconcile_one_series` is never used
+   --> src/reconcile.rs:387:4
+    |
+387 | fn reconcile_one_series(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_completion_advance` is never used
+   --> src/reconcile.rs:639:4
+    |
+639 | fn apply_completion_advance(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `AddOutcome` is never used
+  --> src/roots.rs:16:10
+   |
+16 | pub enum AddOutcome {
+   |          ^^^^^^^^^^
+
+warning: enum `AddError` is never used
+  --> src/roots.rs:29:10
+   |
+29 | pub enum AddError {
+   |          ^^^^^^^^
+
+warning: function `add_root` is never used
+  --> src/roots.rs:56:8
+   |
+56 | pub fn add_root(config: &mut Config, path: &Path) -> Result<AddOutcome, AddError> {
+   |        ^^^^^^^^
+
+warning: function `add_root_with_home` is never used
+  --> src/roots.rs:60:4
+   |
+60 | fn add_root_with_home(
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: struct `FlatpakCandidate` is never constructed
+  --> src/script_log.rs:86:8
+   |
+86 | struct FlatpakCandidate {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: constant `FLATPAK_CANDIDATES` is never used
+  --> src/script_log.rs:96:7
+   |
+96 | const FLATPAK_CANDIDATES: &[FlatpakCandidate] = &[FlatpakCandidate {
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: struct `ScriptLogEntry` is never constructed
+   --> src/script_log.rs:103:12
+    |
+103 | pub struct ScriptLogEntry {
+    |            ^^^^^^^^^^^^^^
+
+warning: function `native_mpv_log_dir` is never used
+   --> src/script_log.rs:127:4
+    |
+127 | fn native_mpv_log_dir() -> io::Result<PathBuf> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `mpv_log_dirs` is never used
+   --> src/script_log.rs:141:8
+    |
+141 | pub fn mpv_log_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    |        ^^^^^^^^^^^^
+
+warning: function `parse_entry_file` is never used
+   --> src/script_log.rs:164:4
+    |
+164 | fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `scan_script_log` is never used
+   --> src/script_log.rs:217:8
+    |
+217 | pub fn scan_script_log(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `merge_freshest_wins` is never used
+   --> src/script_log.rs:252:4
+    |
+252 | fn merge_freshest_wins(entries: Vec<ScriptLogEntry>, home: Option<&Path>) -> Vec<ScriptLogEntry> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: enum `Status` is never used
+  --> src/state.rs:28:10
+   |
+28 | pub enum Status {
+   |          ^^^^^^
+
+warning: struct `SeriesRecord` is never constructed
+  --> src/state.rs:44:12
+   |
+44 | pub struct SeriesRecord {
+   |            ^^^^^^^^^^^^
+
+warning: struct `MalLink` is never constructed
+  --> src/state.rs:90:12
+   |
+90 | pub struct MalLink {
+   |            ^^^^^^^
+
+warning: struct `State` is never constructed
+  --> src/state.rs:97:12
+   |
+97 | pub struct State {
+   |            ^^^^^
+
+warning: methods `find`, `find_mut`, `find_mal_link`, and `find_mal_link_mut` are never used
+   --> src/state.rs:105:12
+    |
+104 | impl State {
+    | ---------- methods in this implementation
+105 |     pub fn find(&self, root: &str, name: &str) -> Option<&SeriesRecord> {
+    |            ^^^^
+...
+111 |     pub fn find_mut(&mut self, root: &str, name: &str) -> Option<&mut SeriesRecord> {
+    |            ^^^^^^^^
+...
+117 |     pub fn find_mal_link(&self, root: &str, name: &str) -> Option<&MalLink> {
+    |            ^^^^^^^^^^^^^
+...
+123 |     pub fn find_mal_link_mut(&mut self, root: &str, name: &str) -> Option<&mut MalLink> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `now_unix` is never used
+   --> src/state.rs:131:8
+    |
+131 | pub fn now_unix() -> u64 {
+    |        ^^^^^^^^
+
+warning: function `resolve_root_arg` is never used
+   --> src/state.rs:146:8
+    |
+146 | pub fn resolve_root_arg(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `read` is never used
+   --> src/state.rs:166:8
+    |
+166 | pub fn read(path: &Path) -> io::Result<State> {
+    |        ^^^^
+
+warning: function `write` is never used
+   --> src/state.rs:179:8
+    |
+179 | pub fn write(path: &Path, state: &State) -> io::Result<()> {
+    |        ^^^^^
+
+warning: function `atomic_write` is never used
+   --> src/state.rs:192:8
+    |
+192 | pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: Option<u32>) -> io::Result<()> {
+    |        ^^^^^^^^^^^^
+
+warning: constant `API_BASE` is never used
+  --> src/sync.rs:61:11
+   |
+61 | pub const API_BASE: &str = "https://api.myanimelist.net/v2";
+   |           ^^^^^^^^
+
+warning: constant `API_CALL_DELAY` is never used
+  --> src/sync.rs:71:11
+   |
+71 | pub const API_CALL_DELAY: Duration = Duration::from_millis(300);
+   |           ^^^^^^^^^^^^^^
+
+warning: function `throttle` is never used
+  --> src/sync.rs:77:4
+   |
+77 | fn throttle(is_first: &mut bool, delay: Duration) {
+   |    ^^^^^^^^
+
+warning: function `normalize_title` is never used
+  --> src/sync.rs:92:8
+   |
+92 | pub fn normalize_title(input: &str) -> String {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `AnimeTitles` is never constructed
+   --> src/sync.rs:110:12
+    |
+110 | pub struct AnimeTitles {
+    |            ^^^^^^^^^^^
+
+warning: struct `AnimeListEntry` is never constructed
+   --> src/sync.rs:118:12
+    |
+118 | pub struct AnimeListEntry {
+    |            ^^^^^^^^^^^^^^
+
+warning: enum `MalListStatus` is never used
+   --> src/sync.rs:131:10
+    |
+131 | pub enum MalListStatus {
+    |          ^^^^^^^^^^^^^
+
+warning: methods `api_value` and `display_name` are never used
+   --> src/sync.rs:143:8
+    |
+142 | impl MalListStatus {
+    | ------------------ methods in this implementation
+143 |     fn api_value(self) -> Option<&'static str> {
+    |        ^^^^^^^^^
+...
+154 |     pub fn display_name(self) -> &'static str {
+    |            ^^^^^^^^^^^^
+
+warning: function `candidate_titles` is never used
+   --> src/sync.rs:169:4
+    |
+169 | fn candidate_titles(entry: &AnimeListEntry) -> Vec<&str> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `find_exact_match` is never used
+   --> src/sync.rs:183:8
+    |
+183 | pub fn find_exact_match<'a>(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `levenshtein` is never used
+   --> src/sync.rs:199:4
+    |
+199 | fn levenshtein(a: &str, b: &str) -> usize {
+    |    ^^^^^^^^^^^
+
+warning: function `title_similarity` is never used
+   --> src/sync.rs:218:8
+    |
+218 | pub fn title_similarity(a: &str, b: &str) -> f64 {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `Candidate` is never constructed
+   --> src/sync.rs:228:12
+    |
+228 | pub struct Candidate {
+    |            ^^^^^^^^^
+
+warning: function `rank_candidates` is never used
+   --> src/sync.rs:240:8
+    |
+240 | pub fn rank_candidates(
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `best_candidate` is never used
+   --> src/sync.rs:275:8
+    |
+275 | pub fn best_candidate(
+    |        ^^^^^^^^^^^^^^
+
+warning: enum `SyncApiError` is never used
+   --> src/sync.rs:289:10
+    |
+289 | pub enum SyncApiError {
+    |          ^^^^^^^^^^^^
+
+warning: struct `AlternativeTitlesJson` is never constructed
+   --> src/sync.rs:309:8
+    |
+309 | struct AlternativeTitlesJson {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MyListStatusJson` is never constructed
+   --> src/sync.rs:319:8
+    |
+319 | struct MyListStatusJson {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `AnimeNodeJson` is never constructed
+   --> src/sync.rs:327:8
+    |
+327 | struct AnimeNodeJson {
+    |        ^^^^^^^^^^^^^
+
+warning: struct `AnimeListEntryJson` is never constructed
+   --> src/sync.rs:339:8
+    |
+339 | struct AnimeListEntryJson {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: struct `PagingJson` is never constructed
+   --> src/sync.rs:348:8
+    |
+348 | struct PagingJson {
+    |        ^^^^^^^^^^
+
+warning: struct `AnimeListResponseJson` is never constructed
+   --> src/sync.rs:354:8
+    |
+354 | struct AnimeListResponseJson {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `to_anime_list_entry` is never used
+   --> src/sync.rs:360:4
+    |
+360 | fn to_anime_list_entry(entry: AnimeListEntryJson) -> AnimeListEntry {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_LIST_PAGES` is never used
+   --> src/sync.rs:388:7
+    |
+388 | const MAX_LIST_PAGES: usize = 200;
+    |       ^^^^^^^^^^^^^^
+
+warning: function `fetch_anime_list` is never used
+   --> src/sync.rs:395:8
+    |
+395 | pub fn fetch_anime_list(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `require_success` is never used
+   --> src/sync.rs:434:4
+    |
+434 | fn require_success(resp: &HttpResponse) -> Result<(), SyncApiError> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: struct `AnimeStatus` is never constructed
+   --> src/sync.rs:445:12
+    |
+445 | pub struct AnimeStatus {
+    |            ^^^^^^^^^^^
+
+warning: function `fetch_anime_status` is never used
+   --> src/sync.rs:460:8
+    |
+460 | pub fn fetch_anime_status(
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `update_mal_entry` is never used
+   --> src/sync.rs:506:4
+    |
+506 | fn update_mal_entry(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `MergeAction` is never used
+   --> src/sync.rs:543:10
+    |
+543 | pub enum MergeAction {
+    |          ^^^^^^^^^^^
+
+warning: function `decide_merge` is never used
+   --> src/sync.rs:556:8
+    |
+556 | pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
+    |        ^^^^^^^^^^^^
+
+warning: function `desired_status` is never used
+   --> src/sync.rs:568:4
+    |
+568 | fn desired_status(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `transition_dates` is never used
+   --> src/sync.rs:591:4
+    |
+591 | fn transition_dates(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `local_effective_episode` is never used
+   --> src/sync.rs:625:8
+    |
+625 | pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `advance_local_cursor` is never used
+   --> src/sync.rs:651:4
+    |
+651 | fn advance_local_cursor(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_synced_progress` is never used
+   --> src/sync.rs:722:8
+    |
+722 | pub fn apply_synced_progress(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `merge_and_maybe_update` is never used
+   --> src/sync.rs:758:4
+    |
+758 | fn merge_and_maybe_update(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_merge_result` is never used
+   --> src/sync.rs:801:4
+    |
+801 | fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: enum `ManualLinkError` is never used
+   --> src/sync.rs:815:10
+    |
+815 | pub enum ManualLinkError {
+    |          ^^^^^^^^^^^^^^^
+
+warning: function `manual_link` is never used
+   --> src/sync.rs:844:8
+    |
+844 | pub fn manual_link(
+    |        ^^^^^^^^^^^
+
+warning: function `upsert_link` is never used
+   --> src/sync.rs:860:4
+    |
+860 | fn upsert_link(state: &mut State, root: &str, name: &str, mal_id: u32) {
+    |    ^^^^^^^^^^^
+
+warning: enum `OutcomeKind` is never used
+   --> src/sync.rs:875:10
+    |
+875 | pub enum OutcomeKind {
+    |          ^^^^^^^^^^^
+
+warning: struct `SeriesOutcome` is never constructed
+   --> src/sync.rs:891:12
+    |
+891 | pub struct SeriesOutcome {
+    |            ^^^^^^^^^^^^^
+
+warning: function `eligible_targets` is never used
+   --> src/sync.rs:904:8
+    |
+904 | pub fn eligible_targets(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `run_sync` is never used
+   --> src/sync.rs:935:8
+    |
+935 | pub fn run_sync(
+    |        ^^^^^^^^
+
+warning: function `run_sync_on_date` is never used
+   --> src/sync.rs:957:4
+    |
+957 | fn run_sync_on_date(
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `TargetError` is never used
+  --> src/target.rs:17:10
+   |
+17 | pub enum TargetError {
+   |          ^^^^^^^^^^^
+
+warning: function `resolve_series_root` is never used
+  --> src/target.rs:35:8
+   |
+35 | pub fn resolve_series_root(
+   |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `current_version` is never used
+  --> src/update.rs:27:8
+   |
+27 | pub fn current_version() -> &'static str {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `GithubRepo` is never constructed
+  --> src/update.rs:32:8
+   |
+32 | struct GithubRepo {
+   |        ^^^^^^^^^^
+
+warning: function `parse_repository_url` is never used
+  --> src/update.rs:44:4
+   |
+44 | fn parse_repository_url(url: &str) -> Option<GithubRepo> {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `github_repo` is never used
+  --> src/update.rs:65:4
+   |
+65 | fn github_repo() -> GithubRepo {
+   |    ^^^^^^^^^^^
+
+warning: methods `latest_release_api_url` and `install_script_url` are never used
+  --> src/update.rs:72:8
+   |
+71 | impl GithubRepo {
+   | --------------- methods in this implementation
+72 |     fn latest_release_api_url(&self) -> String {
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     fn install_script_url(&self) -> String {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `user_agent` is never used
+  --> src/update.rs:89:4
+   |
+89 | fn user_agent() -> String {
+   |    ^^^^^^^^^^
+
+warning: function `parse_semver_tag` is never used
+   --> src/update.rs:104:4
+    |
+104 | fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: enum `UpdateStatus` is never used
+   --> src/update.rs:119:10
+    |
+119 | pub enum UpdateStatus {
+    |          ^^^^^^^^^^^^
+
+warning: method `render` is never used
+   --> src/update.rs:136:12
+    |
+132 | impl UpdateStatus {
+    | ----------------- method in this implementation
+...
+136 |     pub fn render(&self, current: &str) -> String {
+    |            ^^^^^^
+
+warning: enum `UpdateCheckError` is never used
+   --> src/update.rs:164:10
+    |
+164 | pub enum UpdateCheckError {
+    |          ^^^^^^^^^^^^^^^^
+
+warning: struct `ReleaseJson` is never constructed
+   --> src/update.rs:181:8
+    |
+181 | struct ReleaseJson {
+    |        ^^^^^^^^^^^
+
+warning: function `fetch_latest_release` is never used
+   --> src/update.rs:189:4
+    |
+189 | fn fetch_latest_release(repo: &GithubRepo) -> Result<HttpResponse, UpdateCheckError> {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `parse_latest_release_tag` is never used
+   --> src/update.rs:201:4
+    |
+201 | fn parse_latest_release_tag(resp: &HttpResponse) -> Result<String, UpdateCheckError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `compare_to_latest_tag` is never used
+   --> src/update.rs:210:4
+    |
+210 | fn compare_to_latest_tag(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_for_update` is never used
+   --> src/update.rs:232:8
+    |
+232 | pub fn check_for_update() -> Result<UpdateStatus, UpdateCheckError> {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `install_command_line` is never used
+   --> src/update.rs:245:4
+    |
+245 | fn install_command_line() -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `InstallError` is never used
+   --> src/update.rs:254:10
+    |
+254 | pub enum InstallError {
+    |          ^^^^^^^^^^^^
+
+warning: function `run_install` is never used
+   --> src/update.rs:276:8
+    |
+276 | pub fn run_install() -> Result<(), InstallError> {
+    |        ^^^^^^^^^^^
+
+warning: variant `Transport` is never constructed
+   --> src/update.rs:165:5
+    |
+164 | pub enum UpdateCheckError {
+    |          ---------------- variant in this enum
+165 |     Transport(String),
+    |     ^^^^^^^^^
+    |
+    = note: `UpdateCheckError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: `tsuzuki` (bin "tsuzuki") generated 248 warnings (run `cargo fix --bin "tsuzuki" -p tsuzuki` to apply 7 suggestions)
+warning: `tsuzuki` (bin "tsuzuki" test) generated 26 warnings (25 duplicates)
+       Fresh tsuzuki v0.1.2 (/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/tsuzuki-84e7f8ccf549cf5c`
+
+running 458 tests
+test anitomy::tests::a_non_utf8_filename_falls_back_to_ordinal_without_panicking ... ok
+test anitomy::tests::an_empty_file_list_returns_an_empty_vec_without_panicking ... ok
+test anitomy::tests::a_multi_episode_range_deterministically_takes_the_first_episode_element ... ok
+test anitomy::tests::a_path_with_directory_components_still_parses_correctly ... ok
+test config::tests::defaults_match_design_doc ... ok
+test config::tests::dotted_and_bare_video_extensions_normalize_to_the_same_result ... ok
+test config::tests::exclusions_round_trip_through_write_and_read ... ok
+test config::tests::missing_command_override_key_defaults_to_empty_on_read ... ok
+test config::tests::missing_exclusions_key_defaults_to_empty_on_read ... ok
+test config::tests::missing_fuzzy_match_threshold_key_defaults_to_zero_point_eight_not_zero ... ok
+test config::tests::missing_redirect_port_key_defaults_to_8734_not_zero ... ok
+test config::tests::missing_thresholds_table_and_missing_individual_threshold_keys_both_default_correctly ... ok
+test config::tests::missing_video_extensions_key_defaults_to_the_documented_list_not_empty ... ok
+test config::tests::read_missing_file_writes_and_returns_defaults ... ok
+test config::tests::video_extensions_with_leading_dots_are_normalized_on_read ... ok
+test config::tests::write_fails_gracefully_when_parent_path_is_occupied_by_a_file ... ok
+test config::tests::write_then_read_round_trips ... ok
+test doctor::tests::a_record_under_an_unreachable_root_is_never_flagged_as_an_orphan ... ok
+test doctor::tests::a_record_whose_series_folder_is_gone_is_an_orphan ... ok
+test doctor::tests::a_record_whose_series_folder_still_exists_is_not_an_orphan ... ok
+test doctor::tests::both_present_is_warn_not_fail ... ok
+test doctor::tests::check_mpv_conf_missing_file_fails ... ok
+test doctor::tests::check_mpv_conf_permission_denied_is_distinguished_from_missing ... ok
+test doctor::tests::check_mpv_conf_present_and_set_is_ok ... ok
+test doctor::tests::check_mpv_conf_present_but_commented_out_fails ... ok
+test doctor::tests::combine_fail_wins_over_warn_and_ok ... ok
+test doctor::tests::combine_is_ok_only_when_every_result_is_ok ... ok
+test doctor::tests::combine_warn_wins_over_ok_when_no_fail_present ... ok
+test doctor::tests::command_override_resolves_checks_an_absolute_path_directly ... ok
+test doctor::tests::command_override_resolves_checks_the_first_token_on_path ... ok
+test doctor::tests::command_override_set_and_not_resolving_is_fail_even_if_native_present ... ok
+test doctor::tests::command_override_set_and_resolving_is_ok_regardless_of_presence ... ok
+test doctor::tests::detected_installs_excludes_flatpak_when_not_present ... ok
+test doctor::tests::detected_installs_excludes_flatpak_with_no_home ... ok
+test doctor::tests::detected_installs_includes_flatpak_when_present_and_home_known ... ok
+test doctor::tests::flag_state_absent_entirely ... ok
+test doctor::tests::flag_state_bare_flag_form_implies_yes ... ok
+test doctor::tests::flag_state_commented_out_is_treated_as_absent ... ok
+test doctor::tests::flag_state_explicit_negation ... ok
+test doctor::tests::flag_state_last_directive_wins ... ok
+test doctor::tests::flag_state_present_as_yes ... ok
+test doctor::tests::flatpak_only_is_ok ... ok
+test doctor::tests::flatpak_permissions_never_fails_regardless_of_input ... ok
+test doctor::tests::flatpak_permissions_ok_on_broad_host_access ... ok
+test doctor::tests::flatpak_permissions_skipped_when_flatpak_not_present ... ok
+test doctor::tests::flatpak_permissions_warns_on_narrow_access ... ok
+test doctor::tests::flatpak_permissions_warns_when_cli_missing ... ok
+test doctor::tests::flatpak_permissions_warns_when_output_unavailable ... ok
+test doctor::tests::forget_orphans_removes_only_the_confirmed_orphans ... ok
+test doctor::tests::install_script_leaves_no_stray_temp_files ... ok
+test doctor::tests::install_script_overwrites_stale_content ... ok
+test doctor::tests::install_script_writes_the_bundled_content_and_creates_the_directory ... ok
+test doctor::tests::mal_auth_network_error_is_warn_not_fail ... ok
+test doctor::tests::mal_auth_not_configured_is_warn ... ok
+test doctor::tests::mal_auth_not_logged_in_is_warn ... ok
+test doctor::tests::mal_auth_refresh_rejected_is_fail ... ok
+test doctor::tests::mal_auth_refreshed_token_is_ok ... ok
+test doctor::tests::mal_auth_valid_token_is_ok ... ok
+test doctor::tests::mpv_log_existing_readable_directory_is_ok ... ok
+test anitomy::tests::a_purely_numeric_filename_has_no_context_for_anitomy_to_recognize_as_an_episode ... ok
+test doctor::tests::mpv_log_existing_unreadable_directory_fails ... ok
+test anitomy::tests::an_episode_element_that_parses_but_isnt_a_valid_u32_falls_back_to_ordinal ... ok
+test anitomy::tests::a_parseable_filename_uses_anitomys_episode_number ... ok
+test anitomy::tests::a_file_with_no_parent_directory_component_still_resolves_its_filename ... ok
+test anitomy::tests::duplicate_parsed_episode_numbers_across_different_files_are_silently_allowed ... ok
+test anitomy::tests::an_unparseable_filename_falls_back_to_ordinal_position ... ok
+test doctor::tests::mpv_log_missing_and_unreadable_are_distinguished_not_conflated ... ok
+test doctor::tests::mpv_log_missing_directory_is_ok ... ok
+test doctor::tests::native_only_is_ok ... ok
+test doctor::tests::neither_present_is_fail ... ok
+test doctor::tests::orphan_check_result_lists_every_orphan_and_the_exact_forget_command ... ok
+test doctor::tests::orphan_check_result_with_no_orphans_is_ok ... ok
+test doctor::tests::render_uses_symbols_and_indents_the_action_line ... ok
+test doctor::tests::summarize_tracked_roots_names_every_unreachable_root_not_just_the_first ... ok
+test doctor::tests::summarize_tracked_roots_with_none_configured_is_ok_not_absent ... ok
+test doctor::tests::tracked_root_missing_is_fail ... ok
+test doctor::tests::tracked_root_reachable_is_ok ... ok
+test doctor::tests::tsuzuki_lua_missing_needs_fix ... ok
+test doctor::tests::tsuzuki_lua_matching_bundled_is_ok_and_needs_no_fix ... ok
+test doctor::tests::tsuzuki_lua_stale_content_needs_fix ... ok
+test doctor::tests::watch_later_os_default_mode_never_fails_when_nothing_exists ... ok
+test doctor::tests::watch_later_override_not_resolving_fails ... ok
+test duration::tests::avi_fallback_computes_duration_from_frames_times_microseconds ... ok
+test doctor::tests::watch_later_override_resolving_is_ok ... ok
+test duration::tests::avi_fallback_returns_none_for_non_riff_bytes ... ok
+test duration::tests::avi_fallback_returns_none_when_avih_chunk_is_missing ... ok
+test duration::tests::avi_fallback_returns_none_when_micro_sec_per_frame_is_zero ... ok
+test duration::tests::duration_unknown_carries_an_io_reason_when_the_file_does_not_exist ... ok
+test duration::tests::duration_unknown_for_a_zero_byte_file_no_panic ... ok
+test duration::tests::duration_unknown_for_a_plain_text_file_renamed_with_a_video_extension ... ok
+test duration::tests::duration_unknown_when_neither_symphonia_nor_the_avi_fallback_can_read_the_file ... ok
+test duration::tests::avi_fallback_does_not_false_positive_on_avih_bytes_without_a_riff_avi_header ... ok
+test duration::tests::probe_duration_via_avi_fallback_when_symphonia_cannot_identify_the_file ... ok
+test duration::tests::symphonia_reads_duration_from_a_real_mp4_fixture ... ok
+test anitomy::tests::a_numbering_gap_uses_parsed_numbers_not_ordinal_positions ... ok
+test exclude::tests::a_file_inside_an_excluded_symlinked_directory_is_never_suggested ... ok
+test duration::tests::probe_duration_prefers_symphonia_over_avi_fallback_for_a_real_mkv ... ok
+test duration::tests::symphonia_reads_duration_from_a_real_mkv_fixture ... ok
+test duration::tests::probe_duration_is_reached_via_content_probe_not_the_avi_extension ... ok
+test exclude::tests::ambiguous_display_format_matches_the_design_doc ... ok
+test exclude::tests::a_trailing_slash_variant_of_an_already_excluded_path_is_recognized_as_idempotent ... ok
+test exclude::tests::an_absolute_path_argument_is_rejected_before_it_ever_reaches_join ... ok
+test exclude::tests::ambiguous_match_across_two_roots_lists_both_and_errors_without_root ... ok
+test exclude::tests::an_absolute_path_argument_is_rejected_even_with_root_given ... ok
+test exclude::tests::excluded_paths_for_root_is_empty_when_no_exclusions_match_that_root ... ok
+test exclude::tests::excluded_paths_for_root_expands_only_entries_matching_that_root ... ok
+test exclude::tests::excludes_a_single_file_under_a_single_tracked_root ... ok
+test exclude::tests::excludes_a_subdirectory_under_a_single_tracked_root ... ok
+test exclude::tests::a_video_file_whose_own_filename_has_no_type_keyword_is_not_suggested_even_inside_a_specials_folder ... ok
+test exclude::tests::a_suggest_worthy_file_several_directories_deep_is_still_found ... ok
+test exclude::tests::a_suggest_worthy_file_reached_through_a_symlinked_directory_is_still_suggested ... ok
+test exclude::tests::excluding_a_directory_after_a_file_within_it_was_already_excluded_keeps_both_entries ... ok
+test exclude::tests::excluding_a_lone_file_directly_under_root_is_not_rejected_as_a_whole_series ... ok
+test exclude::tests::excluding_a_file_already_covered_by_a_prior_directory_exclusion_is_accepted_as_a_separate_entry ... ok
+test exclude::tests::excluding_a_nonexistent_path_errors ... ok
+test exclude::tests::excluding_a_symlinked_directory_follows_it_with_stat_semantics ... ok
+test exclude::tests::excluding_a_symlinked_top_level_entry_is_still_rejected_as_a_whole_series ... ok
+test exclude::tests::ambiguous_match_resolved_with_root_flag_picks_the_named_root ... ok
+test exclude::tests::exclusion_persists_the_roots_literal_tilde_form_not_an_expanded_path ... ok
+test exclude::tests::an_already_excluded_candidate_is_never_suggested_again ... ok
+test exclude::tests::re_excluding_the_same_path_is_idempotent ... ok
+test exclude::tests::root_flag_not_matching_any_tracked_root_errors ... ok
+test exclude::tests::root_flag_naming_a_tracked_root_that_does_not_contain_the_path_returns_not_found ... ok
+test exclude::tests::root_flag_works_when_only_one_tracked_root_exists_no_ambiguity_to_resolve ... ok
+test exclude::tests::a_suggest_worthy_type_with_no_parseable_episode_number_is_still_suggested ... ok
+test exclude::tests::excluding_a_whole_series_directory_is_rejected ... ok
+test launch::tests::command_override_bypasses_detection_entirely ... ok
+test exclude::tests::suggest_candidates_reports_the_owning_root_for_each_candidate ... ok
+test launch::tests::falls_back_to_flatpak_when_native_is_absent ... ok
+test launch::tests::native_present_picks_native_without_attempting_flatpak_first ... ok
+test launch::tests::neither_native_nor_flatpak_available_returns_none ... ok
+test launch::tests::resume_playback_returns_a_typed_spawn_error_never_panics_when_resolution_fails_to_launch ... ok
+test exclude::tests::the_tsuzuki_binary_crate_can_call_into_the_vendored_workspace_dependency ... ok
+test launch::tests::spawn_failure_on_a_nonexistent_program_returns_a_typed_error_not_a_panic ... ok
+test launch::tests::command_override_with_a_single_word_has_no_base_args ... ok
+test mal::tests::default_client_id_authenticates_without_a_client_secret ... ignored, makes a real (but harmless — fake code, no login) network call to MyAnimeList
+test mal::tests::authorize_url_contains_the_expected_query_parameters ... ok
+test exclude::tests::tv_and_sp_type_values_are_never_suggested ... ok
+test exclude::tests::zero_candidates_when_nothing_matches_a_suggest_worthy_type ... ok
+test mal::tests::expiring_token_triggers_refresh_and_persists_the_new_token ... ok
+test launch::tests::a_non_executable_file_named_mpv_on_path_is_not_resolved_as_native ... ok
+test exclude::tests::suggestion_matching_is_case_insensitive_on_the_type_value_itself ... ok
+test mal::tests::not_configured_when_client_id_is_empty ... ok
+test mal::tests::pkce_challenge_equals_verifier_under_plain_method ... ok
+test mal::tests::not_logged_in_when_no_token_file_exists ... ok
+test mal::tests::pkce_verifier_is_64_chars_within_rfc7636_bounds ... ok
+test mal::tests::percent_encode_round_trips_through_percent_decode ... ok
+test mal::tests::pkce_verifier_uses_only_unreserved_characters ... ok
+test mal::tests::real_ureq_client_actually_reaches_mal_over_https ... ignored, makes a real (but harmless — garbage credentials, no login) network call to MyAnimeList
+test mal::tests::read_missing_token_file_returns_none_not_an_error ... ok
+test mal::tests::print_real_default_authorize_url_from_zero_config ... ok
+test mal::tests::resolve_client_id_uses_the_built_in_default_when_config_is_empty ... ok
+test mal::tests::resolve_client_id_uses_the_configured_override_when_present ... ok
+test exclude::tests::suggests_only_ova_special_movie_style_files_not_regular_episodes ... ok
+test mal::tests::state_value_is_32_alphanumeric_chars ... ok
+test mal::tests::rejected_refresh_is_distinguished_from_a_network_error ... ok
+test mal::tests::token_debug_output_never_contains_the_raw_secret_values ... ok
+test mal::tests::successive_pkce_pairs_and_states_are_not_identical ... ok
+test mal::tests::transport_failure_is_a_network_error_not_a_rejection ... ok
+test mal::tests::valid_unexpired_token_needs_no_refresh_and_makes_no_network_call ... ok
+test mal::tests::write_leaves_no_stray_temp_files ... ok
+test mal::tests::write_replaces_via_rename_not_in_place_mutation ... ok
+test mal::tests::write_then_read_token_round_trips ... ok
+test mal::tests::write_token_sets_0600_permissions ... ok
+test mpv::tests::a_malformed_entry_missing_start_is_skipped ... ok
+test mpv::tests::a_malformed_entry_with_garbage_first_line_is_skipped ... ok
+test mpv::tests::a_malformed_entry_with_unparseable_start_value_is_skipped ... ok
+test mpv::tests::a_malformed_entry_alongside_a_valid_one_does_not_abort_the_scan ... ok
+test mpv::tests::a_normal_entry_parses_path_and_position ... ok
+test mpv::tests::a_redirect_entry_is_discarded ... ok
+test mpv::tests::a_redirect_entry_with_a_trailing_start_line_is_still_discarded ... ok
+test mpv::tests::a_watch_later_dir_override_pointing_at_a_nonexistent_path_surfaces_a_warning ... ok
+test mpv::tests::an_entry_outside_every_tracked_root_is_filtered_out ... ok
+test mpv::tests::an_entry_under_a_tracked_root_survives_filtering ... ok
+test mpv::tests::an_entry_under_a_symlinked_series_folder_survives_filtering ... ok
+test mpv::tests::filtering_does_not_panic_when_a_tracked_root_no_longer_exists_on_disk ... ok
+test mpv::tests::linux_candidates_match_design_doc_exactly ... ok
+test mpv::tests::filtering_does_not_panic_when_the_entrys_source_file_no_longer_exists_on_disk ... ok
+test mpv::tests::empty_override_falls_back_to_os_default_candidates ... ok
+test mpv::tests::merge_on_an_exact_mtime_tie_is_deterministic ... ok
+test mpv::tests::most_recent_entry_on_empty_slice_returns_none ... ok
+test mpv::tests::most_recent_entry_picks_the_newest_mtime ... ok
+test mpv::tests::overlap_case_on_a_short_file_start_from_zero_wins_over_completed ... ok
+test mpv::tests::os_default_mode_with_every_candidate_directory_absent_yields_zero_entries_and_zero_warnings ... ok
+test mpv::tests::position_exactly_at_resume_threshold_resumes_from_that_position ... ok
+test mpv::tests::merge_is_per_path_not_per_directory ... ok
+test mpv::tests::position_just_above_resume_threshold_resumes_from_that_position ... ok
+test mpv::tests::position_just_below_resume_threshold_starts_from_zero ... ok
+test mpv::tests::remaining_exactly_at_completion_threshold_is_completed ... ok
+test mpv::tests::override_replaces_the_default_candidate_list_entirely ... ok
+test mpv::tests::remaining_just_above_completion_threshold_resumes ... ok
+test mpv::tests::remaining_just_below_completion_threshold_is_completed ... ok
+test mpv::tests::resolve_with_no_home_and_no_override_returns_empty ... ok
+test mpv::tests::scan_watch_later_does_not_panic_when_a_tracked_root_is_missing_from_disk ... ok
+test mpv::tests::three_way_duplicate_the_freshest_wins_even_when_processed_first ... ok
+test mpv::tests::the_warning_carries_the_literal_tilde_form_not_the_expanded_path ... ok
+test mpv::tests::unknown_duration_reason_is_carried_through_even_when_position_based_classification_applies ... ok
+test mpv::tests::unknown_duration_skips_completion_check_but_still_resumes_from_position ... ok
+test mpv::tests::same_source_path_in_two_directories_the_newer_mtime_wins ... ok
+test overview::tests::all_four_real_states_produce_correct_and_distinct_words_together ... ok
+test overview::tests::eligible_for_start_excludes_in_progress ... ok
+test overview::tests::episode_number_falls_back_to_ordinal_when_anitomy_cannot_parse ... ok
+test overview::tests::list_group_and_start_word_for_every_status_match_the_hand_written_table ... ok
+test overview::tests::list_group_folds_completed_into_dropped_and_leaves_the_rest ... ok
+test overview::tests::a_nested_tracked_root_does_not_also_appear_as_a_series_of_its_parent_root ... ok
+test overview::tests::all_series_enumerates_across_tracked_roots_and_cross_references_state ... ok
+test overview::tests::paused_display_word_never_contains_rewatch ... ok
+test overview::tests::paused_start_line_never_contains_rewatch ... ok
+test overview::tests::sorted_for_list_breaks_name_ties_by_root ... ok
+test overview::tests::sorted_for_list_groups_by_status_then_alphabetical_within_group ... ok
+test overview::tests::sorted_for_list_places_completed_alphabetically_with_dropped ... ok
+test overview::tests::start_display_word_is_resume_for_paused ... ok
+test overview::tests::start_display_word_is_rewatch_for_completed ... ok
+test overview::tests::start_display_word_is_rewatch_for_dropped ... ok
+test overview::tests::start_display_word_is_start_for_never_started ... ok
+test pause_drop::tests::drop_on_already_dropped_is_idempotent_not_an_error ... ok
+test pause_drop::tests::drop_on_completed_is_an_invalid_transition_error_and_leaves_the_record ... ok
+test pause_drop::tests::drop_transitions_in_progress_to_dropped_without_mutating_position ... ok
+test pause_drop::tests::drop_transitions_paused_to_dropped ... ok
+test pause_drop::tests::drop_with_no_record_errors ... ok
+test pause_drop::tests::dropped_to_paused_transition_does_not_exist ... ok
+test pause_drop::tests::pause_and_drop_outcome_for_every_status_matches_the_hand_written_table ... ok
+test pause_drop::tests::pause_never_mutates_position_or_current_path ... ok
+test pause_drop::tests::pause_on_already_paused_is_idempotent ... ok
+test pause_drop::tests::pause_on_completed_is_an_invalid_transition_error ... ok
+test pause_drop::tests::pause_on_dropped_is_an_invalid_transition_error ... ok
+test pause_drop::tests::pause_transitions_in_progress_to_paused ... ok
+test pause_drop::tests::pause_with_no_record_errors ... ok
+test pause_drop::tests::root_disambiguation_keys_strictly_on_both_root_and_name ... ok
+test picker::tests::non_tty_lists_every_choice_with_a_one_based_index_and_selects_nothing ... ok
+test picker::tests::non_tty_with_zero_items_prints_nothing_and_still_reports_listed ... ok
+test picker::tests::stdin_is_tty_does_not_panic_in_a_test_harness ... ok
+test picker::tests::tty_selection_cancelled_reports_cancelled_not_a_default_selection ... ok
+test picker::tests::tty_selection_labels_are_built_from_the_label_closure_not_the_raw_items ... ok
+test picker::tests::tty_selection_path_drives_a_fabricated_choice_through_to_selected ... ok
+test reconcile::tests::a_dropped_series_with_an_unchanged_bookmark_stays_dropped_across_reconcile_calls ... ok
+test reconcile::tests::a_genuinely_completed_record_is_not_reactivated_by_a_fresh_completed_reading ... ok
+test reconcile::tests::a_completed_series_reopened_on_episode_one_restarts_as_in_progress ... ok
+test reconcile::tests::a_genuinely_dropped_record_is_not_reactivated_by_a_fresh_completed_reading ... ok
+test reconcile::tests::a_duration_based_completed_reading_is_treated_like_absence_and_scanning_continues ... ok
+test reconcile::tests::a_malformed_script_log_file_alongside_a_valid_one_does_not_abort_the_scan ... ok
+test reconcile::tests::a_completed_reading_on_the_last_episode_marks_completed_instead_of_freezing_or_updating_in_place ... ok
+test reconcile::tests::a_never_tracked_series_completed_on_a_non_last_episode_lands_on_the_next_one ... ok
+test reconcile::tests::a_multi_hop_completion_chain_lands_episode_number_on_the_true_final_episode_before_completing ... ok
+test reconcile::tests::a_noise_reading_creates_no_record ... ok
+test reconcile::tests::a_never_tracked_series_completed_via_an_ordinary_watch_later_reading_also_gets_a_record ... ok
+test reconcile::tests::a_nonzero_auto_pause_days_pauses_a_genuinely_idle_series ... ok
+test reconcile::tests::a_never_tracked_single_episode_series_completed_via_script_eof_marks_completed ... ok
+test reconcile::tests::a_noise_reading_leaves_an_existing_real_record_untouched ... ok
+test reconcile::tests::a_series_idle_for_fewer_than_auto_pause_days_stays_in_progress ... ok
+test reconcile::tests::a_record_whose_series_folder_no_longer_resolves_is_skipped_not_crashed_or_deleted ... ok
+test launch::tests::start_is_scoped_to_the_file_with_per_file_option_braces ... ok
+test reconcile::tests::a_sub_threshold_reading_on_the_next_episode_does_not_corroborate_the_current_ones_absence ... ok
+test reconcile::tests::absence_alone_never_advances_or_mutates_the_record ... ok
+test reconcile::tests::a_real_bookmark_creates_a_brand_new_record_for_a_never_tracked_series ... ok
+test reconcile::tests::auto_pause_days_zero_never_pauses_no_matter_how_old ... ok
+test reconcile::tests::an_unchanged_bookmark_never_flips_a_paused_series_back_to_in_progress ... ok
+test reconcile::tests::a_paused_series_reactivates_when_a_new_real_bookmark_appears_on_a_later_episode ... ok
+test reconcile::tests::classify_candidate_script_non_eof_below_resume_threshold_is_no_signal ... ok
+test reconcile::tests::classify_candidate_script_non_eof_uses_its_own_duration_not_a_probe ... ok
+test reconcile::tests::already_paused_and_dropped_records_are_left_alone_regardless_of_age ... ok
+test reconcile::tests::classify_candidate_script_non_eof_with_no_position_is_no_signal ... ok
+test reconcile::tests::classify_candidate_script_eof_is_completed_regardless_of_position_or_duration ... ok
+test reconcile::tests::merge_candidates_on_an_exact_mtime_tie_the_script_entry_wins ... ok
+test reconcile::tests::a_symlinked_series_folder_reconciles_correctly ... ok
+test reconcile::tests::merge_candidates_script_only_is_selected ... ok
+test reconcile::tests::merge_candidates_script_strictly_fresher_wins ... ok
+test reconcile::tests::merge_candidates_watch_later_only_is_selected ... ok
+test reconcile::tests::merge_candidates_watch_later_strictly_fresher_wins ... ok
+test reconcile::tests::composable_roots_resolve_to_the_most_specific_matching_root ... ok
+test reconcile::tests::current_episode_completes_and_next_episode_already_has_its_own_real_resume_bookmark ... ok
+test reconcile::tests::reconcile_own_write_is_stable_across_a_second_call_with_nothing_new_on_disk ... ok
+test reconcile::tests::reconcile_script_stop_exactly_at_resume_seconds_counts_as_real_activity ... ok
+test reconcile::tests::opening_an_episode_of_a_dropped_series_flips_it_back_to_in_progress ... ok
+test reconcile::tests::reconcile_script_stop_exactly_at_resume_seconds_creates_a_record_for_an_untracked_series ... ok
+test reconcile::tests::reconcile_script_stop_just_below_resume_seconds_leaves_an_existing_record_untouched ... ok
+test reconcile::tests::reconcile_script_stop_matching_an_in_progress_record_leaves_it_byte_identical ... ok
+test reconcile::tests::current_episode_completes_then_next_also_completes_then_a_third_blank_episode_in_one_call ... ok
+test reconcile::tests::reconcile_with_no_entries_and_no_record_creates_no_record ... ok
+test reconcile::tests::scan_warning_is_surfaced_through_reconcile_outcome ... ok
+test reconcile::tests::reconcile_twice_against_an_unchanged_script_log_entry_reflecting_a_prior_drop_is_a_no_op ... ok
+test reconcile::tests::script_reason_redirect_is_discarded_and_never_becomes_a_candidate ... ok
+test reconcile::tests::reconcile_wires_auto_pause_days_end_to_end_and_never_immediately_repauses_fresh_activity ... ok
+test reconcile::tests::script_reason_stop_below_resume_threshold_creates_no_record ... ok
+test reconcile::tests::set_mtime_helper_actually_changes_mtime ... ok
+test reconcile::tests::script_only_eof_on_the_last_episode_marks_completed_flagship ... ok
+test reconcile::tests::script_reason_stop_with_a_real_position_is_treated_as_an_ordinary_resume ... ok
+test roots::tests::a_dotdot_path_resolving_to_an_already_tracked_root_is_recognized ... ok
+test reconcile::tests::script_only_eof_on_a_non_last_episode_advances_the_cursor ... ok
+test roots::tests::a_symlink_to_an_already_tracked_root_is_recognized ... ok
+test roots::tests::add_persists_a_tilde_path_literally_not_expanded ... ok
+test roots::tests::adds_new_root_and_persists_to_config_exactly_as_given ... ok
+test roots::tests::already_tracked_matches_across_tilde_and_absolute_forms ... ok
+test roots::tests::already_tracked_matches_through_a_symlinked_home_directory ... ok
+test roots::tests::distinct_roots_both_get_added ... ok
+test roots::tests::distinctly_cased_paths_are_treated_as_different_roots ... ok
+test roots::tests::re_adding_a_tilde_path_with_a_trailing_slash_is_recognized_as_already_tracked ... ok
+test roots::tests::re_adding_the_same_root_is_idempotent ... ok
+test roots::tests::rejects_nonexistent_path ... ok
+test roots::tests::re_adding_with_a_trailing_slash_is_recognized_as_already_tracked ... ok
+test roots::tests::rejects_path_that_is_a_file_not_a_directory ... ok
+test reconcile::tests::single_run_chaining_resolves_a_multi_step_binge_in_one_call ... ok
+test script_log::tests::a_malformed_entry_missing_reason_is_skipped ... ok
+test script_log::tests::a_malformed_entry_missing_the_comment_line_is_skipped ... ok
+test script_log::tests::a_malformed_entry_alongside_a_valid_one_does_not_abort_the_scan ... ok
+test script_log::tests::a_malformed_entry_with_unparseable_duration_is_skipped ... ok
+test script_log::tests::a_normal_eof_entry_parses_all_fields ... ok
+test script_log::tests::a_redirect_entry_is_discarded ... ok
+test script_log::tests::empty_duration_and_position_values_parse_as_none ... ok
+test script_log::tests::a_redirect_entry_never_survives_a_full_directory_scan ... ok
+test script_log::tests::an_entry_outside_every_tracked_root_is_filtered_out ... ok
+test script_log::tests::mpv_log_dirs_includes_the_flatpak_remapped_path_when_home_is_known ... ok
+test script_log::tests::mpv_log_dirs_without_home_returns_only_the_native_candidate ... ok
+test reconcile::tests::single_run_chains_through_both_completion_signals_and_an_ordinary_resume ... ok
+test script_log::tests::scanning_a_missing_directory_returns_an_empty_result_not_an_error ... ok
+test script_log::tests::merge_is_per_path_not_per_directory ... ok
+test series::tests::a_child_not_separately_tracked_as_its_own_root_is_still_listed_as_a_series ... ok
+test script_log::tests::same_source_path_across_two_candidate_directories_the_newer_mtime_wins ... ok
+test series::tests::a_child_that_is_itself_a_tracked_root_is_excluded_from_its_parents_series_list ... ok
+test series::tests::a_symlink_alias_pointing_into_excluded_content_is_also_excluded ... ok
+test series::tests::a_symlink_inside_an_excluded_directory_pointing_out_is_never_reached ... ok
+test series::tests::directories_are_never_filtered_by_extension ... ok
+test series::tests::empty_video_extensions_list_excludes_every_file ... ok
+test series::tests::excluding_a_directory_removes_everything_under_it_recursively ... ok
+test series::tests::an_unexcluded_series_with_the_same_directory_structure_is_unaffected ... ok
+test series::tests::excluding_a_single_file_removes_only_that_file ... ok
+test series::tests::extension_matching_is_case_insensitive ... ok
+test series::tests::leading_dot_in_configured_extension_does_not_match_bare_file_extension ... ok
+test series::tests::non_numeric_names_fall_back_to_alphabetical ... ok
+test series::tests::ordered_episodes_on_an_empty_directory_returns_an_empty_vec ... ok
+test series::tests::numbering_gap_preserves_order_without_inferring_the_gap ... ok
+test series::tests::ordered_episodes_lists_season_dirs_before_loose_files_at_the_same_level ... ok
+test series::tests::ordered_episodes_sorts_unpadded_numbers_naturally_files_and_dirs ... ok
+test series::tests::ordered_episodes_symlink_back_to_root_terminates_and_lists_each_episode_once ... ok
+test series::tests::ordered_episodes_sibling_symlink_cycle_lists_each_episode_once ... ok
+test series::tests::ordered_episodes_with_only_non_video_files_returns_an_empty_vec ... ok
+test series::tests::ordered_episodes_two_aliases_of_one_directory_list_its_episodes_once ... ok
+test series::tests::series_in_root_enumerates_depth_1_directories_verbatim ... ok
+test series::tests::series_in_root_with_no_subdirectories_returns_an_empty_vec ... ok
+test series::tests::series_in_root_sorts_unpadded_numbers_naturally ... ok
+test series::tests::season_folders_sort_hierarchically_per_design_doc_example ... ok
+test series::tests::ordering_recurses_genuinely_arbitrarily_deep_not_just_two_levels ... ok
+test series::tests::sidecar_files_are_excluded_from_the_ordering_tree ... ok
+test series::tests::symlinked_episode_file_is_included_in_ordered_episodes ... ok
+test series::tests::symlinked_subdirectory_under_a_tracked_root_is_enumerated_as_a_series ... ok
+test state::tests::a_pre_phase_5_schema_state_toml_fails_cleanly_not_silently_or_with_a_panic ... ok
+test state::tests::a_pre_phase_8b_series_record_missing_mal_episode_awareness_still_parses ... ok
+test state::tests::atomic_write_overwrites_existing_content_and_leaves_no_temp_file ... ok
+test state::tests::atomic_write_with_unix_mode_sets_that_mode_on_the_final_file ... ok
+test state::tests::atomic_write_when_rename_fails_returns_error_and_leaves_no_temp_file ... ok
+test state::tests::find_and_find_mut_look_up_by_composite_key_not_name_alone ... ok
+test state::tests::find_mal_link_and_find_mal_link_mut_look_up_by_composite_key ... ok
+test state::tests::empty_state_round_trips ... ok
+test state::tests::read_missing_file_returns_empty_state_without_writing ... ok
+test state::tests::resolve_root_arg_matches_across_tilde_and_absolute_forms ... ok
+test state::tests::composite_key_keeps_same_named_series_under_different_roots_as_separate_records ... ok
+test state::tests::resolve_root_arg_returns_none_for_an_untracked_root ... ok
+test state::tests::mal_links_round_trip_through_write_and_read ... ok
+test state::tests::state_round_trips_dropped_status_and_mal_episode_awareness ... ok
+test state::tests::write_leaves_no_stray_temp_files ... ok
+test state::tests::state_round_trips_completed_status_as_snake_case ... ok
+test sync::tests::a_genuine_noop_merge_touches_no_state_at_all ... ok
+test sync::tests::best_candidate_boundary_is_inclusive ... ok
+test sync::tests::a_series_dropped_by_the_real_drop_command_is_never_a_sync_target_or_pushes_ahead ... ok
+test state::tests::write_then_read_round_trips ... ok
+test sync::tests::best_candidate_is_none_when_the_top_result_is_below_threshold ... ok
+test sync::tests::best_candidate_is_some_when_the_top_result_clears_threshold ... ok
+test sync::tests::completing_a_planned_entry_sets_both_transition_dates ... ok
+test sync::tests::desired_status_watched_count_reaching_or_passing_total_completes ... ok
+test sync::tests::desired_status_unfinished_progress_only_moves_plan_to_watch_forward ... ok
+test sync::tests::exact_match_ignores_bracketed_annotations_on_the_local_side ... ok
+test sync::tests::eligible_targets_by_status_matches_the_hand_written_table ... ok
+test sync::tests::exact_match_on_a_synonym ... ok
+test sync::tests::exact_match_on_english_title ... ok
+test state::tests::write_replaces_file_via_rename_not_in_place_mutation ... ok
+test sync::tests::exact_match_on_japanese_title ... ok
+test sync::tests::exact_match_on_main_title_case_and_whitespace_insensitive ... ok
+test sync::tests::identical_titles_have_similarity_one ... ok
+test sync::tests::local_effective_episode_ignores_position_seconds_for_every_status ... ok
+test sync::tests::local_effective_subtracts_one_for_a_paused_cursor_too ... ok
+test sync::tests::list_fetch_failure_fails_every_unlinked_series_but_never_touches_already_linked_ones ... ok
+test sync::tests::local_effective_subtracts_one_when_dropped_at_a_fresh_untouched_cursor ... ok
+test sync::tests::local_effective_subtracts_one_when_dropped_late_in_an_episode ... ok
+test sync::tests::local_effective_subtracts_one_when_dropped_mid_episode_one ... ok
+test sync::tests::local_effective_uses_cursor_as_is_when_completed_on_the_finale ... ok
+test sync::tests::local_effective_uses_episode_number_minus_one_when_no_prior_mal_awareness ... ok
+test sync::tests::local_effective_uses_the_higher_of_episode_number_minus_one_and_mal_awareness ... ok
+test sync::tests::mal_status_transitions_are_forward_only_and_progress_driven ... ok
+test sync::tests::manual_link_overwrites_an_existing_link_for_the_same_series ... ok
+test sync::tests::manual_link_persists_when_the_id_is_on_the_users_list ... ok
+test sync::tests::manual_link_rejects_and_does_not_persist_an_id_not_on_the_list ... ok
+test sync::tests::merge_boundary_values ... ok
+test sync::tests::merge_equal_is_noop ... ok
+test sync::tests::merge_local_greater_than_mal_pushes_local ... ok
+test sync::tests::merge_mal_greater_than_local_pulls_mal ... ok
+test sync::tests::never_pushes_a_smaller_number_when_a_stale_local_read_is_lower_than_established_awareness ... ok
+test sync::tests::no_exact_match_returns_none_not_a_fuzzy_guess ... ok
+test sync::tests::normalize_handles_unbalanced_brackets_without_panicking ... ok
+test sync::tests::normalize_strips_brackets_case_and_whitespace ... ok
+test sync::tests::one_series_failing_does_not_abort_or_corrupt_the_rest_of_the_run ... ok
+test sync::tests::progressed_plan_to_watch_entry_moves_to_watching_in_the_same_patch ... ok
+test sync::tests::rank_candidates_never_auto_selects_only_displays ... ok
+test sync::tests::paused_and_orphaned_series_are_excluded_from_sync_targets ... ok
+test sync::tests::rank_candidates_orders_by_similarity_and_truncates ... ok
+test sync::tests::reaching_mals_episode_total_moves_watching_entry_to_completed ... ok
+test sync::tests::run_sync_auto_links_on_exact_match_and_merges_without_a_second_lookup ... ok
+test sync::tests::run_sync_dropped_mid_episode_one_never_completes_or_pushes_to_mal ... ok
+test sync::tests::run_sync_never_patches_a_smaller_number_than_mal_already_has ... ok
+test sync::tests::run_sync_on_empty_targets_makes_no_network_call_at_all ... ok
+test sync::tests::run_sync_rejected_patch_leaves_awareness_unset_and_retry_pushes_same_number ... ok
+test sync::tests::run_sync_reports_empty_list_plainly ... ok
+test sync::tests::run_sync_stale_cursor_below_awareness_pushes_awareness_not_cursor_minus_one ... ok
+test sync::tests::run_sync_reports_no_exact_match_with_a_confident_suggestion ... ok
+test sync::tests::run_sync_reports_no_exact_match_with_no_suggestion_when_nothing_clears_the_threshold ... ok
+test sync::tests::status_only_transition_is_reported_as_a_real_remote_change ... ok
+test sync::tests::run_sync_completed_finale_pushes_cursor_and_completes_the_mal_entry ... ok
+test sync::tests::sync_completes_the_mal_entry_for_a_completed_record_at_every_position ... ok
+test target::tests::errors_not_found_when_no_tracked_root_has_that_series ... ok
+test target::tests::ambiguous_when_two_tracked_roots_share_the_same_series_name ... ok
+test target::tests::resolves_a_unique_series_name_with_no_root_arg ... ok
+test target::tests::root_arg_disambiguates_directly ... ok
+test target::tests::root_arg_given_but_series_not_under_that_specific_root_errors_not_found ... ok
+test target::tests::unknown_root_arg_errors_root_not_found ... ok
+test sync::tests::sync_never_completes_or_overpushes_unless_the_record_is_completed ... ok
+test sync::tests::synced_mal_progress_never_moves_the_local_cursor_backward ... ok
+test sync::tests::synced_mal_progress_advances_the_local_resume_cursor ... ok
+test tests::drop_command_root_disambiguates_between_two_real_identically_named_series ... ok
+test tests::explicit_play_root_disambiguates_between_two_real_identically_named_series ... ok
+test tests::pause_command_root_disambiguates_between_two_real_identically_named_series ... ok
+test tests::pause_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing ... ok
+test mal::tests::denied_callback_stops_listening_immediately_with_the_error_reason ... ok
+test tests::start_verb_matches_each_status ... ok
+test tests::status_only_sync_outcome_reports_the_new_mal_list ... ok
+test tests::sync_link_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing ... ok
+test tests::unchanged_sync_outcomes_are_silent_and_summarize_as_no_changes ... ok
+test update::tests::a_non_2xx_status_is_rejected_carrying_only_the_status_code ... ok
+test update::tests::builds_the_expected_urls ... ok
+test update::tests::compares_versions ... ok
+test update::tests::github_repo_matches_the_real_cargo_toml ... ok
+test update::tests::install_command_line_matches_the_readme ... ok
+test update::tests::malformed_json_is_a_parse_error ... ok
+test update::tests::missing_tag_name_is_a_parse_error ... ok
+test update::tests::parses_a_plain_repository_url ... ok
+test update::tests::parses_a_repository_url_with_git_suffix ... ok
+test update::tests::parses_a_repository_url_with_trailing_slash ... ok
+test update::tests::parses_a_valid_release_tag ... ok
+test update::tests::parses_semver_tags ... ok
+test update::tests::rejected_display_never_leaks_the_raw_response_body ... ok
+test update::tests::rejects_a_non_github_host ... ok
+test update::tests::rejects_the_wrong_segment_count ... ok
+test update::tests::renders_each_status ... ok
+test tests::resume_command_explicit_arg_bypasses_the_picker_even_when_a_tty_is_available ... ok
+test tests::doctor_without_flags_reports_an_orphan_but_leaves_state_untouched ... ok
+test tests::doctor_fix_forget_orphans_clears_confirmed_orphans_and_leaves_the_rest_untouched ... ok
+test tests::doctor_with_no_orphans_reports_the_orphan_check_as_ok ... ok
+test tests::doctor_fix_alone_does_not_clear_orphans ... ok
+test mal::tests::state_mismatch_is_rejected_and_listener_keeps_waiting ... ok
+test mal::tests::listener_times_out_with_no_callback ... ok
+
+test result: ok. 456 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running `/tmp/nix-shell-176075-3330364349/cargo-mutants-tsuzuki-VyABlf.tmp/target/debug/deps/cli-2e31225079aa5969`
+
+running 30 tests
+test add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero ... FAILED
+test add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked ... FAILED
+test auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in ... FAILED
+test a_noise_level_reading_never_overwrites_a_real_saved_position ... FAILED
+test config_show_and_edit_round_trip_including_a_broken_edit ... FAILED
+test a_symlinked_series_folder_is_tracked_exactly_like_a_real_one ... FAILED
+test doctor_detects_and_forgets_a_real_orphaned_record ... FAILED
+test drop_multiple_series_drops_each_and_persists_both ... FAILED
+test exclude_without_paths_still_lists_candidates_and_never_mutates_config ... FAILED
+test drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero ... FAILED
+test exclude_multiple_paths_excludes_each_and_rejects_only_the_absolute_one ... FAILED
+test dropped_at_every_depth_is_never_synced ... FAILED
+test exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent ... FAILED
+test dropped_series_are_not_synced_but_completed_series_are ... FAILED
+test first_time_onboarding_add_list_and_start_a_series ... FAILED
+test orphaned_series_are_not_synced_and_their_state_is_preserved ... FAILED
+test natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_completes ... FAILED
+test pause_and_drop_reject_a_completed_series_and_leave_state_unchanged ... FAILED
+test forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark ... FAILED
+test non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs ... FAILED
+test pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected ... FAILED
+test multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguity ... FAILED
+test pause_without_series_is_a_usage_error ... ok
+test pause_multiple_series_pauses_each_and_persists_both ... FAILED
+test pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_position ... FAILED
+test pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed ... FAILED
+test pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero ... FAILED
+test sync_without_a_prior_login_fails_cleanly_with_no_network_access ... FAILED
+test paused_series_are_not_synced_and_need_no_mal_login ... FAILED
+test companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity ... FAILED
+
+failures:
+
+---- add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero stdout ----
+
+thread 'add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero' (191344) panicked at tests/cli.rs:1451:5:
+assertion failed: !out.status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked stdout ----
+
+thread 'add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked' (191343) panicked at tests/cli.rs:1425:5:
+assertion `left == right` failed
+  left: ""
+ right: "✓ /tmp/nix-shell-176075-3330364349/.tmpDtPfd3/A — added\n✓ /tmp/nix-shell-176075-3330364349/.tmpDtPfd3/B — added\n"
+
+---- auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in stdout ----
+
+thread 'auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in' (191345) panicked at tests/cli.rs:160:46:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- a_noise_level_reading_never_overwrites_a_real_saved_position stdout ----
+
+thread 'a_noise_level_reading_never_overwrites_a_real_saved_position' (191341) panicked at tests/cli.rs:816:55:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- config_show_and_edit_round_trip_including_a_broken_edit stdout ----
+
+thread 'config_show_and_edit_round_trip_including_a_broken_edit' (191347) panicked at tests/cli.rs:670:5:
+got: 
+
+---- a_symlinked_series_folder_is_tracked_exactly_like_a_real_one stdout ----
+
+thread 'a_symlinked_series_folder_is_tracked_exactly_like_a_real_one' (191342) panicked at tests/cli.rs:907:5:
+got: 
+
+---- doctor_detects_and_forgets_a_real_orphaned_record stdout ----
+
+thread 'doctor_detects_and_forgets_a_real_orphaned_record' (191348) panicked at tests/cli.rs:606:5:
+assertion failed: state_path(home).exists() &&
+    fs::read_to_string(state_path(home)).unwrap().contains("GoneShow")
+
+---- drop_multiple_series_drops_each_and_persists_both stdout ----
+
+thread 'drop_multiple_series_drops_each_and_persists_both' (191359) panicked at tests/cli.rs:1309:5:
+assertion `left == right` failed
+  left: ""
+ right: "✓ \"Alpha\" — dropped\n✓ \"Beta\" — dropped\n"
+
+---- exclude_without_paths_still_lists_candidates_and_never_mutates_config stdout ----
+
+thread 'exclude_without_paths_still_lists_candidates_and_never_mutates_config' (191372) panicked at tests/cli.rs:1519:5:
+assertion `left == right` failed
+  left: ""
+ right: "No Anitomy-suggested candidates found under any tracked root.\n"
+
+---- drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero stdout ----
+
+thread 'drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero' (191362) panicked at tests/cli.rs:1337:5:
+assertion failed: !out.status.success()
+
+---- exclude_multiple_paths_excludes_each_and_rejects_only_the_absolute_one stdout ----
+
+thread 'exclude_multiple_paths_excludes_each_and_rejects_only_the_absolute_one' (191371) panicked at tests/cli.rs:1484:5:
+assertion failed: !out.status.success()
+
+---- dropped_at_every_depth_is_never_synced stdout ----
+
+thread 'dropped_at_every_depth_is_never_synced' (191366) panicked at tests/cli.rs:1109:59:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent stdout ----
+
+thread 'exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent' (191373) panicked at tests/cli.rs:407:5:
+got: 
+
+---- dropped_series_are_not_synced_but_completed_series_are stdout ----
+
+thread 'dropped_series_are_not_synced_but_completed_series_are' (191367) panicked at tests/cli.rs:1052:55:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- first_time_onboarding_add_list_and_start_a_series stdout ----
+
+thread 'first_time_onboarding_add_list_and_start_a_series' (191383) panicked at tests/cli.rs:206:5:
+got: 
+
+---- orphaned_series_are_not_synced_and_their_state_is_preserved stdout ----
+
+thread 'orphaned_series_are_not_synced_and_their_state_is_preserved' (191396) panicked at tests/cli.rs:1175:55:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_completes stdout ----
+
+thread 'natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_completes' (191394) panicked at tests/cli.rs:310:5:
+got: 
+
+---- pause_and_drop_reject_a_completed_series_and_leave_state_unchanged stdout ----
+
+thread 'pause_and_drop_reject_a_completed_series_and_leave_state_unchanged' (191400) panicked at tests/cli.rs:1141:55:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark stdout ----
+
+thread 'forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark' (191389) panicked at tests/cli.rs:857:61:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs stdout ----
+
+thread 'non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs' (191395) panicked at tests/cli.rs:948:5:
+a non-TTY picker with more than one choice must exit non-zero, not silently pick one
+
+---- pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected stdout ----
+
+thread 'pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected' (191404) panicked at tests/cli.rs:475:5:
+got: 
+
+---- multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguity stdout ----
+
+thread 'multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguity' (191390) panicked at tests/cli.rs:549:5:
+assertion failed: !ambiguous.status.success()
+
+---- pause_multiple_series_pauses_each_and_persists_both stdout ----
+
+thread 'pause_multiple_series_pauses_each_and_persists_both' (191416) panicked at tests/cli.rs:1291:5:
+assertion `left == right` failed
+  left: ""
+ right: "✓ \"Alpha\" — paused\n✓ \"Beta\" — paused\n"
+
+---- pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_position stdout ----
+
+thread 'pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_position' (191418) panicked at tests/cli.rs:1356:10:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed stdout ----
+
+thread 'pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed' (191413) panicked at tests/cli.rs:1396:5:
+assertion failed: !out.status.success()
+
+---- pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero stdout ----
+
+thread 'pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero' (191419) panicked at tests/cli.rs:1320:5:
+assertion failed: !out.status.success()
+
+---- sync_without_a_prior_login_fails_cleanly_with_no_network_access stdout ----
+
+thread 'sync_without_a_prior_login_fails_cleanly_with_no_network_access' (191430) panicked at tests/cli.rs:984:5:
+syncing with no stored MAL token must be a real error, not a hang or a crash
+
+---- paused_series_are_not_synced_and_need_no_mal_login stdout ----
+
+thread 'paused_series_are_not_synced_and_need_no_mal_login' (191429) panicked at tests/cli.rs:1018:55:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+---- companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity stdout ----
+
+thread 'companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity' (191346) panicked at tests/cli.rs:778:5:
+got: 
+
+
+failures:
+    a_noise_level_reading_never_overwrites_a_real_saved_position
+    a_symlinked_series_folder_is_tracked_exactly_like_a_real_one
+    add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked
+    add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero
+    auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in
+    companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity
+    config_show_and_edit_round_trip_including_a_broken_edit
+    doctor_detects_and_forgets_a_real_orphaned_record
+    drop_multiple_series_drops_each_and_persists_both
+    drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero
+    dropped_at_every_depth_is_never_synced
+    dropped_series_are_not_synced_but_completed_series_are
+    exclude_multiple_paths_excludes_each_and_rejects_only_the_absolute_one
+    exclude_without_paths_still_lists_candidates_and_never_mutates_config
+    exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent
+    first_time_onboarding_add_list_and_start_a_series
+    forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark
+    multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguity
+    natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves_and_completes
+    non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs
+    orphaned_series_are_not_synced_and_their_state_is_preserved
+    pause_and_drop_reject_a_completed_series_and_leave_state_unchanged
+    pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected
+    pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed
+    pause_multiple_series_pauses_each_and_persists_both
+    pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_position
+    pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero
+    paused_series_are_not_synced_and_need_no_mal_login
+    sync_without_a_prior_login_fails_cleanly_with_no_network_access
+
+test result: FAILED. 1 passed; 29 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+error: test failed, to rerun pass `-p tsuzuki --test cli`
+
+*** result: Failure(101)

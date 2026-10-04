@@ -87,7 +87,7 @@ fn dispatch(
         }
         Command::Status => status_command(config, state_path, home),
         Command::List => list_command(config, state_path, home),
-        Command::Add { path } => add_command(&path, config, config_path),
+        Command::Add { paths } => add_command(&paths, config, config_path),
         Command::Start { series, root } => {
             start_command(series, root, config, state_path, home, is_tty)
         }
@@ -97,14 +97,13 @@ fn dispatch(
         Command::Drop { series, root } => {
             drop_command(&series, root.as_deref(), config, state_path, home)
         }
-        Command::Exclude { path: None, .. } => {
+        Command::Exclude { paths, .. } if paths.is_empty() => {
             suggest_candidates_command(config);
             ExitCode::SUCCESS
         }
-        Command::Exclude {
-            path: Some(path),
-            root,
-        } => exclude_command(&path, root.as_deref(), config, config_path),
+        Command::Exclude { paths, root } => {
+            exclude_command(&paths, root.as_deref(), config, config_path)
+        }
         Command::Sync { action } => match action {
             None => sync_command(config, state_path, home),
             Some(SyncCommand::Login) => sync_login_command(config),
@@ -126,75 +125,110 @@ fn dispatch(
     }
 }
 
-/// `tsuzuki add <path>` — validates, checks idempotency, and persists a new
-/// tracked root (CLAUDE.md's "`tsuzuki add` validation and idempotency").
-fn add_command(path: &Path, config: &mut Config, config_path: &Path) -> ExitCode {
-    match roots::add_root(config, path) {
-        Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
-            confirm(&as_typed.display().to_string(), "already tracked");
-            ExitCode::SUCCESS
-        }
-        Ok(roots::AddOutcome::Added(as_typed)) => {
-            if let Err(e) = config::write(config_path, config) {
-                return fail(&format!(
-                    "could not write config at {}: {e}",
-                    config_path.display()
-                ));
+/// `tsuzuki add <path>...` — validates, checks idempotency, and persists new
+/// tracked roots (CLAUDE.md's "`tsuzuki add` validation and idempotency").
+/// A failing path doesn't stop the rest; config is written once, and the
+/// per-path lines are printed only after that write succeeds.
+fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+    let mut lines = Vec::new();
+    let mut changed = false;
+    let mut failed = false;
+    for path in paths {
+        match roots::add_root(config, path) {
+            Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
+                lines.push((as_typed.display().to_string(), "already tracked"));
             }
-            confirm(&as_typed.display().to_string(), "added");
-            ExitCode::SUCCESS
+            Ok(roots::AddOutcome::Added(as_typed)) => {
+                changed = true;
+                lines.push((as_typed.display().to_string(), "added"));
+            }
+            Err(e) => {
+                fail(&e.to_string());
+                failed = true;
+            }
         }
-        Err(e) => fail(&e.to_string()),
+    }
+    if changed && let Err(e) = config::write(config_path, config) {
+        return fail(&format!(
+            "could not write config at {}: {e}",
+            config_path.display()
+        ));
+    }
+    for (subject, result) in &lines {
+        confirm(subject, result);
+    }
+    exit_code(failed)
+}
+
+fn exit_code(failed: bool) -> ExitCode {
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
-/// `tsuzuki exclude <path> [--root <root>]` — resolves `path` against
-/// tracked roots and persists the exclusion (CLAUDE.md's "Exclusion
+/// `tsuzuki exclude <path>... [--root <root>]` — resolves each path against
+/// tracked roots and persists the exclusions (CLAUDE.md's "Exclusion
 /// persistence and disambiguation"). Ambiguous matches and validation
 /// failures print `ExcludeError`'s `Display` output as-is — it already
-/// includes the exact `--root` re-invocations design.md §3 specifies.
+/// includes the exact `--root` re-invocations design.md §3 specifies. A
+/// failing path doesn't stop the rest; config is written once, and the
+/// per-path lines are printed only after that write succeeds.
 fn exclude_command(
-    path: &str,
+    paths: &[String],
     root: Option<&Path>,
     config: &mut Config,
     config_path: &Path,
 ) -> ExitCode {
-    match exclude::exclude(config, Path::new(path), root) {
-        Ok(exclude::ExcludeOutcome::AlreadyExcluded {
-            root,
-            relative_path,
-        }) => {
-            confirm(
-                &format!("\"{relative_path}\""),
-                &format!("already excluded (under {root})"),
-            );
-            ExitCode::SUCCESS
-        }
-        Ok(exclude::ExcludeOutcome::Excluded {
-            root,
-            relative_path,
-        }) => {
-            if let Err(e) = config::write(config_path, config) {
-                return fail(&format!(
-                    "could not write config at {}: {e}",
-                    config_path.display()
+    let mut lines = Vec::new();
+    let mut changed = false;
+    let mut failed = false;
+    for path in paths {
+        match exclude::exclude(config, Path::new(path), root) {
+            Ok(exclude::ExcludeOutcome::AlreadyExcluded {
+                root,
+                relative_path,
+            }) => {
+                lines.push((
+                    format!("\"{relative_path}\""),
+                    format!("already excluded (under {root})"),
                 ));
             }
-            confirm(
-                &format!("\"{relative_path}\""),
-                &format!("excluded (under {root})"),
-            );
-            ExitCode::SUCCESS
+            Ok(exclude::ExcludeOutcome::Excluded {
+                root,
+                relative_path,
+            }) => {
+                changed = true;
+                lines.push((
+                    format!("\"{relative_path}\""),
+                    format!("excluded (under {root})"),
+                ));
+            }
+            Err(exclude::ExcludeError::Ambiguous {
+                relative_path,
+                matches,
+            }) => {
+                let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();
+                print_ambiguous(&relative_path, "exclude", &roots);
+                failed = true;
+            }
+            Err(e) => {
+                fail(&e.to_string());
+                failed = true;
+            }
         }
-        Err(exclude::ExcludeError::Ambiguous {
-            relative_path,
-            matches,
-        }) => {
-            let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();
-            print_ambiguous(&relative_path, "exclude", &roots)
-        }
-        Err(e) => fail(&e.to_string()),
     }
+    if changed && let Err(e) = config::write(config_path, config) {
+        return fail(&format!(
+            "could not write config at {}: {e}",
+            config_path.display()
+        ));
+    }
+    for (subject, result) in &lines {
+        confirm(subject, result);
+    }
+    exit_code(failed)
 }
 
 /// Bare `tsuzuki exclude` (no path) — lists Anitomy-suggested OVA/Special/
@@ -734,53 +768,70 @@ fn start_command(
     }
 }
 
-/// `tsuzuki pause <series> [--root <root>]`.
+/// `tsuzuki pause <series>... [--root <root>]`.
 fn pause_command(
-    series: &str,
+    series: &[String],
     root_arg: Option<&Path>,
     config: &Config,
     state_path: &Path,
     home: Option<&Path>,
 ) -> ExitCode {
-    let (mut state, warning) = match reconcile_state(config, state_path, home) {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
-
-    let root = match target::resolve_series_root(config, series, root_arg, home) {
-        Ok(r) => r,
-        Err(e) => return print_target_error(&e, "pause"),
-    };
-
-    match pause_drop::pause(&mut state, &root, series) {
-        Ok(pause_drop::Outcome::Changed) => {
-            if let Err(e) = state::write(state_path, &state) {
-                return fail(&format!(
-                    "could not write state at {}: {e}",
-                    state_path.display()
-                ));
-            }
-            confirm(&format!("\"{series}\""), "paused");
-            ExitCode::SUCCESS
-        }
-        Ok(pause_drop::Outcome::NoOp) => {
-            confirm(&format!("\"{series}\""), "already paused");
-            ExitCode::SUCCESS
-        }
-        Err(e) => fail(&e.to_string()),
-    }
+    transition_series(
+        series,
+        root_arg,
+        config,
+        state_path,
+        home,
+        &Transition {
+            command_name: "pause",
+            apply: pause_drop::pause,
+            changed: "paused",
+            already: "already paused",
+        },
+    )
 }
 
-/// `tsuzuki drop <series> [--root <root>]`.
+/// `tsuzuki drop <series>... [--root <root>]`.
 fn drop_command(
-    series: &str,
+    series: &[String],
     root_arg: Option<&Path>,
     config: &Config,
     state_path: &Path,
     home: Option<&Path>,
+) -> ExitCode {
+    transition_series(
+        series,
+        root_arg,
+        config,
+        state_path,
+        home,
+        &Transition {
+            command_name: "drop",
+            apply: pause_drop::drop_series,
+            changed: "dropped",
+            already: "already dropped",
+        },
+    )
+}
+
+/// What distinguishes `pause` from `drop` for `transition_series`.
+struct Transition {
+    command_name: &'static str,
+    apply: fn(&mut State, &str, &str) -> Result<pause_drop::Outcome, pause_drop::ActionError>,
+    changed: &'static str,
+    already: &'static str,
+}
+
+/// Reconciles once, applies `transition` to each series in turn, then writes
+/// state once if any changed. A failing series doesn't stop the rest; the
+/// per-series lines are printed only after that write succeeds.
+fn transition_series(
+    series: &[String],
+    root_arg: Option<&Path>,
+    config: &Config,
+    state_path: &Path,
+    home: Option<&Path>,
+    transition: &Transition,
 ) -> ExitCode {
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -790,28 +841,41 @@ fn drop_command(
         print_scan_warning(w);
     }
 
-    let root = match target::resolve_series_root(config, series, root_arg, home) {
-        Ok(r) => r,
-        Err(e) => return print_target_error(&e, "drop"),
-    };
-
-    match pause_drop::drop_series(&mut state, &root, series) {
-        Ok(pause_drop::Outcome::Changed) => {
-            if let Err(e) = state::write(state_path, &state) {
-                return fail(&format!(
-                    "could not write state at {}: {e}",
-                    state_path.display()
-                ));
+    let mut lines = Vec::new();
+    let mut changed = false;
+    let mut failed = false;
+    for name in series {
+        let root = match target::resolve_series_root(config, name, root_arg, home) {
+            Ok(r) => r,
+            Err(e) => {
+                print_target_error(&e, transition.command_name);
+                failed = true;
+                continue;
             }
-            confirm(&format!("\"{series}\""), "dropped");
-            ExitCode::SUCCESS
+        };
+        match (transition.apply)(&mut state, &root, name) {
+            Ok(pause_drop::Outcome::Changed) => {
+                changed = true;
+                lines.push((name, transition.changed));
+            }
+            Ok(pause_drop::Outcome::NoOp) => lines.push((name, transition.already)),
+            Err(e) => {
+                fail(&e.to_string());
+                failed = true;
+            }
         }
-        Ok(pause_drop::Outcome::NoOp) => {
-            confirm(&format!("\"{series}\""), "already dropped");
-            ExitCode::SUCCESS
-        }
-        Err(e) => fail(&e.to_string()),
     }
+
+    if changed && let Err(e) = state::write(state_path, &state) {
+        return fail(&format!(
+            "could not write state at {}: {e}",
+            state_path.display()
+        ));
+    }
+    for (name, result) in lines {
+        confirm(&format!("\"{name}\""), result);
+    }
+    exit_code(failed)
 }
 
 // --- Phase 8a: MAL OAuth login ---
@@ -1505,7 +1569,13 @@ mod tests {
         };
         state::write(&state_path, &state).unwrap();
 
-        let exit = pause_command("Monster", Some(&root_b), &config, &state_path, None);
+        let exit = pause_command(
+            &["Monster".to_string()],
+            Some(&root_b),
+            &config,
+            &state_path,
+            None,
+        );
         assert_eq!(exit, ExitCode::SUCCESS);
 
         let after = state::read(&state_path).unwrap();
@@ -1550,7 +1620,13 @@ mod tests {
         };
         state::write(&state_path, &state).unwrap();
 
-        let exit = drop_command("Monster", Some(&root_a), &config, &state_path, None);
+        let exit = drop_command(
+            &["Monster".to_string()],
+            Some(&root_a),
+            &config,
+            &state_path,
+            None,
+        );
         assert_eq!(exit, ExitCode::SUCCESS);
 
         let after = state::read(&state_path).unwrap();
@@ -1594,7 +1670,7 @@ mod tests {
         };
         state::write(&state_path, &state).unwrap();
 
-        let exit = pause_command("Monster", None, &config, &state_path, None);
+        let exit = pause_command(&["Monster".to_string()], None, &config, &state_path, None);
         assert_eq!(exit, ExitCode::FAILURE);
 
         let after = state::read(&state_path).unwrap();

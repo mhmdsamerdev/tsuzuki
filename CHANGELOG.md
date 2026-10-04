@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- `add`, `exclude`, `pause` and `drop` accept multiple arguments.
 - Fixed `sync` marking a manually dropped series Completed on MAL; dropped series are now skipped.
 - A series whose final episode finishes is now `completed` (shown as "Rewatch?") instead of `dropped`; earlier ones stay `dropped`.
 

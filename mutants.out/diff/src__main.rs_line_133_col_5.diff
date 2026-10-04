@@ -1,0 +1,48 @@
+--- src/main.rs
++++ replace add_command -> ExitCode with Default::default()
+@@ -125,44 +125,17 @@
+     }
+ }
+ 
+ /// `tsuzuki add <path>...` — validates, checks idempotency, and persists new
+ /// tracked roots (CLAUDE.md's "`tsuzuki add` validation and idempotency").
+ /// A failing path doesn't stop the rest; config is written once, and the
+ /// per-path lines are printed only after that write succeeds.
+ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
+-    let mut lines = Vec::new();
+-    let mut changed = false;
+-    let mut failed = false;
+-    for path in paths {
+-        match roots::add_root(config, path) {
+-            Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
+-                lines.push((as_typed.display().to_string(), "already tracked"));
+-            }
+-            Ok(roots::AddOutcome::Added(as_typed)) => {
+-                changed = true;
+-                lines.push((as_typed.display().to_string(), "added"));
+-            }
+-            Err(e) => {
+-                fail(&e.to_string());
+-                failed = true;
+-            }
+-        }
+-    }
+-    if changed && let Err(e) = config::write(config_path, config) {
+-        return fail(&format!(
+-            "could not write config at {}: {e}",
+-            config_path.display()
+-        ));
+-    }
+-    for (subject, result) in &lines {
+-        confirm(subject, result);
+-    }
+-    exit_code(failed)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn exit_code(failed: bool) -> ExitCode {
+     if failed {
+         ExitCode::FAILURE
+     } else {
+         ExitCode::SUCCESS
+     }

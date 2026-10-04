@@ -1,0 +1,3 @@
+src/main.rs:151:16: replace && with || in add_command
+src/main.rs:222:16: replace && with || in exclude_command
+src/main.rs:869:16: replace && with || in transition_series
