@@ -1,0 +1,21 @@
+--- src/main.rs
++++ replace != with == in list_command
+@@ -689,17 +689,17 @@
+         first_group = false;
+ 
+         println!("{header}:");
+         let mut rows: Vec<String> = items
+             .iter()
+             .map(|o| {
+                 let ep = o
+                     .episode_number
+-                    .filter(|_| o.status != Some(Status::Completed))
++                    .filter(|_| o.status == /* ~ changed by cargo-mutants ~ */ Some(Status::Completed))
+                     .map(|e| format!(" — ep. {e}"))
+                     .unwrap_or_default();
+                 format!("  {}{ep} ({} files)", o.name, o.file_count)
+             })
+             .collect();
+         if multi_route {
+             let routes: Vec<&str> = items.iter().map(|o| o.root.as_str()).collect();
+             rows = overview::tag_with_routes(&rows, &routes);

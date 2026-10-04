@@ -107,7 +107,7 @@ updated_at = 1700000000
     );
     let list_stdout = String::from_utf8_lossy(&list.stdout);
     assert!(
-        list_stdout.contains("Dropped"),
+        list_stdout.starts_with("Completed:\n"),
         "expected the script-only eof reading on the series' last episode to complete it, \
          got: {list_stdout}"
     );

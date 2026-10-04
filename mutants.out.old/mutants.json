@@ -224,7 +224,7 @@
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace is_multi_route -> bool with true\n@@ -135,21 +135,17 @@\n             .position(|r| *r == o.root)\n             .unwrap_or(roots.len())\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n-    let mut routes = routes.into_iter();\n-    match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n-        None => false,\n-    }\n+    true /* ~ changed by cargo-mutants ~ */\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n     labels\n         .iter()\n",
+    "diff": "--- src/overview.rs\n+++ replace is_multi_route -> bool with true\n@@ -135,21 +135,17 @@\n             .position(|r| *r == o.root)\n             .unwrap_or(roots.len())\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n-    let mut routes = routes.into_iter();\n-    match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n-        None => false,\n-    }\n+    true /* ~ changed by cargo-mutants ~ */\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n     let short = |r: &str| {\n         Path::new(r)\n",
     "file": "src/overview.rs",
     "function": {
       "function_name": "is_multi_route",
@@ -256,7 +256,7 @@
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace is_multi_route -> bool with false\n@@ -135,21 +135,17 @@\n             .position(|r| *r == o.root)\n             .unwrap_or(roots.len())\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n-    let mut routes = routes.into_iter();\n-    match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n-        None => false,\n-    }\n+    false /* ~ changed by cargo-mutants ~ */\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n     labels\n         .iter()\n",
+    "diff": "--- src/overview.rs\n+++ replace is_multi_route -> bool with false\n@@ -135,21 +135,17 @@\n             .position(|r| *r == o.root)\n             .unwrap_or(roots.len())\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n-    let mut routes = routes.into_iter();\n-    match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n-        None => false,\n-    }\n+    false /* ~ changed by cargo-mutants ~ */\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n     let short = |r: &str| {\n         Path::new(r)\n",
     "file": "src/overview.rs",
     "function": {
       "function_name": "is_multi_route",
@@ -288,7 +288,7 @@
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace != with == in is_multi_route\n@@ -137,17 +137,17 @@\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n     let mut routes = routes.into_iter();\n     match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n+        Some(first) => routes.any(|r| r == /* ~ changed by cargo-mutants ~ */ first),\n         None => false,\n     }\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n",
+    "diff": "--- src/overview.rs\n+++ replace != with == in is_multi_route\n@@ -137,17 +137,17 @@\n     });\n     overviews\n }\n \n /// True when `routes` holds at least two distinct routes.\n pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {\n     let mut routes = routes.into_iter();\n     match routes.next() {\n-        Some(first) => routes.any(|r| r != first),\n+        Some(first) => routes.any(|r| r == /* ~ changed by cargo-mutants ~ */ first),\n         None => false,\n     }\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n",
     "file": "src/overview.rs",
     "function": {
       "function_name": "is_multi_route",
@@ -320,15 +320,15 @@
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![]\n@@ -145,22 +145,17 @@\n         Some(first) => routes.any(|r| r != first),\n         None => false,\n     }\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(routes)\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "diff": "--- src/overview.rs\n+++ replace route_display -> Vec<String> with vec![]\n@@ -146,29 +146,17 @@\n         None => false,\n     }\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n-    let short = |r: &str| {\n-        Path::new(r)\n-            .file_name()\n-            .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n-    };\n-    routes\n-        .iter()\n-        .map(|r| {\n-            let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n-            if clash { r.to_string() } else { name }\n-        })\n-        .collect()\n+    vec![] /* ~ changed by cargo-mutants ~ */\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n     labels\n         .iter()\n",
     "file": "src/overview.rs",
     "function": {
-      "function_name": "tag_with_routes",
+      "function_name": "route_display",
       "return_type": "-> Vec<String>",
       "span": {
         "end": {
           "column": 2,
-          "line": 159
+          "line": 167
         },
         "start": {
           "column": 1,
@@ -337,30 +337,30 @@
       }
     },
     "genre": "FnValue",
-    "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![]",
+    "name": "src/overview.rs:154:5: replace route_display -> Vec<String> with vec![]",
     "package": "tsuzuki",
     "replacement": "vec![]",
     "span": {
       "end": {
         "column": 19,
-        "line": 158
+        "line": 166
       },
       "start": {
         "column": 5,
-        "line": 153
+        "line": 154
       }
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![String::new()]\n@@ -145,22 +145,17 @@\n         Some(first) => routes.any(|r| r != first),\n         None => false,\n     }\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(routes)\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![String::new()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "diff": "--- src/overview.rs\n+++ replace route_display -> Vec<String> with vec![String::new()]\n@@ -146,29 +146,17 @@\n         None => false,\n     }\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n-    let short = |r: &str| {\n-        Path::new(r)\n-            .file_name()\n-            .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n-    };\n-    routes\n-        .iter()\n-        .map(|r| {\n-            let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n-            if clash { r.to_string() } else { name }\n-        })\n-        .collect()\n+    vec![String::new()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n     labels\n         .iter()\n",
     "file": "src/overview.rs",
     "function": {
-      "function_name": "tag_with_routes",
+      "function_name": "route_display",
       "return_type": "-> Vec<String>",
       "span": {
         "end": {
           "column": 2,
-          "line": 159
+          "line": 167
         },
         "start": {
           "column": 1,
@@ -369,30 +369,30 @@
       }
     },
     "genre": "FnValue",
-    "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![String::new()]",
+    "name": "src/overview.rs:154:5: replace route_display -> Vec<String> with vec![String::new()]",
     "package": "tsuzuki",
     "replacement": "vec![String::new()]",
     "span": {
       "end": {
         "column": 19,
-        "line": 158
+        "line": 166
       },
       "start": {
         "column": 5,
-        "line": 153
+        "line": 154
       }
     }
   },
   {
-    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![\"xyzzy\".into()]\n@@ -145,22 +145,17 @@\n         Some(first) => routes.any(|r| r != first),\n         None => false,\n     }\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(routes)\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![\"xyzzy\".into()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "diff": "--- src/overview.rs\n+++ replace route_display -> Vec<String> with vec![\"xyzzy\".into()]\n@@ -146,29 +146,17 @@\n         None => false,\n     }\n }\n \n /// The short name shown for each route (parallel to `routes`): the root's\n /// own folder name. Distinct routes that share a folder name keep their\n /// full stored string instead, so two rows never look the same.\n pub fn route_display(routes: &[&str]) -> Vec<String> {\n-    let short = |r: &str| {\n-        Path::new(r)\n-            .file_name()\n-            .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n-    };\n-    routes\n-        .iter()\n-        .map(|r| {\n-            let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n-            if clash { r.to_string() } else { name }\n-        })\n-        .collect()\n+    vec![\"xyzzy\".into()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n     labels\n         .iter()\n",
     "file": "src/overview.rs",
     "function": {
-      "function_name": "tag_with_routes",
+      "function_name": "route_display",
       "return_type": "-> Vec<String>",
       "span": {
         "end": {
           "column": 2,
-          "line": 159
+          "line": 167
         },
         "start": {
           "column": 1,
@@ -401,22 +401,214 @@
       }
     },
     "genre": "FnValue",
-    "name": "src/overview.rs:153:5: replace tag_with_routes -> Vec<String> with vec![\"xyzzy\".into()]",
+    "name": "src/overview.rs:154:5: replace route_display -> Vec<String> with vec![\"xyzzy\".into()]",
     "package": "tsuzuki",
     "replacement": "vec![\"xyzzy\".into()]",
     "span": {
       "end": {
         "column": 19,
-        "line": 158
+        "line": 166
       },
       "start": {
         "column": 5,
-        "line": 153
+        "line": 154
       }
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::new()\n@@ -51,42 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(route(item));\n-                current = Some(route(item));\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
+    "diff": "--- src/overview.rs\n+++ replace && with || in route_display\n@@ -155,17 +155,17 @@\n         Path::new(r)\n             .file_name()\n             .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n     };\n     routes\n         .iter()\n         .map(|r| {\n             let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n+            let clash = routes.iter().any(|o| o != r || /* ~ changed by cargo-mutants ~ */ short(o) == name);\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "route_display",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 167
+        },
+        "start": {
+          "column": 1,
+          "line": 150
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/overview.rs:163:54: replace && with || in route_display",
+    "package": "tsuzuki",
+    "replacement": "||",
+    "span": {
+      "end": {
+        "column": 56,
+        "line": 163
+      },
+      "start": {
+        "column": 54,
+        "line": 163
+      }
+    }
+  },
+  {
+    "diff": "--- src/overview.rs\n+++ replace != with == in route_display\n@@ -155,17 +155,17 @@\n         Path::new(r)\n             .file_name()\n             .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n     };\n     routes\n         .iter()\n         .map(|r| {\n             let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n+            let clash = routes.iter().any(|o| o == /* ~ changed by cargo-mutants ~ */ r && short(o) == name);\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "route_display",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 167
+        },
+        "start": {
+          "column": 1,
+          "line": 150
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/overview.rs:163:49: replace != with == in route_display",
+    "package": "tsuzuki",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 51,
+        "line": 163
+      },
+      "start": {
+        "column": 49,
+        "line": 163
+      }
+    }
+  },
+  {
+    "diff": "--- src/overview.rs\n+++ replace == with != in route_display\n@@ -155,17 +155,17 @@\n         Path::new(r)\n             .file_name()\n             .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())\n     };\n     routes\n         .iter()\n         .map(|r| {\n             let name = short(r);\n-            let clash = routes.iter().any(|o| o != r && short(o) == name);\n+            let clash = routes.iter().any(|o| o != r && short(o) != /* ~ changed by cargo-mutants ~ */ name);\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "route_display",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 167
+        },
+        "start": {
+          "column": 1,
+          "line": 150
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/overview.rs:163:66: replace == with != in route_display",
+    "package": "tsuzuki",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 68,
+        "line": 163
+      },
+      "start": {
+        "column": 66,
+        "line": 163
+      }
+    }
+  },
+  {
+    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![]\n@@ -164,22 +164,17 @@\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(route_display(routes))\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "tag_with_routes",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 178
+        },
+        "start": {
+          "column": 1,
+          "line": 169
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/overview.rs:172:5: replace tag_with_routes -> Vec<String> with vec![]",
+    "package": "tsuzuki",
+    "replacement": "vec![]",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 177
+      },
+      "start": {
+        "column": 5,
+        "line": 172
+      }
+    }
+  },
+  {
+    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![String::new()]\n@@ -164,22 +164,17 @@\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(route_display(routes))\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![String::new()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "tag_with_routes",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 178
+        },
+        "start": {
+          "column": 1,
+          "line": 169
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/overview.rs:172:5: replace tag_with_routes -> Vec<String> with vec![String::new()]",
+    "package": "tsuzuki",
+    "replacement": "vec![String::new()]",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 177
+      },
+      "start": {
+        "column": 5,
+        "line": 172
+      }
+    }
+  },
+  {
+    "diff": "--- src/overview.rs\n+++ replace tag_with_routes -> Vec<String> with vec![\"xyzzy\".into()]\n@@ -164,22 +164,17 @@\n             if clash { r.to_string() } else { name }\n         })\n         .collect()\n }\n \n /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are\n /// parallel.\n pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {\n-    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);\n-    labels\n-        .iter()\n-        .zip(route_display(routes))\n-        .map(|(l, r)| format!(\"{l:<width$}  [{r}]\"))\n-        .collect()\n+    vec![\"xyzzy\".into()] /* ~ changed by cargo-mutants ~ */\n }\n \n /// `start`'s per-state display word, exactly per CLAUDE.md: never-started\n /// (no record) -> `\"Start\"`; paused -> `\"Resume\"`; dropped or completed ->\n /// `\"Rewatch?\"`.\n /// `in_progress` never legitimately reaches this function — those series\n /// belong to the automatic resume picker, not `start`'s listing — but it\n /// stays total (falls back to `\"Resume\"`, the same word a real resumable\n",
+    "file": "src/overview.rs",
+    "function": {
+      "function_name": "tag_with_routes",
+      "return_type": "-> Vec<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 178
+        },
+        "start": {
+          "column": 1,
+          "line": 169
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/overview.rs:172:5: replace tag_with_routes -> Vec<String> with vec![\"xyzzy\".into()]",
+    "package": "tsuzuki",
+    "replacement": "vec![\"xyzzy\".into()]",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 177
+      },
+      "start": {
+        "column": 5,
+        "line": 172
+      }
+    }
+  },
+  {
+    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::new()\n@@ -51,44 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        let shown = overview::route_display(&routes);\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(&shown[i]);\n-                current = Some(routes[i]);\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -424,7 +616,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -439,7 +631,7 @@
     "span": {
       "end": {
         "column": 6,
-        "line": 84
+        "line": 86
       },
       "start": {
         "column": 5,
@@ -448,7 +640,7 @@
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::from_iter([Default::default()])\n@@ -51,42 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(route(item));\n-                current = Some(route(item));\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
+    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::from_iter([Default::default()])\n@@ -51,44 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        let shown = overview::route_display(&routes);\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(&shown[i]);\n-                current = Some(routes[i]);\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -456,7 +648,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -471,7 +663,7 @@
     "span": {
       "end": {
         "column": 6,
-        "line": 84
+        "line": 86
       },
       "start": {
         "column": 5,
@@ -480,7 +672,7 @@
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::new(Default::default())\n@@ -51,42 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(route(item));\n-                current = Some(route(item));\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::new(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
+    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::new(Default::default())\n@@ -51,44 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        let shown = overview::route_display(&routes);\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(&shown[i]);\n-                current = Some(routes[i]);\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::new(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -488,7 +680,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -503,7 +695,7 @@
     "span": {
       "end": {
         "column": 6,
-        "line": 84
+        "line": 86
       },
       "start": {
         "column": 5,
@@ -512,7 +704,7 @@
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::from(Default::default())\n@@ -51,42 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(route(item));\n-                current = Some(route(item));\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::from(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
+    "diff": "--- src/picker.rs\n+++ replace pick -> PickerOutcome<T> with PickerOutcome::from(Default::default())\n@@ -51,44 +51,17 @@\n     items: &[T],\n     label: impl Fn(&T) -> String,\n     route: impl Fn(&T) -> &str,\n     is_tty: bool,\n     prompt: &str,\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n-    let multi_route = overview::is_multi_route(items.iter().map(&route));\n-\n-    if !is_tty {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        let shown = overview::route_display(&routes);\n-        let mut current: Option<&str> = None;\n-        for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n-                if current.is_some() {\n-                    print_line(\"\");\n-                }\n-                print_line(&shown[i]);\n-                current = Some(routes[i]);\n-            }\n-            print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n-        }\n-        return PickerOutcome::Listed;\n-    }\n-\n-    let mut labels: Vec<String> = items.iter().map(&label).collect();\n-    if multi_route {\n-        let routes: Vec<&str> = items.iter().map(&route).collect();\n-        labels = overview::tag_with_routes(&labels, &routes);\n-    }\n-    match select(prompt, &labels) {\n-        Some(index) => PickerOutcome::Selected(items[index].clone()),\n-        None => PickerOutcome::Cancelled,\n-    }\n+    PickerOutcome::from(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// The real, production `select` implementation: a `dialoguer` arrow-key\n /// selector. This is the *only* place `dialoguer` is touched in this\n /// module — `pick` itself never references it — so production code passes\n /// this function pointer while tests pass a fake closure instead.\n pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {\n     dialoguer::Select::new()\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -520,7 +712,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -535,7 +727,7 @@
     "span": {
       "end": {
         "column": 6,
-        "line": 84
+        "line": 86
       },
       "start": {
         "column": 5,
@@ -544,7 +736,7 @@
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace && with || in pick\n@@ -56,17 +56,17 @@\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n     let multi_route = overview::is_multi_route(items.iter().map(&route));\n \n     if !is_tty {\n         let mut current: Option<&str> = None;\n         for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n+            if multi_route || /* ~ changed by cargo-mutants ~ */ current != Some(route(item)) {\n                 if current.is_some() {\n                     print_line(\"\");\n                 }\n                 print_line(route(item));\n                 current = Some(route(item));\n             }\n             print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n         }\n",
+    "diff": "--- src/picker.rs\n+++ replace && with || in pick\n@@ -58,17 +58,17 @@\n ) -> PickerOutcome<T> {\n     let multi_route = overview::is_multi_route(items.iter().map(&route));\n \n     if !is_tty {\n         let routes: Vec<&str> = items.iter().map(&route).collect();\n         let shown = overview::route_display(&routes);\n         let mut current: Option<&str> = None;\n         for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n+            if multi_route || /* ~ changed by cargo-mutants ~ */ current != Some(routes[i]) {\n                 if current.is_some() {\n                     print_line(\"\");\n                 }\n                 print_line(&shown[i]);\n                 current = Some(routes[i]);\n             }\n             print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n         }\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -552,7 +744,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -561,22 +753,22 @@
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/picker.rs:64:28: replace && with || in pick",
+    "name": "src/picker.rs:66:28: replace && with || in pick",
     "package": "tsuzuki",
     "replacement": "||",
     "span": {
       "end": {
         "column": 30,
-        "line": 64
+        "line": 66
       },
       "start": {
         "column": 28,
-        "line": 64
+        "line": 66
       }
     }
   },
   {
-    "diff": "--- src/picker.rs\n+++ replace != with == in pick\n@@ -56,17 +56,17 @@\n     mut print_line: impl FnMut(&str),\n     select: impl FnOnce(&str, &[String]) -> Option<usize>,\n ) -> PickerOutcome<T> {\n     let multi_route = overview::is_multi_route(items.iter().map(&route));\n \n     if !is_tty {\n         let mut current: Option<&str> = None;\n         for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(route(item)) {\n+            if multi_route && current == /* ~ changed by cargo-mutants ~ */ Some(route(item)) {\n                 if current.is_some() {\n                     print_line(\"\");\n                 }\n                 print_line(route(item));\n                 current = Some(route(item));\n             }\n             print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n         }\n",
+    "diff": "--- src/picker.rs\n+++ replace != with == in pick\n@@ -58,17 +58,17 @@\n ) -> PickerOutcome<T> {\n     let multi_route = overview::is_multi_route(items.iter().map(&route));\n \n     if !is_tty {\n         let routes: Vec<&str> = items.iter().map(&route).collect();\n         let shown = overview::route_display(&routes);\n         let mut current: Option<&str> = None;\n         for (i, item) in items.iter().enumerate() {\n-            if multi_route && current != Some(routes[i]) {\n+            if multi_route && current == /* ~ changed by cargo-mutants ~ */ Some(routes[i]) {\n                 if current.is_some() {\n                     print_line(\"\");\n                 }\n                 print_line(&shown[i]);\n                 current = Some(routes[i]);\n             }\n             print_line(&format!(\"  {}. {}\", i + 1, label(item)));\n         }\n",
     "file": "src/picker.rs",
     "function": {
       "function_name": "pick",
@@ -584,7 +776,7 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 85
+          "line": 87
         },
         "start": {
           "column": 1,
@@ -593,17 +785,17 @@
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/picker.rs:64:39: replace != with == in pick",
+    "name": "src/picker.rs:66:39: replace != with == in pick",
     "package": "tsuzuki",
     "replacement": "==",
     "span": {
       "end": {
         "column": 41,
-        "line": 64
+        "line": 66
       },
       "start": {
         "column": 39,
-        "line": 64
+        "line": 66
       }
     }
   }

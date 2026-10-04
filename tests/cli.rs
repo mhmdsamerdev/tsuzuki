@@ -361,8 +361,12 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
         !list3.contains("In progress:"),
         "the series must have left the in_progress group, got: {list3}"
     );
-    assert!(list3.contains("Dropped:"), "got: {list3}");
-    assert!(list3.contains("Test Show"), "got: {list3}");
+    assert!(!list3.contains("Dropped:"), "got: {list3}");
+    assert!(!list3.contains("ep."), "got: {list3}");
+    assert!(
+        list3.starts_with("Completed:\n  Test Show ("),
+        "got: {list3}"
+    );
     let state_contents = fs::read_to_string(state_path(home)).unwrap();
     assert!(
         state_contents.contains("status = \"completed\""),
@@ -487,7 +491,10 @@ fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
     assert!(drop1.contains("\"Monster\" — dropped"), "got: {drop1}");
 
     let list_dropped = run_ok(home, &["list"]);
-    assert!(list_dropped.contains("Dropped:"), "got: {list_dropped}");
+    assert_eq!(
+        list_dropped, "Dropped:\n  Monster — ep. 1 (1 files)\n",
+        "a dropped series keeps its episode number"
+    );
 
     // Dropped -> Paused does not exist (CLAUDE.md's allowed-transitions
     // table) — must be a real error, non-zero exit, state left untouched.

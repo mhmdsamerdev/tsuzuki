@@ -15,7 +15,7 @@
      }
  }
  
- /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are
- /// parallel.
- pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {
-     let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+ /// The short name shown for each route (parallel to `routes`): the root's
+ /// own folder name. Distinct routes that share a folder name keep their
+ /// full stored string instead, so two rows never look the same.
+ pub fn route_display(routes: &[&str]) -> Vec<String> {

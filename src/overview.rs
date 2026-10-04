@@ -93,23 +93,15 @@ fn overview_for(
     }
 }
 
-/// The status whose `list` group a series appears under: `Completed` shares
-/// the `Dropped` group, since both are "Rewatch?" candidates to the user.
-pub fn list_group(status: Option<Status>) -> Option<Status> {
-    match status {
-        Some(Status::Completed) => Some(Status::Dropped),
-        other => other,
-    }
-}
-
 /// Sort rank for `list`'s grouping: `in_progress` -> `paused` -> `dropped`
-/// (with `completed`) -> never-started, per CLAUDE.md.
+/// -> `completed` -> never-started.
 fn status_rank(status: Option<Status>) -> u8 {
-    match list_group(status) {
+    match status {
         Some(Status::InProgress) => 0,
         Some(Status::Paused) => 1,
-        Some(Status::Dropped | Status::Completed) => 2,
-        None => 3,
+        Some(Status::Dropped) => 2,
+        Some(Status::Completed) => 3,
+        None => 4,
     }
 }
 
@@ -257,26 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn list_group_folds_completed_into_dropped_and_leaves_the_rest() {
-        assert_eq!(
-            [
-                list_group(Some(Status::Completed)),
-                list_group(Some(Status::Dropped)),
-                list_group(Some(Status::Paused)),
-                list_group(Some(Status::InProgress)),
-                list_group(None),
-            ],
-            [
-                Some(Status::Dropped),
-                Some(Status::Dropped),
-                Some(Status::Paused),
-                Some(Status::InProgress),
-                None,
-            ]
-        );
-    }
-
-    #[test]
     fn paused_display_word_never_contains_rewatch() {
         // The bug CLAUDE.md specifically flags as having been gotten wrong
         // once already: a paused series must never be mislabeled "Rewatch?".
@@ -353,15 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn sorted_for_list_places_completed_alphabetically_with_dropped() {
+    fn sorted_for_list_places_completed_after_dropped_and_before_never_started() {
         let sorted = sorted_for_list(vec![
             overview("Zeta", None),
-            overview("Charlie", Some(Status::Completed)),
-            overview("Beta", Some(Status::Dropped)),
+            overview("Alpha", Some(Status::Completed)),
+            overview("Omega", Some(Status::Dropped)),
             overview("Delta", Some(Status::Paused)),
+            overview("Yankee", Some(Status::InProgress)),
         ]);
         let names: Vec<_> = sorted.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(names, vec!["Delta", "Beta", "Charlie", "Zeta"]);
+        assert_eq!(names, vec!["Yankee", "Delta", "Omega", "Alpha", "Zeta"]);
     }
 
     #[test]
@@ -479,14 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn list_group_and_start_word_for_every_status_match_the_hand_written_table() {
+    fn start_word_for_every_status_matches_the_hand_written_table() {
         // Wildcard-free: a new `Status` variant must be added here.
-        fn expected(status: Status) -> (Option<Status>, &'static str) {
+        fn expected(status: Status) -> &'static str {
             match status {
-                Status::InProgress => (Some(Status::InProgress), "Resume"),
-                Status::Paused => (Some(Status::Paused), "Resume"),
-                Status::Dropped => (Some(Status::Dropped), "Rewatch?"),
-                Status::Completed => (Some(Status::Dropped), "Rewatch?"),
+                Status::InProgress => "Resume",
+                Status::Paused => "Resume",
+                Status::Dropped => "Rewatch?",
+                Status::Completed => "Rewatch?",
             }
         }
         for status in [
@@ -496,7 +469,7 @@ mod tests {
             Status::Completed,
         ] {
             assert_eq!(
-                (list_group(Some(status)), start_display_word(Some(status))),
+                start_display_word(Some(status)),
                 expected(status),
                 "{status:?}"
             );

@@ -667,10 +667,11 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         return ExitCode::SUCCESS;
     }
 
-    const GROUPS: [(Option<Status>, &str); 4] = [
+    const GROUPS: [(Option<Status>, &str); 5] = [
         (Some(Status::InProgress), "In progress"),
         (Some(Status::Paused), "Paused"),
         (Some(Status::Dropped), "Dropped"),
+        (Some(Status::Completed), "Completed"),
         (None, "Never started"),
     ];
 
@@ -678,10 +679,7 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 
     let mut first_group = true;
     for (status, header) in GROUPS {
-        let items: Vec<_> = overviews
-            .iter()
-            .filter(|o| overview::list_group(o.status) == status)
-            .collect();
+        let items: Vec<_> = overviews.iter().filter(|o| o.status == status).collect();
         if items.is_empty() {
             continue;
         }
@@ -696,6 +694,7 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
             .map(|o| {
                 let ep = o
                     .episode_number
+                    .filter(|_| o.status != Some(Status::Completed))
                     .map(|e| format!(" — ep. {e}"))
                     .unwrap_or_default();
                 format!("  {}{ep} ({} files)", o.name, o.file_count)
