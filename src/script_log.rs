@@ -461,15 +461,12 @@ mod tests {
     }
 
     #[test]
-    fn mpv_log_dirs_with_no_home_still_returns_the_native_candidate_only() {
+    fn mpv_log_dirs_without_home_returns_only_the_native_candidate() {
         // No Flatpak candidate can be computed without a home directory to
         // join it onto — this must degrade to just the native candidate
         // (if `dirs::data_dir()` itself resolves), not panic or error.
-        let dirs = mpv_log_dirs(None);
-        assert!(
-            dirs.len() <= 1,
-            "with no home, only the native candidate (if any) may appear, got {dirs:?}"
-        );
+        let expected: Vec<PathBuf> = native_mpv_log_dir().into_iter().collect();
+        assert_eq!(mpv_log_dirs(None), expected);
     }
 
     // --- Cross-directory merge: per-path freshest-file-wins ---

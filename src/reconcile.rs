@@ -834,10 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn absence_equals_completion_only_fires_when_a_baseline_existed() {
-        // No existing record, and no *real* entry anywhere in the series
-        // (only a noise-level one) — must not fabricate a record out of
-        // "absence" alone.
+    fn reconcile_with_no_entries_and_no_record_creates_no_record() {
+        // No existing record and no entry anywhere in the series — absence
+        // alone must not fabricate a record.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -847,7 +846,6 @@ mod tests {
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // No entries at all for ep02 (absent) and nothing real for ep01.
 
         let mut state = State::default();
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -958,14 +956,10 @@ mod tests {
     }
 
     #[test]
-    fn reconciles_own_write_is_stable_across_a_second_call_with_nothing_new_on_disk() {
-        // Gap-audit required finding #1, third write path: reconcile's own
-        // write (the "new activity"/"completion advances the cursor" path)
-        // always stores exactly the real values it just found — never a
-        // zeroed/cleared placeholder — so it must never manufacture a false
-        // diff against itself on the very next call. Proven by calling
-        // reconcile twice with nothing touched on disk in between and
-        // asserting the second call is a true no-op (updated_at unchanged).
+    fn reconcile_own_write_is_stable_across_a_second_call_with_nothing_new_on_disk() {
+        // Reconcile stores exactly the real values it found, so the next call
+        // must see no difference. `updated_at` is pinned to 1 between calls
+        // (a real timestamp would not differ within the same second).
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -978,18 +972,12 @@ mod tests {
 
         let mut state = State::default();
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
-        let updated_at_after_first_call = state
-            .find(&root.to_string_lossy(), "Monster")
-            .unwrap()
-            .updated_at;
+        state.series[0].updated_at = 1;
+        let after_first_call = state.series[0].clone();
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
-        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
-        assert_eq!(
-            record.updated_at, updated_at_after_first_call,
-            "a second reconcile call with nothing new on disk must not treat \
-             reconcile's own prior write as new activity"
-        );
+
+        assert_eq!(state.series[0], after_first_call);
     }
 
     #[test]
@@ -2656,5 +2644,117 @@ mod tests {
         set_mtime(&path, when);
         let got = fs::metadata(&path).unwrap().modified().unwrap();
         assert!(got <= SystemTime::now() - Duration::from_secs(3000));
+    }
+
+    fn in_progress_record(root: &Path, position: f64) -> SeriesRecord {
+        SeriesRecord {
+            root: root.to_string_lossy().into_owned(),
+            name: "Monster".to_string(),
+            status: Status::InProgress,
+            current_relative_path: "Monster/ep01.mkv".to_string(),
+            position_seconds: position,
+            episode_number: Some(1),
+            updated_at: 1,
+            mal_episode_awareness: None,
+        }
+    }
+
+    fn reconcile_with_one_script_stop(position: f64, record: SeriesRecord, root: &Path) -> State {
+        let dir = tempdir().unwrap();
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        let mut config = default_config(root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            None,
+            Some(position),
+            "stop",
+        );
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
+        state
+    }
+
+    #[test]
+    fn reconcile_script_stop_matching_an_in_progress_record_leaves_it_byte_identical() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let record = in_progress_record(&root, 400.0);
+
+        let state = reconcile_with_one_script_stop(400.0, record.clone(), &root);
+
+        assert_eq!(state.series, vec![record]);
+    }
+
+    #[test]
+    fn reconcile_script_stop_just_below_resume_seconds_leaves_an_existing_record_untouched() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let record = in_progress_record(&root, 900.0);
+
+        let state = reconcile_with_one_script_stop(119.9, record.clone(), &root);
+
+        assert_eq!(state.series, vec![record]);
+    }
+
+    #[test]
+    fn reconcile_script_stop_exactly_at_resume_seconds_counts_as_real_activity() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let record = in_progress_record(&root, 900.0);
+
+        let state = reconcile_with_one_script_stop(120.0, record, &root);
+
+        assert_eq!(state.series.len(), 1);
+        assert_eq!(state.series[0].position_seconds, 120.0);
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(state.series[0].current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(state.series[0].episode_number, Some(1));
+    }
+
+    #[test]
+    fn reconcile_script_stop_exactly_at_resume_seconds_creates_a_record_for_an_untracked_series() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        let script_log_dir = dir.path().join("mpv-log");
+        write_script_entry(
+            &script_log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            None,
+            Some(120.0),
+            "stop",
+        );
+
+        let mut state = State::default();
+        reconcile_with_script_log_dirs(
+            &config,
+            &mut state,
+            None,
+            std::slice::from_ref(&script_log_dir),
+        );
+
+        assert_eq!(state.series.len(), 1);
+        assert_eq!(state.series[0].name, "Monster");
+        assert_eq!(state.series[0].position_seconds, 120.0);
+        assert_eq!(state.series[0].status, Status::InProgress);
     }
 }

@@ -509,4 +509,70 @@ updated_at = 1700000000
             "the identically-named link under the OTHER root must be untouched"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_with_unix_mode_sets_that_mode_on_the_final_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token.toml");
+
+        atomic_write(&path, b"secret", Some(0o600)).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"secret");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_content_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        fs::write(&path, b"old").unwrap();
+
+        atomic_write(&path, b"new", None).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["state.toml"]);
+    }
+
+    #[test]
+    fn atomic_write_when_rename_fails_returns_error_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        // A non-empty directory at the target makes the final rename fail.
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"x").unwrap();
+
+        let result = atomic_write(&path, b"new", None);
+
+        assert!(result.is_err());
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["state.toml"]);
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn state_round_trips_dropped_status_and_mal_episode_awareness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        let mut state = sample_state();
+        state.series[0].status = Status::Dropped;
+        state.series[0].mal_episode_awareness = Some(12);
+        let text = toml::to_string(&state).unwrap();
+        fs::write(&path, text).unwrap();
+
+        let read_back: State = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(read_back, state);
+    }
 }

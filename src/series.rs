@@ -223,7 +223,7 @@ fn is_video_file(path: &Path, video_extensions: &[String]) -> bool {
 mod tests {
     use super::*;
     use std::fs::{self as std_fs, File};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn touch(path: &Path) {
@@ -593,20 +593,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ordered_episodes_with_no_exclusions_matches_ordered_episodes_excluding_with_an_empty_list() {
-        let dir = tempdir().unwrap();
-        let series_path = dir.path().join("One Piece");
-        touch(&series_path.join("Season 1").join("ep01.mkv"));
-        touch(&series_path.join("Specials").join("sp01.mkv"));
-
-        let plain = ordered_episodes(&series_path, &default_extensions()).unwrap();
-        let via_excluding =
-            ordered_episodes_excluding(&series_path, &default_extensions(), &[]).unwrap();
-
-        assert_eq!(plain, via_excluding);
-    }
-
     // --- Gap-audit: symlink interaction with exclusion filtering ---
 
     #[cfg(unix)]
@@ -714,7 +700,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlink_cycle_does_not_hang_or_panic() {
+    fn ordered_episodes_symlink_back_to_root_terminates_and_lists_each_episode_once() {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -728,79 +714,124 @@ mod tests {
         // followed at all.
         symlink(&series_path, nested.join("back")).unwrap();
 
-        let series_path_clone = series_path.clone();
-        let extensions = default_extensions();
-        let handle = std::thread::spawn(move || ordered_episodes(&series_path_clone, &extensions));
-
-        let result = wait_with_timeout(handle, Duration::from_secs(5)).expect(
-            "ordered_episodes did not return within the timeout — \
-             likely an infinite loop from the symlink cycle",
-        );
-
-        let episodes = result.unwrap();
+        let episodes = walk_with_timeout(&series_path);
         // The cycle must not cause ep01.mkv to be listed more than once.
         assert_eq!(relative_order(&series_path, &episodes), vec!["ep01.mkv"]);
     }
 
-    /// Polls a `JoinHandle` instead of blocking on `.join()`, so a
-    /// regression that reintroduces infinite recursion fails this test
-    /// loudly (assertion/panic) instead of hanging the whole test binary
-    /// (and therefore CI) indefinitely. The spawned thread itself can't be
-    /// killed if it never returns — it's leaked for the rest of the
-    /// process — but the test polling it always returns within `timeout`.
-    fn wait_with_timeout<T: Send + 'static>(
-        handle: std::thread::JoinHandle<T>,
-        timeout: Duration,
-    ) -> Option<T> {
-        let start = Instant::now();
-        loop {
-            if handle.is_finished() {
-                return handle.join().ok();
-            }
-            if start.elapsed() > timeout {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    fn walk_with_timeout(series_path: &Path) -> Vec<PathBuf> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = series_path.to_path_buf();
+        let extensions = default_extensions();
+        std::thread::spawn(move || {
+            let _ = tx.send(ordered_episodes(&path, &extensions));
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect(
+                "ordered_episodes did not return — likely infinite recursion on a symlink cycle",
+            )
+            .unwrap()
     }
 
-    /// Not a correctness assertion — ordering isn't wired to any command
-    /// yet (Phase 5's job), so this exercises `series_in_root` +
-    /// `ordered_episodes` end-to-end against a fabricated tree and prints
-    /// the result for visual sanity-checking against design.md §5's
-    /// example. Run with `cargo test ordering_demo -- --nocapture`.
+    #[cfg(unix)]
     #[test]
-    fn ordering_demo_visual_sanity_check() {
+    fn ordered_episodes_sibling_symlink_cycle_lists_each_episode_once() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Cycle Series");
+        touch(&series_path.join("a").join("ep01.mkv"));
+        touch(&series_path.join("b").join("ep02.mkv"));
+        symlink(series_path.join("b"), series_path.join("a").join("to_b")).unwrap();
+        symlink(series_path.join("a"), series_path.join("b").join("to_a")).unwrap();
+
+        let episodes = walk_with_timeout(&series_path);
+
+        let mut file_names: Vec<String> = episodes.iter().map(|p| entry_name(p)).collect();
+        file_names.sort();
+        assert_eq!(file_names, vec!["ep01.mkv", "ep02.mkv"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordered_episodes_two_aliases_of_one_directory_list_its_episodes_once() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Alias Series");
+        touch(&series_path.join("real").join("ep01.mkv"));
+        symlink(series_path.join("real"), series_path.join("alias")).unwrap();
+
+        let episodes = walk_with_timeout(&series_path);
+
+        assert_eq!(episodes.len(), 1);
+    }
+
+    #[test]
+    fn ordered_episodes_lists_season_dirs_before_loose_files_at_the_same_level() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Show");
+        // "Aaa" sorts before "Season" alphabetically, so a merged or
+        // files-first walk would put it first.
+        touch(&series_path.join("Aaa OVA.mkv"));
+        touch(&series_path.join("Season 1").join("ep01.mkv"));
+        touch(&series_path.join("Season 1").join("ep02.mkv"));
+        touch(&series_path.join("Season 2").join("ep01.mkv"));
+        touch(&series_path.join("Zzz OVA.mkv"));
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec![
+                "Season 1/ep01.mkv",
+                "Season 1/ep02.mkv",
+                "Season 2/ep01.mkv",
+                "Aaa OVA.mkv",
+                "Zzz OVA.mkv",
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_episodes_sorts_unpadded_numbers_naturally_files_and_dirs() {
+        let dir = tempdir().unwrap();
+        let series_path = dir.path().join("Show");
+        for name in ["ep10.mkv", "ep2.mkv", "ep1.mkv"] {
+            touch(&series_path.join(name));
+        }
+        for season in ["Season 10", "Season 2"] {
+            touch(&series_path.join(season).join("ep1.mkv"));
+        }
+
+        let episodes = ordered_episodes(&series_path, &default_extensions()).unwrap();
+
+        assert_eq!(
+            relative_order(&series_path, &episodes),
+            vec![
+                "Season 2/ep1.mkv",
+                "Season 10/ep1.mkv",
+                "ep1.mkv",
+                "ep2.mkv",
+                "ep10.mkv",
+            ]
+        );
+    }
+
+    #[test]
+    fn series_in_root_sorts_unpadded_numbers_naturally() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
-
-        touch(
-            &root
-                .join("Monster")
-                .join("[1080p HEVC][Crunchyroll]")
-                .join("ep01.mkv"),
-        );
-        touch(&root.join("One Piece").join("Season 1").join("ep01.mkv"));
-        touch(&root.join("One Piece").join("Season 1").join("ep02.mkv"));
-        touch(&root.join("One Piece").join("Season 2").join("ep01.mkv"));
-        touch(&root.join("One Piece").join("Season 1").join("ep01.srt"));
-
-        println!(
-            "\n=== ordering demo: series_in_root({}) ===",
-            root.display()
-        );
-        let series = series_in_root(&root, &[]).unwrap();
-        for s in &series {
-            println!("series: {}", s.name);
-            let episodes = ordered_episodes(&s.path, &default_extensions()).unwrap();
-            for (i, ep) in episodes.iter().enumerate() {
-                println!(
-                    "  {:>2}. {}",
-                    i + 1,
-                    ep.strip_prefix(&s.path).unwrap().display()
-                );
-            }
+        for name in ["Show 10", "Show 2", "Show 1"] {
+            std_fs::create_dir_all(root.join(name)).unwrap();
         }
-        println!("=== end ordering demo ===\n");
+
+        let names: Vec<String> = series_in_root(&root, &[])
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+
+        assert_eq!(names, vec!["Show 1", "Show 2", "Show 10"]);
     }
 }

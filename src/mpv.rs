@@ -1040,25 +1040,37 @@ mod tests {
     }
 
     #[test]
-    fn position_exactly_at_resume_threshold_is_not_start_from_zero() {
+    fn position_exactly_at_resume_threshold_resumes_from_that_position() {
         let result = classify(
             120.0,
             DurationOutcome::Unknown(DurationError::Unreadable),
             120,
             180,
         );
-        assert_ne!(result.action, PlaybackAction::StartFromZero);
+        assert_eq!(
+            result,
+            Classification {
+                action: PlaybackAction::Resume(120.0),
+                duration: DurationOutcome::Unknown(DurationError::Unreadable),
+            }
+        );
     }
 
     #[test]
-    fn position_just_above_resume_threshold_is_not_start_from_zero() {
+    fn position_just_above_resume_threshold_resumes_from_that_position() {
         let result = classify(
             120.1,
             DurationOutcome::Unknown(DurationError::Unreadable),
             120,
             180,
         );
-        assert_ne!(result.action, PlaybackAction::StartFromZero);
+        assert_eq!(
+            result,
+            Classification {
+                action: PlaybackAction::Resume(120.1),
+                duration: DurationOutcome::Unknown(DurationError::Unreadable),
+            }
+        );
     }
 
     #[test]

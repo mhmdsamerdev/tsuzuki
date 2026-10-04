@@ -119,17 +119,24 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
         state_path.display()
     );
     let state_contents = fs::read_to_string(&state_path).unwrap();
-    assert!(
-        state_contents.contains("in_progress"),
-        "persisted state.toml contents:\n{state_contents}"
-    );
-    assert!(
-        state_contents.contains("560.25"),
-        "persisted state.toml contents:\n{state_contents}"
-    );
-    assert!(
-        state_contents.contains("Monster"),
-        "persisted state.toml contents:\n{state_contents}"
+    let mut state: toml::Table = toml::from_str(&state_contents).unwrap();
+    let series = state["series"].as_array_mut().unwrap();
+    series[0].as_table_mut().unwrap().remove("updated_at");
+    let expected: toml::Table = toml::from_str(
+        r#"
+        [[series]]
+        root = "~/Anime"
+        name = "Monster"
+        status = "in_progress"
+        current_relative_path = "Monster/ep01.mkv"
+        position_seconds = 560.25
+        episode_number = 1
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        state["series"], expected["series"],
+        "state.toml:\n{state_contents}"
     );
 }
 
