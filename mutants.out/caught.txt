@@ -1,5 +1,0 @@
-src/main.rs:655:5: replace list_command -> ExitCode with Default::default()
-src/main.rs:682:66: replace == with != in list_command
-src/main.rs:697:42: replace != with == in list_command
-src/overview.rs:99:5: replace status_rank -> u8 with 0
-src/overview.rs:99:5: replace status_rank -> u8 with 1
