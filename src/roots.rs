@@ -97,6 +97,14 @@ pub(crate) fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
     fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
+/// A stored root's folder name: its last path component, so a trailing
+/// slash doesn't matter. `None` for roots with no final component (`/`).
+pub(crate) fn root_folder_name(root: &str) -> Option<String> {
+    Path::new(root)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 /// `pub(crate)` so `exclude.rs` can expand a tracked root's literal form
 /// (e.g. `~/Anime`) the same way `add_root` does, rather than duplicating
 /// tilde-expansion logic.
@@ -345,5 +353,23 @@ mod tests {
 
         assert!(matches!(outcome, AddOutcome::Added(_)));
         assert_eq!(config.roots.paths.len(), 2);
+    }
+
+    #[test]
+    fn root_folder_name_is_the_last_component_ignoring_a_trailing_slash() {
+        assert_eq!(
+            [
+                root_folder_name("~/Anime"),
+                root_folder_name("/mnt/nas/Shows/"),
+                root_folder_name("re"),
+                root_folder_name("/"),
+            ],
+            [
+                Some("Anime".to_string()),
+                Some("Shows".to_string()),
+                Some("re".to_string()),
+                None,
+            ]
+        );
     }
 }

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use crate::config::Config;
-use crate::roots::expand_tilde;
+use crate::roots::{expand_tilde, root_folder_name};
 use crate::state::resolve_root_arg;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +66,73 @@ pub fn resolve_series_root(
                 }),
             }
         }
+    }
+}
+
+/// What a bare `start`/`resume` argument names.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// A series under exactly one tracked root (that root's stored form).
+    Series(String),
+    /// A tracked root, by folder name (its stored form).
+    Root(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PositionalError {
+    /// Neither a series under any root nor a root's folder name.
+    NotFound(String),
+    /// A series that exists under more than one tracked root.
+    AmbiguousSeries { series: String, roots: Vec<String> },
+    /// A folder name shared by more than one tracked root.
+    AmbiguousRoot { name: String, roots: Vec<String> },
+    /// Both a series name and a root's folder name.
+    Collision {
+        name: String,
+        series_roots: Vec<String>,
+        roots: Vec<String>,
+    },
+}
+
+/// Resolves `arg` as a series or, failing that, a root's folder name. Both
+/// lookups are exact and case-sensitive; matching both is a `Collision`,
+/// never a silent pick.
+pub fn resolve_positional(
+    config: &Config,
+    arg: &str,
+    home: Option<&Path>,
+) -> Result<Resolved, PositionalError> {
+    let series_roots: Vec<String> = config
+        .roots
+        .paths
+        .iter()
+        .filter(|root| expand_tilde(Path::new(root), home).join(arg).is_dir())
+        .cloned()
+        .collect();
+    let roots: Vec<String> = config
+        .roots
+        .paths
+        .iter()
+        .filter(|root| root_folder_name(root).as_deref() == Some(arg))
+        .cloned()
+        .collect();
+    match (series_roots.len(), roots.len()) {
+        (0, 0) => Err(PositionalError::NotFound(arg.to_string())),
+        (1, 0) => Ok(Resolved::Series(series_roots.into_iter().next().unwrap())),
+        (_, 0) => Err(PositionalError::AmbiguousSeries {
+            series: arg.to_string(),
+            roots: series_roots,
+        }),
+        (0, 1) => Ok(Resolved::Root(roots.into_iter().next().unwrap())),
+        (0, _) => Err(PositionalError::AmbiguousRoot {
+            name: arg.to_string(),
+            roots,
+        }),
+        _ => Err(PositionalError::Collision {
+            name: arg.to_string(),
+            series_roots,
+            roots,
+        }),
     }
 }
 
@@ -163,5 +230,202 @@ mod tests {
         let config = tracked_config(&[&root_a, &root_b]);
         let err = resolve_series_root(&config, "Monster", Some(&root_b), None).unwrap_err();
         assert_eq!(err, TargetError::NotFound("Monster".to_string()));
+    }
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn positional_naming_only_a_series_resolves_to_its_root() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let re = dir.path().join("re");
+        fs::create_dir_all(anime.join("Monster")).unwrap();
+        fs::create_dir_all(&re).unwrap();
+        let config = tracked_config(&[&anime, &re]);
+
+        assert_eq!(
+            resolve_positional(&config, "Monster", None),
+            Ok(Resolved::Series(s(&anime)))
+        );
+    }
+
+    #[test]
+    fn positional_naming_only_a_root_folder_resolves_to_that_root() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let re = dir.path().join("re");
+        fs::create_dir_all(anime.join("Monster")).unwrap();
+        fs::create_dir_all(&re).unwrap();
+        let config = tracked_config(&[&anime, &re]);
+
+        assert_eq!(
+            resolve_positional(&config, "re", None),
+            Ok(Resolved::Root(s(&re)))
+        );
+    }
+
+    #[test]
+    fn positional_naming_nothing_is_not_found() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        fs::create_dir_all(anime.join("Monster")).unwrap();
+        let config = tracked_config(&[&anime]);
+
+        assert_eq!(
+            resolve_positional(&config, "nope", None),
+            Err(PositionalError::NotFound("nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn positional_naming_both_a_series_and_a_root_is_a_collision_listing_both() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let re = dir.path().join("re");
+        fs::create_dir_all(anime.join("re")).unwrap();
+        fs::create_dir_all(&re).unwrap();
+        let config = tracked_config(&[&anime, &re]);
+
+        assert_eq!(
+            resolve_positional(&config, "re", None),
+            Err(PositionalError::Collision {
+                name: "re".to_string(),
+                series_roots: vec![s(&anime)],
+                roots: vec![s(&re)],
+            })
+        );
+    }
+
+    #[test]
+    fn positional_collision_beats_an_ambiguous_series_and_an_ambiguous_root() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a").join("re");
+        let b = dir.path().join("b").join("re");
+        fs::create_dir_all(a.join("re")).unwrap();
+        fs::create_dir_all(b.join("re")).unwrap();
+        let config = tracked_config(&[&a, &b]);
+
+        assert_eq!(
+            resolve_positional(&config, "re", None),
+            Err(PositionalError::Collision {
+                name: "re".to_string(),
+                series_roots: vec![s(&a), s(&b)],
+                roots: vec![s(&a), s(&b)],
+            })
+        );
+    }
+
+    #[test]
+    fn positional_series_under_two_roots_is_ambiguous_series() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(a.join("Monster")).unwrap();
+        fs::create_dir_all(b.join("Monster")).unwrap();
+        let config = tracked_config(&[&a, &b]);
+
+        assert_eq!(
+            resolve_positional(&config, "Monster", None),
+            Err(PositionalError::AmbiguousSeries {
+                series: "Monster".to_string(),
+                roots: vec![s(&a), s(&b)],
+            })
+        );
+    }
+
+    #[test]
+    fn positional_folder_name_shared_by_two_roots_is_ambiguous_root() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("x").join("anime");
+        let b = dir.path().join("y").join("anime");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let config = tracked_config(&[&a, &b]);
+
+        assert_eq!(
+            resolve_positional(&config, "anime", None),
+            Err(PositionalError::AmbiguousRoot {
+                name: "anime".to_string(),
+                roots: vec![s(&a), s(&b)],
+            })
+        );
+    }
+
+    #[test]
+    fn positional_root_name_matching_ignores_a_trailing_slash_on_the_stored_root() {
+        let dir = tempdir().unwrap();
+        let re = dir.path().join("re");
+        fs::create_dir_all(&re).unwrap();
+        let mut config = Config::default();
+        config.roots.paths.push(format!("{}/", re.display()));
+
+        assert_eq!(
+            resolve_positional(&config, "re", None),
+            Ok(Resolved::Root(format!("{}/", re.display())))
+        );
+    }
+
+    #[test]
+    fn positional_root_name_matching_is_case_sensitive() {
+        let dir = tempdir().unwrap();
+        let re = dir.path().join("re");
+        fs::create_dir_all(&re).unwrap();
+        let config = tracked_config(&[&re]);
+
+        assert_eq!(
+            resolve_positional(&config, "RE", None),
+            Err(PositionalError::NotFound("RE".to_string()))
+        );
+    }
+
+    #[test]
+    fn positional_root_name_matching_handles_non_ascii_folder_names() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("アニメ");
+        fs::create_dir_all(&root).unwrap();
+        let config = tracked_config(&[&root]);
+
+        assert_eq!(
+            resolve_positional(&config, "アニメ", None),
+            Ok(Resolved::Root(s(&root)))
+        );
+    }
+
+    #[test]
+    fn positional_root_name_matches_the_stored_form_not_a_symlink_target() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        let link = dir.path().join("re");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let config = tracked_config(&[&link]);
+
+        assert_eq!(
+            resolve_positional(&config, "re", None),
+            Ok(Resolved::Root(s(&link)))
+        );
+        assert_eq!(
+            resolve_positional(&config, "real", None),
+            Err(PositionalError::NotFound("real".to_string()))
+        );
+    }
+
+    #[test]
+    fn positional_tilde_root_name_matches_and_series_lookup_expands_the_tilde() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("re").join("Bleach")).unwrap();
+        let mut config = Config::default();
+        config.roots.paths.push("~/re".to_string());
+
+        assert_eq!(
+            resolve_positional(&config, "re", Some(home)),
+            Ok(Resolved::Root("~/re".to_string()))
+        );
+        assert_eq!(
+            resolve_positional(&config, "Bleach", Some(home)),
+            Ok(Resolved::Series("~/re".to_string()))
+        );
     }
 }

@@ -17,12 +17,13 @@ pub struct Cli {
 pub enum Command {
     /// Resume the current series (same as bare `tsuzuki`)
     Resume {
-        /// Series name; bypasses the interactive picker entirely, TTY or
-        /// not (a tracked root's immediate child directory name)
+        /// Series name, which bypasses the interactive picker entirely, TTY
+        /// or not (a tracked root's immediate child directory name); or a
+        /// tracked root's folder name, which narrows the picker to that root
         series: Option<String>,
 
         /// Tracked root to resolve `series` against, when it exists under
-        /// more than one
+        /// more than one; without `series`, narrows the picker to that root
         #[arg(long)]
         root: Option<PathBuf>,
     },
@@ -43,12 +44,13 @@ pub enum Command {
     /// List series outside the automatic resume picker (never-started,
     /// dropped, paused)
     Start {
-        /// Series name; bypasses the interactive picker entirely, TTY or
-        /// not (a tracked root's immediate child directory name)
+        /// Series name, which bypasses the interactive picker entirely, TTY
+        /// or not (a tracked root's immediate child directory name); or a
+        /// tracked root's folder name, which narrows the picker to that root
         series: Option<String>,
 
         /// Tracked root to resolve `series` against, when it exists under
-        /// more than one
+        /// more than one; without `series`, narrows the picker to that root
         #[arg(long)]
         root: Option<PathBuf>,
     },

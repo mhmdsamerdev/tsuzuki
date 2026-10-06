@@ -15,6 +15,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 
 ## Hard invariants
 - Never modify or rename user files.
+- filesystem is the library. Never add labels, tags, or a library database; the folder layout on disk is the only source of what exists and how it's grouped.
 - Never guess. Every tracked or excluded path is explicit.
 - MAL sync only ever writes a higher episode number, never a lower one, even on retries or partial failures.
 - Natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.

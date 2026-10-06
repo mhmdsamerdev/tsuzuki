@@ -143,11 +143,7 @@ pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {
 /// own folder name. Distinct routes that share a folder name keep their
 /// full stored string instead, so two rows never look the same.
 pub fn route_display(routes: &[&str]) -> Vec<String> {
-    let short = |r: &str| {
-        Path::new(r)
-            .file_name()
-            .map_or_else(|| r.to_string(), |n| n.to_string_lossy().into_owned())
-    };
+    let short = |r: &str| crate::roots::root_folder_name(r).unwrap_or_else(|| r.to_string());
     routes
         .iter()
         .map(|r| {

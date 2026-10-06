@@ -75,6 +75,7 @@ that noticeably improves how well the tool works day to day.
 |---|---|
 | `tsuzuki` | Resume what you were watching. |
 | `tsuzuki start` | Nothing in progress? See what's available and begin. |
+| `tsuzuki start <root>` | Same, narrowed to one root by its folder name (`resume` takes it too). |
 | `tsuzuki status` | What's currently in progress. |
 | `tsuzuki list` | Everything you're tracking, at a glance. |
 | `tsuzuki pause <series>...` | Set something aside without losing your place. |

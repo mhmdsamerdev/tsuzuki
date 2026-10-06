@@ -20,6 +20,7 @@ mod sync;
 mod target;
 mod update;
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -505,6 +506,91 @@ fn explicit_play(
     }
 }
 
+/// Narrows `start`/`resume`'s picker. `Break` ends the command (a series
+/// was played, or the arguments were rejected); `Continue(Some(root))` limits
+/// the picker to that stored root. A bare `series` is a series first, else a
+/// root's folder name (both is an error); `--root` alone is that root.
+fn resolve_scope(
+    series: Option<String>,
+    root_arg: Option<&Path>,
+    config: &Config,
+    state: &State,
+    home: Option<&Path>,
+    command_name: &str,
+    verb: &str,
+) -> ControlFlow<ExitCode, Option<String>> {
+    match (series, root_arg) {
+        (Some(series), Some(_)) => ControlFlow::Break(explicit_play(
+            &series,
+            root_arg,
+            config,
+            state,
+            home,
+            command_name,
+            verb,
+        )),
+        (Some(arg), None) => match target::resolve_positional(config, &arg, home) {
+            Ok(target::Resolved::Series(root)) => {
+                ControlFlow::Break(play_series(config, state, &root, &arg, home, verb))
+            }
+            Ok(target::Resolved::Root(root)) => ControlFlow::Continue(Some(root)),
+            Err(e) => ControlFlow::Break(print_positional_error(&e, command_name)),
+        },
+        (None, Some(root_arg)) => match state::resolve_root_arg(config, root_arg, home) {
+            Some(root) => ControlFlow::Continue(Some(root)),
+            None => ControlFlow::Break(print_target_error(
+                &target::TargetError::RootNotFound(root_arg.to_string_lossy().into_owned()),
+                command_name,
+            )),
+        },
+        (None, None) => ControlFlow::Continue(None),
+    }
+}
+
+fn in_scope(scope: &Option<String>, root: &str) -> bool {
+    scope.as_deref().is_none_or(|s| s == root)
+}
+
+/// A scoped root as shown in messages: its folder name.
+fn scope_label(root: &str) -> String {
+    overview::route_display(&[root]).remove(0)
+}
+
+fn print_positional_error(err: &target::PositionalError, command_name: &str) -> ExitCode {
+    match err {
+        target::PositionalError::NotFound(arg) => {
+            fail(&format!("no tracked series or root named \"{arg}\""))
+        }
+        target::PositionalError::AmbiguousSeries { series, roots } => {
+            print_ambiguous(series, command_name, roots)
+        }
+        target::PositionalError::AmbiguousRoot { name, roots } => {
+            eprintln!(
+                "✗ \"{name}\" is ambiguous — {} tracked roots share that folder name",
+                roots.len()
+            );
+            for r in roots {
+                eprintln!("  → tsuzuki {command_name} --root {r}");
+            }
+            ExitCode::FAILURE
+        }
+        target::PositionalError::Collision {
+            name,
+            series_roots,
+            roots,
+        } => {
+            eprintln!("✗ \"{name}\" is both a series and a root folder name");
+            for r in roots {
+                eprintln!("  → tsuzuki {command_name} --root {r}");
+            }
+            for r in series_roots {
+                eprintln!("  → tsuzuki {command_name} \"{name}\" --root {r}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode {
     match err {
         target::TargetError::NotFound(name) => fail(&format!("no tracked series named \"{name}\"")),
@@ -552,31 +638,36 @@ fn resume_command(
         print_scan_warning(w);
     }
 
-    if let Some(series) = series {
-        return explicit_play(
-            &series,
-            root.as_deref(),
-            config,
-            &state,
-            home,
-            "resume",
-            "Resuming",
-        );
-    }
+    let scope = match resolve_scope(
+        series,
+        root.as_deref(),
+        config,
+        &state,
+        home,
+        "resume",
+        "Resuming",
+    ) {
+        ControlFlow::Break(code) => return code,
+        ControlFlow::Continue(scope) => scope,
+    };
 
     let overviews = overview::all_series(config, &state, home);
     let in_progress: Vec<_> = overview::group_by_root(
         overviews
             .into_iter()
             .filter(|o| o.status == Some(Status::InProgress))
+            .filter(|o| in_scope(&scope, &o.root))
             .collect(),
         &config.roots.paths,
     );
 
     match in_progress.len() {
         // Zero `in_progress` series falls through to `start`'s behavior
-        // (design.md §6).
-        0 => start_command(None, None, config, state_path, home, is_tty),
+        // (design.md §6), unless a root was asked for.
+        0 => match &scope {
+            Some(root) => fail(&format!("nothing in progress in {}", scope_label(root))),
+            None => start_command(None, None, config, state_path, home, is_tty),
+        },
         1 => {
             let o = &in_progress[0];
             play_series(config, &state, &o.root, &o.name, home, "Resuming")
@@ -739,27 +830,36 @@ fn start_command(
         print_scan_warning(w);
     }
 
-    if let Some(series) = series {
-        return explicit_play(
-            &series,
-            root.as_deref(),
-            config,
-            &state,
-            home,
-            "start",
-            "Starting",
-        );
-    }
+    let scope = match resolve_scope(
+        series,
+        root.as_deref(),
+        config,
+        &state,
+        home,
+        "start",
+        "Starting",
+    ) {
+        ControlFlow::Break(code) => return code,
+        ControlFlow::Continue(scope) => scope,
+    };
 
     let overviews = overview::all_series(config, &state, home);
     let eligible = overview::group_by_root(
-        overview::sorted_for_list(overview::eligible_for_start(&overviews)),
+        overview::sorted_for_list(overview::eligible_for_start(&overviews))
+            .into_iter()
+            .filter(|o| in_scope(&scope, &o.root))
+            .collect(),
         &config.roots.paths,
     );
 
     if eligible.is_empty() {
-        println!("Nothing to start.");
-        return ExitCode::SUCCESS;
+        return match &scope {
+            Some(root) => fail(&format!("nothing to start in {}", scope_label(root))),
+            None => {
+                println!("Nothing to start.");
+                ExitCode::SUCCESS
+            }
+        };
     }
 
     println!("Available to start:");

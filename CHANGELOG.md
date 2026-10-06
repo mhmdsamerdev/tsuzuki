@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- `start` and `resume` accept a root's folder name (or `--root`) to narrow the picker to that root.
+
 ## [v0.1.3]
 
 - `start`/`resume` choices are grouped by root, and `list` tags each series with its root, when several roots are tracked.

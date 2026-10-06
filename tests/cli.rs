@@ -1623,3 +1623,443 @@ fn non_tty_resume_with_two_routes_groups_in_progress_series_under_route_headers(
         "Anime\n  1. Monster (ep. 1)\n\nShows\n  2. Frieren (ep. 1)\n\nRun `tsuzuki resume <series>` to pick one.\n"
     );
 }
+
+// ---------------------------------------------------------------------
+// `start`/`resume` scoped to one root by folder name (or `--root`)
+// ---------------------------------------------------------------------
+
+/// Adds one root per `(folder, series)` pair under `home`, in order, each
+/// series holding one episode; returns the stored root strings in order.
+fn library(home: &Path, roots: &[(&str, &[&str])]) -> Vec<String> {
+    roots
+        .iter()
+        .map(|(folder, series)| {
+            let root = home.join(folder);
+            fs::create_dir_all(&root).unwrap();
+            for name in *series {
+                touch(&root.join(name).join("ep01.mkv"));
+            }
+            add_root(home, &root);
+            root.to_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+/// Marks `<root>/<series>/ep01.mkv` in progress at `position` seconds and
+/// persists it through a real `list` run.
+fn watch(home: &Path, entry: &str, root: &str, series: &str, position: f64) {
+    write_watch_later(
+        home,
+        entry,
+        &Path::new(root).join(series).join("ep01.mkv"),
+        position,
+    );
+    run_ok(home, &["list"]);
+}
+
+fn snapshot(home: &Path) -> (String, String) {
+    (
+        fs::read_to_string(config_path(home)).unwrap(),
+        fs::read_to_string(state_path(home)).unwrap_or_default(),
+    )
+}
+
+const START_TAIL: &str = "\nRun `tsuzuki start <series>` to pick one.\n";
+const RESUME_TAIL: &str = "\nRun `tsuzuki resume <series>` to pick one.\n";
+
+#[test]
+fn start_with_root_folder_name_lists_only_that_root_without_route_tags() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(
+        home,
+        &[
+            ("anime", &["Monster", "Naruto"]),
+            ("re", &["Bleach"]),
+            ("tv-series", &["Dark"]),
+        ],
+    );
+
+    let out = run(home, &["start", "re"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}")
+    );
+    assert_eq!(stderr_of(&out), "");
+}
+
+#[test]
+fn start_without_argument_still_lists_every_root_under_headers() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(
+        home,
+        &[
+            ("anime", &["Monster"]),
+            ("re", &["Bleach"]),
+            ("tv-series", &["Dark"]),
+        ],
+    );
+
+    let out = run(home, &["start"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "Available to start:\n\nanime\n  1. Monster — Start (1 files)\n\nre\n  2. Bleach — Start (1 files)\n\ntv-series\n  3. Dark — Start (1 files)\n{}",
+            START_TAIL
+        )
+    );
+}
+
+#[test]
+fn start_root_flag_without_series_lists_only_that_root() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    let expected = format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}");
+
+    let by_path = run(home, &["start", "--root", &roots[1]]);
+    let by_tilde = run(home, &["start", "--root", "~/re"]);
+
+    assert_eq!(stdout_of(&by_path), expected);
+    assert_eq!(stdout_of(&by_tilde), expected);
+}
+
+#[test]
+fn start_root_flag_that_is_not_tracked_errors_and_writes_nothing() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("anime", &["Monster"])]);
+    let before = snapshot(home);
+
+    let out = run(home, &["start", "--root", "/nowhere"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "error: not a tracked root: /nowhere\n");
+    assert_eq!(snapshot(home), before);
+}
+
+#[test]
+fn start_with_root_folder_name_matches_a_root_stored_with_a_trailing_slash() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    touch(&home.join("re").join("Bleach").join("ep01.mkv"));
+    run_ok(home, &["add", &format!("{}/", home.join("re").display())]);
+
+    let out = run(home, &["start", "re"]);
+
+    assert_eq!(
+        stdout_of(&out),
+        format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}")
+    );
+}
+
+#[test]
+fn start_with_root_folder_name_is_case_sensitive() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("re", &["Bleach"])]);
+
+    let out = run(home, &["start", "RE"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(
+        stderr_of(&out),
+        "error: no tracked series or root named \"RE\"\n"
+    );
+}
+
+#[test]
+fn start_with_unknown_name_errors_without_listing_or_writing() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    let before = snapshot(home);
+
+    let start = run(home, &["start", "nope"]);
+    let resume = run(home, &["resume", "nope"]);
+
+    for out in [&start, &resume] {
+        assert!(!out.status.success());
+        assert_eq!(stdout_of(out), "");
+        assert_eq!(
+            stderr_of(out),
+            "error: no tracked series or root named \"nope\"\n"
+        );
+    }
+    assert_eq!(snapshot(home), before);
+}
+
+#[test]
+fn start_with_root_whose_every_series_is_in_progress_errors_nonzero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    watch(home, "e1", &roots[1], "Bleach", 300.0);
+    let before = snapshot(home);
+
+    let out = run(home, &["start", "re"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "error: nothing to start in re\n");
+    assert_eq!(snapshot(home), before);
+}
+
+#[test]
+fn start_with_root_that_has_no_series_errors_nonzero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("anime", &["Monster"]), ("empty", &[])]);
+
+    let out = run(home, &["start", "empty"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "error: nothing to start in empty\n");
+}
+
+#[test]
+fn start_without_argument_and_nothing_to_start_still_exits_zero() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("empty", &[])]);
+
+    let out = run(home, &["start"]);
+
+    assert!(out.status.success());
+    assert_eq!(stdout_of(&out), "Nothing to start.\n");
+}
+
+#[test]
+fn start_with_series_name_and_no_root_of_that_name_still_plays_the_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    bypass_real_mpv(home);
+
+    let out = run(home, &["start", "Bleach"]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "✓ Starting \"Bleach\" — episode 1 (00:00)\n  → {}/Bleach/ep01.mkv\n",
+            roots[1]
+        )
+    );
+}
+
+#[test]
+fn start_with_series_and_root_flag_behaves_as_before() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("a", &["Monster"]), ("b", &["Monster"])]);
+    bypass_real_mpv(home);
+
+    let out = run(home, &["start", "Monster", "--root", &roots[1]]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "✓ Starting \"Monster\" — episode 1 (00:00)\n  → {}/Monster/ep01.mkv\n",
+            roots[1]
+        )
+    );
+}
+
+#[test]
+fn start_with_name_that_is_both_a_series_and_a_root_errors_and_runs_nothing() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["re", "Monster"]), ("re", &["Bleach"])]);
+    bypass_real_mpv(home);
+    let before = snapshot(home);
+
+    let out = run(home, &["start", "re"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(
+        stderr_of(&out),
+        format!(
+            "✗ \"re\" is both a series and a root folder name\n  → tsuzuki start --root {}\n  → tsuzuki start \"re\" --root {}\n",
+            roots[1], roots[0]
+        )
+    );
+    assert_eq!(snapshot(home), before);
+
+    // Each printed re-invocation does what it says.
+    let scoped = run(home, &["start", "--root", &roots[1]]);
+    assert_eq!(
+        stdout_of(&scoped),
+        format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}")
+    );
+    let series = run(home, &["start", "re", "--root", &roots[0]]);
+    assert!(series.status.success());
+    assert_eq!(
+        stdout_of(&series),
+        format!(
+            "✓ Starting \"re\" — episode 1 (00:00)\n  → {}/re/ep01.mkv\n",
+            roots[0]
+        )
+    );
+}
+
+#[test]
+fn resume_with_name_that_is_both_a_series_and_a_root_errors_with_resume_hints() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["re"]), ("re", &["Bleach"])]);
+    let before = snapshot(home);
+
+    let out = run(home, &["resume", "re"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(
+        stderr_of(&out),
+        format!(
+            "✗ \"re\" is both a series and a root folder name\n  → tsuzuki resume --root {}\n  → tsuzuki resume \"re\" --root {}\n",
+            roots[1], roots[0]
+        )
+    );
+    assert_eq!(snapshot(home), before);
+}
+
+#[test]
+fn start_with_folder_name_shared_by_two_roots_is_ambiguous_and_flag_resolves_it() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("a/anime", &["Monster"]), ("b/anime", &["Naruto"])]);
+    let before = snapshot(home);
+
+    let out = run(home, &["start", "anime"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(
+        stderr_of(&out),
+        format!(
+            "✗ \"anime\" is ambiguous — 2 tracked roots share that folder name\n  → tsuzuki start --root {}\n  → tsuzuki start --root {}\n",
+            roots[0], roots[1]
+        )
+    );
+    assert_eq!(snapshot(home), before);
+
+    let resolved = run(home, &["start", "--root", &roots[1]]);
+    assert_eq!(
+        stdout_of(&resolved),
+        format!("Available to start:\n\n  1. Naruto — Start (1 files)\n{START_TAIL}")
+    );
+}
+
+#[test]
+fn resume_with_root_folder_name_lists_only_that_roots_in_progress_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[
+            ("anime", &["Monster", "Naruto"]),
+            ("re", &["Bleach"]),
+            ("tv-series", &["Dark"]),
+        ],
+    );
+    watch(home, "e1", &roots[0], "Monster", 300.0);
+    watch(home, "e2", &roots[0], "Naruto", 310.0);
+    watch(home, "e3", &roots[1], "Bleach", 320.0);
+    watch(home, "e4", &roots[2], "Dark", 330.0);
+
+    let out = run(home, &["resume", "anime"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!("  1. Monster (ep. 1)\n  2. Naruto (ep. 1)\n{RESUME_TAIL}")
+    );
+}
+
+#[test]
+fn resume_with_root_having_exactly_one_in_progress_series_plays_it_without_a_prompt() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[("anime", &["Monster", "Naruto"]), ("re", &["Bleach"])],
+    );
+    watch(home, "e1", &roots[0], "Monster", 300.0);
+    watch(home, "e2", &roots[0], "Naruto", 310.0);
+    watch(home, "e3", &roots[1], "Bleach", 320.0);
+    bypass_real_mpv(home);
+
+    let out = run(home, &["resume", "re"]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "✓ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
+            roots[1]
+        )
+    );
+}
+
+#[test]
+fn resume_root_flag_without_series_scopes_to_that_root() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    watch(home, "e1", &roots[0], "Monster", 300.0);
+    watch(home, "e2", &roots[1], "Bleach", 320.0);
+    bypass_real_mpv(home);
+
+    let out = run(home, &["resume", "--root", &roots[1]]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!(
+            "✓ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
+            roots[1]
+        )
+    );
+}
+
+#[test]
+fn resume_with_root_having_nothing_in_progress_errors_and_never_falls_through_to_start() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    watch(home, "e1", &roots[0], "Monster", 300.0);
+    let before = snapshot(home);
+
+    let out = run(home, &["resume", "re"]);
+
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out), "");
+    assert_eq!(stderr_of(&out), "error: nothing in progress in re\n");
+    assert_eq!(snapshot(home), before);
+}
+
+#[test]
+fn resume_without_argument_and_nothing_in_progress_still_falls_through_to_start() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    library(home, &[("anime", &["Monster"])]);
+
+    let out = run(home, &["resume"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        stdout_of(&out),
+        format!("Available to start:\n\n  1. Monster — Start (1 files)\n{START_TAIL}")
+    );
+}
