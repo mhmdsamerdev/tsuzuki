@@ -1,6 +1,4 @@
-//! Real-binary checks for invariants that were otherwise only unit-tested:
-//! `watch_later` skipping rules, the exact `resume_seconds` boundary,
-//! `pause`/`drop`/`exclude` error paths, and a corrupt `state.toml`.
+//! Real-binary checks for `watch_later` skipping, the `resume_seconds` boundary, `pause`/`drop`/`exclude` errors and a corrupt `state.toml`.
 
 use std::fs;
 use std::path::Path;

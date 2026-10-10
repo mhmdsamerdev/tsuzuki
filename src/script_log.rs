@@ -1,10 +1,8 @@
-//! Reading the optional mpv companion script's log directory (CLAUDE.md's
-//! "Optional mpv companion script — per-file preferred source when present,
-//! watch_later fallback always intact").
+//! Reads the optional mpv companion script's log directory.
 //!
-//! `contrib/mpv/tsuzuki.lua` writes one flat text file per played source
-//! path to `$XDG_DATA_HOME/tsuzuki/mpv-log`, atomically (temp file +
-//! rename), named by an 8-hex-char djb2 hash of the path:
+//! `contrib/mpv/tsuzuki.lua` atomically writes one text file per played path
+//! to `$XDG_DATA_HOME/tsuzuki/mpv-log`, named by an 8-hex-char djb2 hash of
+//! the path:
 //!
 //! ```text
 //! # <original path>
@@ -13,60 +11,7 @@
 //! reason=<eof|stop|quit|error|redirect|unknown>
 //! ```
 //!
-//! The comment-line path is the actual identity check — the hash is never
-//! trusted on its own, exactly like `mpv.rs`'s own `watch_later` parsing.
-//! The directory name itself is fixed and Tsuzuki-owned (no `[mpv]`
-//! override for it, unlike `watch_later_dir`) — but which real filesystem
-//! location that name resolves to does have install-method variance after
-//! all, exactly like `watch_later` itself (see the correction below). mpv
-//! never deletes a script-log entry once written, so presence here is
-//! permanent, not a launcher-independent-but-load-deleted signal the way
-//! `watch_later` entries are.
-//!
-//! Mirrors `mpv.rs`'s `scan_watch_later` shape deliberately, so the two read
-//! side by side: parse-one-entry, skip malformed/redirect entries without
-//! aborting the scan, filter to tracked roots via the same symlink-aware
-//! `mpv::is_under_a_tracked_root` helper `watch_later` parsing already
-//! relies on, and — as of the Flatpak correction below — a small
-//! install-method candidate list merged freshest-file-wins, the exact same
-//! shape `watch_later` scanning already needed.
-//!
-//! **Correction: this directory has install-method variance after all.**
-//! CLAUDE.md's original Phase 6 decision assumed no candidate-list was
-//! needed here — the directory name is Tsuzuki-owned and fixed, unlike
-//! `watch_later`'s own install-method-dependent location. That reasoning
-//! missed a real case, found by investigating a live "no logs ever appear"
-//! report against a genuine Flatpak mpv install: Flatpak overrides
-//! `XDG_DATA_HOME` for every sandboxed app to point into that app's own
-//! private per-app data directory (`~/.var/app/io.mpv.Mpv/data`, verified
-//! directly via `flatpak run --command=sh io.mpv.Mpv -c 'echo
-//! $XDG_DATA_HOME'`), not the real `~/.local/share`. `tsuzuki.lua` reading
-//! `os.getenv("XDG_DATA_HOME")` is exactly correct from inside the sandbox
-//! — but it means a script running under Flatpak mpv writes to a
-//! completely different real filesystem location than the one Tsuzuki
-//! (running unsandboxed) computes for the *same nominal path* from its own
-//! environment. The directory name being fixed and Tsuzuki-owned doesn't
-//! matter if two different processes' environments resolve it to two
-//! different real locations. Confirmed directly: real log entries were
-//! found sitting at `~/.var/app/io.mpv.Mpv/data/tsuzuki/mpv-log/`,
-//! genuinely written by the script, permanently invisible to Tsuzuki's own
-//! single-fixed-path scan. The `host:ro` Flatpak permission also rules out
-//! "just use `$HOME` instead of `$XDG_DATA_HOME`" as a fix on the script
-//! side — that mount is read-only inside the sandbox, confirmed directly
-//! (`mkdir` under it fails with "Read-only file system").
-//!
-//! Fix: `mpv_log_dirs()` returns a candidate list (native, resolved via
-//! `dirs::data_dir()` exactly as before, plus the verified Flatpak-remapped
-//! path) instead of one fixed directory, and `scan_script_log` merges
-//! across all of them per source path, freshest-file-wins — the exact
-//! precedent `mpv.rs`'s own cross-directory `watch_later` merge already
-//! established. No Snap candidate is added: unlike the Flatpak case, Snap's
-//! own `XDG_DATA_HOME` remapping behavior for a confined mpv has not been
-//! verified against a real install, and this project doesn't add
-//! candidate paths on a guess (CLAUDE.md §2). `[mpv]` still gets no new
-//! config field for this — the candidate list, like `watch_later`'s own,
-//! is a fixed table matched against install method, not a user-configured
-//! override.
+//! The comment-line path is the identity check; the hash is never trusted.
 
 use std::collections::HashMap;
 use std::fs;
@@ -77,53 +22,39 @@ use std::time::SystemTime;
 use crate::mpv;
 use crate::roots::normalize;
 
-/// One candidate script-log directory beyond the native, `dirs::data_dir()`-
-/// resolved one — tagged with the OS it applies to (matched against
-/// `std::env::consts::OS`), mirroring `mpv.rs`'s own `WatchLaterCandidate`
-/// table shape exactly, for the same reason: a data table, not scattered
-/// `if cfg!(target_os)` checks, so a verified macOS/Windows entry can be
-/// added later without restructuring this lookup.
+/// A script-log directory besides the native one, tagged with the OS it
+/// applies to (`std::env::consts::OS`).
 struct FlatpakCandidate {
     os: &'static str,
     /// Joined onto the user's home directory.
     relative: &'static str,
 }
 
-/// Flatpak remaps `XDG_DATA_HOME` to this fixed, per-app path for every
-/// sandboxed app — verified directly against a real `io.mpv.Mpv` Flatpak
-/// install (see this module's own doc comment above). v1 is Linux-only
-/// (CLAUDE.md §5); a macOS/Windows Flatpak equivalent is out of scope.
+/// Flatpak mpv runs with `XDG_DATA_HOME` set to its per-app data dir, so the
+/// script logs here instead of the native path. Linux-only; Snap is unverified
+/// and not guessed.
 const FLATPAK_CANDIDATES: &[FlatpakCandidate] = &[FlatpakCandidate {
     os: "linux",
     relative: ".var/app/io.mpv.Mpv/data/tsuzuki/mpv-log",
 }];
 
-/// One parsed, tracked-root-filtered script-log entry.
+/// One parsed script-log entry under a tracked root.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScriptLogEntry {
-    /// The path the script wrote in the entry's comment line — the file the
-    /// entry is for. Not necessarily canonicalized.
+    /// The file the entry is for, as written in the comment line.
     pub source_path: PathBuf,
-    /// `None` when the script's own `duration=` line was empty (mpv never
-    /// observed a `duration` property value for this file).
+    /// `None` when the `duration=` line was empty.
     pub duration: Option<f64>,
-    /// `None` when the script's own `position=` line was empty.
+    /// `None` when the `position=` line was empty.
     pub position: Option<f64>,
-    /// One of `eof`/`stop`/`quit`/`error`/`unknown` — `redirect` entries are
-    /// discarded at parse time and never produce a `ScriptLogEntry` at all
-    /// (same treatment as `watch_later`'s own redirect-entry filtering).
+    /// One of `eof`/`stop`/`quit`/`error`/`unknown`; redirects never get an entry.
     pub reason: String,
-    /// The entry file's own mtime — used for the per-path source-selection
-    /// mtime comparison against a same-path `watch_later` entry.
+    /// The entry file's mtime, compared against a same-path `watch_later` entry.
     pub mtime: SystemTime,
 }
 
-/// The native `$XDG_DATA_HOME/tsuzuki/mpv-log`, via `dirs::data_dir()` — the
-/// same base directory `state::state_path()` resolves `state.toml` under,
-/// just a different subdirectory. This is the directory *Tsuzuki's own*
-/// environment resolves — correct for a native or Snap mpv (which shares
-/// Tsuzuki's real `XDG_DATA_HOME`), but not for Flatpak mpv, which has its
-/// own, different one (see [`mpv_log_dirs`]).
+/// Native `$XDG_DATA_HOME/tsuzuki/mpv-log`, next to `state.toml`. Correct for
+/// native and Snap mpv, not Flatpak (see [`mpv_log_dirs`]).
 fn native_mpv_log_dir() -> io::Result<PathBuf> {
     let base = dirs::data_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve data directory")
@@ -131,13 +62,8 @@ fn native_mpv_log_dir() -> io::Result<PathBuf> {
     Ok(base.join("tsuzuki").join("mpv-log"))
 }
 
-/// Every directory that might hold a real script-log entry: the native one
-/// plus any verified install-method-specific remap (currently just
-/// Flatpak's). Order doesn't matter — [`scan_script_log`] merges across all
-/// of them per source path, freshest-file-wins, exactly like `watch_later`'s
-/// own cross-directory merge. A missing/unresolvable native directory
-/// (`dirs::data_dir()` failing) simply isn't included — the Flatpak
-/// candidate is still checked on its own; this function never errors.
+/// Every directory that might hold script-log entries: the native one (if
+/// it resolves) plus the Flatpak remap when `home` is known.
 pub fn mpv_log_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(native) = native_mpv_log_dir() {
@@ -154,13 +80,9 @@ pub fn mpv_log_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-/// Parses one script-log entry file. Returns `None` for a `reason=redirect`
-/// entry (an internal mpv pointer from opening a directory/playlist, not
-/// real playback state — same treatment as `watch_later`'s own redirect
-/// filtering) or for any entry that doesn't fit the expected shape (missing
-/// or empty comment-line path, missing `reason=` line, an unparseable
-/// non-empty `duration=`/`position=` value, unreadable mtime) — malformed
-/// entries are skipped, never abort the caller's scan.
+/// Parses one entry file. `None` for `reason=redirect` entries and for
+/// malformed ones (missing or empty path line, missing `reason=`, unparseable
+/// `duration=`/`position=`, unreadable mtime).
 fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
     let contents = fs::read_to_string(path).ok()?;
     let mut lines = contents.lines();
@@ -206,14 +128,9 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
     })
 }
 
-/// Scans every directory in `dirs` for script-log entries, parses each,
-/// discards redirects and malformed files, merges duplicates across
-/// directories per source path (freshest entry-file mtime wins — the same
-/// cross-directory precedent `mpv::scan_watch_later` already established),
-/// and filters to entries whose source path falls under one of
-/// `tracked_roots`. A directory that doesn't exist on disk is silently
-/// skipped, not an error (the script may never have been installed, or a
-/// given install method may simply not apply on this machine).
+/// Parses every entry file in `dirs`, drops redirects and malformed files,
+/// keeps the freshest entry per source path, and filters to entries under
+/// `tracked_roots`. Missing directories are skipped.
 pub fn scan_script_log(
     dirs: &[PathBuf],
     tracked_roots: &[String],
@@ -241,14 +158,7 @@ pub fn scan_script_log(
         .collect()
 }
 
-/// Merges entries by `source_path`, per-path freshest-file-wins: when the
-/// same source path has an entry in more than one candidate directory (e.g.
-/// a stale native-path entry from before switching to Flatpak mpv,
-/// alongside a fresh Flatpak-path one), only the one whose entry file has
-/// the newer mtime survives. Mirrors `mpv.rs`'s own `merge_freshest_wins`
-/// exactly (a small, type-specific mirror rather than a shared generic —
-/// the logic is a few lines, and the two entry types otherwise have nothing
-/// in common worth abstracting over).
+/// Keeps one entry per source path: the one whose file has the newest mtime.
 fn merge_freshest_wins(entries: Vec<ScriptLogEntry>, home: Option<&Path>) -> Vec<ScriptLogEntry> {
     let mut by_path: HashMap<PathBuf, ScriptLogEntry> = HashMap::new();
     for entry in entries {
@@ -441,14 +351,9 @@ mod tests {
 
     #[test]
     fn mpv_log_dirs_includes_the_flatpak_remapped_path_when_home_is_known() {
-        // Regression test for a real, reported bug: Flatpak overrides
-        // XDG_DATA_HOME for every sandboxed app to point into that app's
-        // own private per-app data directory, so a script running under
-        // Flatpak mpv never writes to the plain XDG_DATA_HOME-resolved
-        // native path at all — confirmed directly against a real
-        // `io.mpv.Mpv` Flatpak install. This candidate must always be
-        // included whenever a home directory is known, regardless of
-        // whether the native `dirs::data_dir()` call succeeds.
+        // Regression: Flatpak mpv writes under its own XDG_DATA_HOME, so the
+        // Flatpak candidate must be listed whenever a home directory is known,
+        // even if the native data dir fails to resolve.
         let home = PathBuf::from("/home/user");
         let dirs = mpv_log_dirs(Some(&home));
 
@@ -462,9 +367,7 @@ mod tests {
 
     #[test]
     fn mpv_log_dirs_without_home_returns_only_the_native_candidate() {
-        // No Flatpak candidate can be computed without a home directory to
-        // join it onto — this must degrade to just the native candidate
-        // (if `dirs::data_dir()` itself resolves), not panic or error.
+        // Without a home directory only the native candidate remains.
         let expected: Vec<PathBuf> = dirs::data_dir()
             .map(|d| d.join("tsuzuki").join("mpv-log"))
             .into_iter()
@@ -481,10 +384,8 @@ mod tests {
 
     #[test]
     fn same_source_path_across_two_candidate_directories_the_newer_mtime_wins() {
-        // Simulates a user who used to have entries at the native path
-        // (e.g. before switching to Flatpak mpv) and now also has a fresher
-        // one at the Flatpak-remapped path — the fresher one must win,
-        // mirroring `mpv.rs`'s own cross-directory `watch_later` merge.
+        // A stale native-path entry and a fresher Flatpak-path entry for the
+        // same source: the fresher one wins.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Show").join("ep01.mkv"));
@@ -521,9 +422,8 @@ mod tests {
 
     #[test]
     fn merge_is_per_path_not_per_directory() {
-        // A fresher duplicate of X in the second directory must not cause
-        // the first directory's genuinely undisputed Y entry to be dropped
-        // — same precedent as `mpv.rs`'s own equivalent test.
+        // A fresher duplicate of X must not drop the undisputed Y entry from the
+        // first directory.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Show").join("x.mkv"));

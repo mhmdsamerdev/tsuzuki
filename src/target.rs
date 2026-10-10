@@ -1,11 +1,6 @@
-//! Resolving an explicit series name (optionally with `--root`) to the
-//! specific tracked root it lives under — the same disambiguation shape
-//! `exclude.rs` already established for `--root` (CLAUDE.md §3), shared by
-//! `resume`, `start`, `pause`, and `drop`. `exclude.rs`'s own equivalent
-//! helper (`find_tracked_root`) is private and off-limits to modify, so
-//! this is an independent, small reimplementation over the same public
-//! `roots::expand_tilde`/`state::resolve_root_arg` both already share —
-//! not a duplicated large surface.
+//! Resolves a series name (optionally with `--root`) or a root's folder name
+//! to the tracked root it belongs to. Shared by `resume`, `start`, `pause`,
+//! and `drop`.
 
 use std::path::Path;
 
@@ -15,9 +10,8 @@ use crate::state::resolve_root_arg;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TargetError {
-    /// `series` doesn't exist as a depth-1 directory under any tracked root
-    /// (or, when `--root` was given, doesn't exist under that specific
-    /// root).
+    /// `series` is not a depth-1 directory under any tracked root, or under
+    /// the given `--root`.
     NotFound(String),
     /// `--root` was given but doesn't match any currently tracked root.
     RootNotFound(String),
@@ -26,12 +20,10 @@ pub enum TargetError {
     Ambiguous { series: String, roots: Vec<String> },
 }
 
-/// Resolves `series` to the tracked root (its own stored literal form) it
-/// lives under. With `root_arg` given, only that root is considered — a
-/// non-matching `--root` is `RootNotFound`, and a `--root` that doesn't
-/// contain `series` is `NotFound`. Without it, every tracked root
-/// containing a depth-1 directory named `series` is a candidate: zero is
-/// `NotFound`, exactly one resolves directly, more than one is `Ambiguous`.
+/// Resolves `series` to the stored form of the tracked root it lives under.
+/// With `root_arg`, only that root is considered: an untracked one is
+/// `RootNotFound`, one without `series` is `NotFound`. Without it, zero
+/// matching roots is `NotFound` and more than one is `Ambiguous`.
 pub fn resolve_series_root(
     config: &Config,
     series: &str,

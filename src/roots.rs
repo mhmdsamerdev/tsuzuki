@@ -1,9 +1,5 @@
-//! `tsuzuki add` — validating and persisting tracked roots (CLAUDE.md's
-//! "`tsuzuki add` validation and idempotency").
-//!
-//! This module only mutates the in-memory `Config`; the caller is
-//! responsible for writing it to disk (main.rs) so tests here can exercise
-//! the logic without any config-file I/O.
+//! `tsuzuki add`: validates a root and appends it to the in-memory `Config`.
+//! The caller persists the config.
 
 use std::fmt;
 use std::fs;
@@ -14,14 +10,9 @@ use crate::config::Config;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddOutcome {
-    /// The root (after in-memory normalization for comparison) was already
-    /// tracked. Holds the path exactly as passed to `add_root`. Not an
-    /// error — idempotent, exit 0.
+    /// The root was already tracked. Holds the path as passed in.
     AlreadyTracked(PathBuf),
-    /// Newly appended to `config.roots.paths`, in the exact form passed to
-    /// `add_root` — no expansion, no canonicalization (CLAUDE.md's "Roots
-    /// are persisted in the form the user typed"). Caller must persist
-    /// `Config`.
+    /// Appended to `config.roots.paths` as typed.
     Added(PathBuf),
 }
 
@@ -42,17 +33,9 @@ impl fmt::Display for AddError {
     }
 }
 
-/// Validates `path`, then either records it as already-tracked or appends
-/// it to `config.roots.paths` — never both, and never a duplicate entry.
-///
-/// `~` expansion and canonicalization happen only in memory, for
-/// existence/dir-ness validation and for the already-tracked comparison
-/// against existing entries (which may themselves be in `~`-form or
-/// absolute form — comparison works correctly regardless of which form
-/// either side is in). The value written to `config.roots.paths` — and
-/// returned in `AddOutcome` — is always `path` exactly as given, never the
-/// expanded/canonicalized form (CLAUDE.md's "Roots are persisted in the
-/// form the user typed").
+/// Appends `path` to `config.roots.paths` unless it resolves to an already
+/// tracked root. Expansion and canonicalization are used only to validate and
+/// compare; the stored and returned path is always as typed.
 pub fn add_root(config: &mut Config, path: &Path) -> Result<AddOutcome, AddError> {
     add_root_with_home(config, path, dirs::home_dir().as_deref())
 }
@@ -83,15 +66,8 @@ fn add_root_with_home(
     Ok(AddOutcome::Added(path.to_path_buf()))
 }
 
-/// Normalizes a stored config path for comparison: expands a leading `~`,
-/// then canonicalizes if the path still exists on disk. A stored root that
-/// no longer exists (moved/deleted since it was added) falls back to the
-/// tilde-expanded form rather than erroring — idempotency checks must not
-/// fail just because an unrelated stored entry is currently unreachable.
-/// This is a comparison-only helper — its output is never written back to
-/// config. `pub(crate)` so `exclude.rs` can resolve a `--root` argument
-/// against a tracked root's literal form the same way `add`'s idempotency
-/// check does, rather than duplicating this logic.
+/// Expands a leading `~`, then canonicalizes if the path exists. A missing
+/// path falls back to the expanded form. For comparison only, never stored.
 pub(crate) fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
     let expanded = expand_tilde(path, home);
     fs::canonicalize(&expanded).unwrap_or(expanded)
@@ -105,9 +81,7 @@ pub(crate) fn root_folder_name(root: &str) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
-/// `pub(crate)` so `exclude.rs` can expand a tracked root's literal form
-/// (e.g. `~/Anime`) the same way `add_root` does, rather than duplicating
-/// tilde-expansion logic.
+/// Replaces a leading `~` with `home`; unchanged if there is no home.
 pub(crate) fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix("~")
         && let Some(home) = home
@@ -153,8 +127,7 @@ mod tests {
         let mut config = Config::default();
         let outcome = add_root(&mut config, &root).unwrap();
 
-        // No canonicalization applied to the stored/returned value — it's
-        // exactly the path passed in, not `fs::canonicalize(&root)`.
+        // Stored as passed, not canonicalized.
         assert_eq!(outcome, AddOutcome::Added(root.clone()));
         assert_eq!(config.roots.paths, vec![root.to_string_lossy()]);
     }
@@ -170,7 +143,6 @@ mod tests {
 
         let outcome = add_root(&mut config, &root).unwrap();
         assert_eq!(outcome, AddOutcome::AlreadyTracked(root));
-        // No duplicate entry.
         assert_eq!(config.roots.paths.len(), 1);
     }
 
@@ -197,8 +169,7 @@ mod tests {
         add_root_with_home(&mut config, Path::new("~/Anime"), Some(home.path())).unwrap();
         assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
 
-        // Second add uses the equivalent absolute path instead of `~/Anime`
-        // — must still recognize it as the same tracked root.
+        // The absolute form of `~/Anime` is the same root.
         let outcome = add_root_with_home(&mut config, &root, Some(home.path())).unwrap();
         assert_eq!(outcome, AddOutcome::AlreadyTracked(root));
         assert_eq!(config.roots.paths.len(), 1);
@@ -217,10 +188,7 @@ mod tests {
         with_slash.push("/");
         let outcome = add_root(&mut config, Path::new(&with_slash)).unwrap();
 
-        // Exact value, not just the variant — `AlreadyTracked` must hold
-        // the trailing-slash path exactly as passed to this second call,
-        // per the literal-persistence contract (it just isn't written to
-        // disk in this branch).
+        // Holds the trailing-slash path as passed.
         assert_eq!(
             outcome,
             AddOutcome::AlreadyTracked(PathBuf::from(&with_slash))
@@ -256,10 +224,7 @@ mod tests {
         let mut config = Config::default();
         add_root(&mut config, &root).unwrap();
 
-        // `~/Anime/Rewatches/..` resolves (via canonicalize) to the same
-        // directory as `~/Anime` — `fs::canonicalize` resolves `..`
-        // components, so the in-memory comparison must catch this even
-        // though the two strings share no literal prefix relationship.
+        // `Rewatches/..` canonicalizes to the tracked root.
         let dotdot_path = sibling.join("..");
         let outcome = add_root(&mut config, &dotdot_path).unwrap();
 
@@ -281,11 +246,7 @@ mod tests {
         let mut config = Config::default();
         add_root(&mut config, &real_root).unwrap();
 
-        // A symlink pointing at the same directory resolves to the same
-        // canonical path via `fs::canonicalize` — registering it a second
-        // time under the symlinked name must be recognized as the same
-        // root, not silently create a duplicate that would later double
-        // up series enumeration.
+        // A symlink to a tracked root is not a second root.
         let outcome = add_root(&mut config, &link_path).unwrap();
 
         assert_eq!(outcome, AddOutcome::AlreadyTracked(link_path));
@@ -305,14 +266,11 @@ mod tests {
         symlink(real_home.path(), &home_link).unwrap();
 
         let mut config = Config::default();
-        // First add via `~/Anime`, where `~` resolves through a symlinked
-        // home directory.
+        // `~` resolves through a symlinked home.
         add_root_with_home(&mut config, Path::new("~/Anime"), Some(&home_link)).unwrap();
         assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
 
-        // Second add uses the fully-resolved real path, bypassing the
-        // symlinked home entirely — canonicalization must still land on
-        // the same real directory for both.
+        // The real path bypasses the symlink but is the same directory.
         let real_anime = real_home.path().join("Anime");
         let outcome = add_root_with_home(&mut config, &real_anime, Some(&home_link)).unwrap();
 
@@ -322,10 +280,7 @@ mod tests {
 
     #[test]
     fn distinctly_cased_paths_are_treated_as_different_roots() {
-        // Linux filesystems are case-sensitive by default (v1 targets
-        // Linux only, design.md §10) — `Anime` and `anime` are genuinely
-        // different directories, and nothing in `normalize`/`expand_tilde`
-        // does any case-folding, so they must not be merged.
+        // Paths are case-sensitive; no case-folding.
         let dir = tempdir().unwrap();
         let lower = dir.path().join("anime");
         let upper = dir.path().join("Anime");

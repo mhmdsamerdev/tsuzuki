@@ -1,25 +1,17 @@
-//! Launching mpv to resume playback (CLAUDE.md's "Launching mpv:
-//! fire-and-forget, cheap existence check before spawn, install-method
-//! detection").
+//! Launching mpv to resume playback.
 //!
-//! Resuming is a real, core feature — unlike `watch_later` reading
-//! (`mpv.rs`), which never launches anything — but the launch itself is a
-//! plain fire-and-forget `spawn`, never awaited, never followed by an
-//! immediate re-scan. Native vs. Flatpak mpv is resolved by a cheap
-//! existence check (PATH lookup / known install-directory check), never by
-//! attempting a spawn and catching its failure — a failed spawn attempt is
-//! real, wasted process-launch overhead against this project's own
-//! startup-latency rationale.
+//! The launch is a fire-and-forget `spawn`. Native vs. Flatpak mpv is
+//! resolved by a cheap existence check (PATH lookup, install-directory
+//! check), never by trying a spawn and catching the failure.
 
 use std::fmt;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// What was resolved to actually run: a program name/path plus any leading
-/// arguments that must precede the file/`--start=` arguments (e.g.
-/// `["run", "io.mpv.Mpv"]` for Flatpak, or a user's own `command_override`
-/// split on whitespace).
+/// The program to run plus leading arguments that precede the file arguments
+/// (e.g. `["run", "io.mpv.Mpv"]` for Flatpak, or a `command_override` split
+/// on whitespace).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMpv {
     pub program: String,
@@ -28,12 +20,9 @@ pub struct ResolvedMpv {
 
 #[derive(Debug)]
 pub enum LaunchError {
-    /// Neither a `command_override`, nor native mpv on `PATH`, nor a
-    /// Flatpak install could be resolved.
+    /// No `command_override`, native mpv, or Flatpak install was found.
     NotResolvable,
-    /// Resolution succeeded but the actual `spawn` call itself failed
-    /// (missing binary despite passing the existence check, permissions,
-    /// ...). Never a panic.
+    /// Resolution succeeded but `spawn` failed (e.g. permissions).
     Spawn(io::Error),
 }
 
@@ -49,12 +38,9 @@ impl fmt::Display for LaunchError {
     }
 }
 
-/// Resolves what to run, in priority order: an explicit `command_override`
-/// bypasses detection entirely (its closures are never called — proven by a
-/// test passing panicking closures); otherwise a cheap native-mpv-on-PATH
-/// check; otherwise a cheap Flatpak-install-directory check. `native_exists`/
-/// `flatpak_exists` are injected so this resolution logic is testable
-/// without depending on the real `PATH` or filesystem.
+/// Resolves what to run: `command_override` first (detection is skipped),
+/// then native mpv, then Flatpak. The existence checks are injected so
+/// resolution is testable without the real `PATH` or filesystem.
 pub fn resolve_mpv_command(
     command_override: &str,
     native_exists: impl FnOnce() -> bool,
@@ -84,17 +70,12 @@ pub fn resolve_mpv_command(
     None
 }
 
-/// True if an executable named `mpv` exists somewhere on `$PATH` — a plain
-/// filesystem check, not a spawn. `pub(crate)` so `doctor.rs` can reuse the
-/// exact same cheap-existence-check mechanism for its own mpv-availability
-/// check, rather than a second detection path.
+/// True if an executable named `mpv` exists on `$PATH`. Shared with `doctor.rs`.
 pub(crate) fn native_mpv_on_path() -> bool {
     program_on_path("mpv")
 }
 
-/// True if an executable named `name` exists somewhere on `$PATH` — the
-/// general form `native_mpv_on_path` (fixed to `"mpv"`) and `doctor.rs`'s own
-/// `flatpak` / configured-`command_override` checks both build on.
+/// True if an executable named `name` exists on `$PATH`. Shared with `doctor.rs`.
 pub(crate) fn program_on_path(name: &str) -> bool {
     let Some(path_var) = std::env::var_os("PATH") else {
         return false;
@@ -102,14 +83,8 @@ pub(crate) fn program_on_path(name: &str) -> bool {
     std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(name)))
 }
 
-/// Checks the executable permission bit, not just file presence: `is_file()`
-/// alone would report success for a non-executable file that merely happens
-/// to share the target name, which would then only fail — still cleanly, as
-/// a typed `Spawn` error, never a panic — at actual launch time instead of
-/// being correctly rejected during resolution. Still a single `stat` call,
-/// not a spawn, so it stays exactly as cheap as CLAUDE.md's "cheap existence
-/// check" requires. `pub(crate)` for the same reuse reason as
-/// `native_mpv_on_path`/`program_on_path`.
+/// True for a regular file with an execute bit set, so a non-executable file
+/// that shares the name is rejected at resolution time. One `stat`, no spawn.
 #[cfg(unix)]
 pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -123,9 +98,8 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Known Flatpak app-install locations for `io.mpv.Mpv` — a plain directory
-/// existence check, not a `flatpak` invocation. `pub(crate)` so `doctor.rs`
-/// reuses this exact detection rather than a second one.
+/// True if `io.mpv.Mpv` is installed system-wide or under `home`, checked by
+/// directory existence. Shared with `doctor.rs`.
 pub(crate) fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
     const SYSTEM_INSTALL: &str = "/var/lib/flatpak/app/io.mpv.Mpv";
     if Path::new(SYSTEM_INSTALL).is_dir() {
@@ -139,24 +113,12 @@ pub(crate) fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
     false
 }
 
-/// Spawns `resolved`'s program with `--start=<start_seconds>` scoped to
-/// `file` via mpv's per-file option braces (`--{ --start=… file --}`), and
-/// immediately lets go — no `wait()`, no re-scan. A `Child` handle dropped
-/// without `wait()` does not terminate the process; this is exactly the
-/// fire-and-forget behavior CLAUDE.md specifies. `stdout`/`stderr`/`stdin`
-/// are set to `null` so mpv's own console UI doesn't interleave with
-/// Tsuzuki's, since Tsuzuki has already returned control to the shell by the
-/// time mpv would print anything.
+/// Spawns mpv on `file` and returns without waiting. stdio is nulled so mpv's
+/// console output doesn't interleave with the shell.
 ///
-/// The braces matter: a bare trailing `--start=` is a command-line option,
-/// which mpv treats as a session-wide default rather than a property of
-/// just this file — so once mpv advances past `file` on its own (EOF
-/// auto-advance, an autoload script, `playlist-next`), the *next* file
-/// would silently inherit the same start offset. Scoping `--start` inside
-/// `--{ --}` attaches it only to the enclosed playlist entry; anything
-/// loaded afterward falls back to mpv's normal default (0). No shell sits
-/// between this and `execve`, so `--{`/`--}` need no escaping here despite
-/// the mpv manual's warning about that for interactive shell use.
+/// `--start` is wrapped in `--{ --}` so it applies to `file` only; a bare
+/// `--start` is session-wide and the next playlist entry would inherit it.
+/// No shell is involved, so the braces need no escaping.
 fn spawn(resolved: &ResolvedMpv, file: &Path, start_seconds: f64) -> io::Result<()> {
     Command::new(&resolved.program)
         .args(&resolved.base_args)
@@ -171,10 +133,8 @@ fn spawn(resolved: &ResolvedMpv, file: &Path, start_seconds: f64) -> io::Result<
     Ok(())
 }
 
-/// Resolves mpv (via `command_override`, then native, then Flatpak, using
-/// the real `PATH`/filesystem checks) and launches it on `file` at
-/// `start_seconds`. The one entry point production code (`main.rs`) calls;
-/// `resolve_mpv_command`/`spawn` stay separately unit-testable above.
+/// Resolves mpv against the real `PATH`/filesystem and launches it on `file`
+/// at `start_seconds`.
 pub fn resume_playback(
     command_override: &str,
     home: Option<&Path>,
@@ -256,17 +216,8 @@ mod tests {
 
     #[test]
     fn resume_playback_returns_a_typed_spawn_error_never_panics_when_resolution_fails_to_launch() {
-        // Exercises `resume_playback`'s real entry point (not the injectable
-        // `resolve_mpv_command` directly) end-to-end. Forcing the "neither
-        // native nor Flatpak resolves" branch would require mutating the
-        // process-global `PATH` env var and depend on the test machine
-        // having no Flatpak mpv install (this one genuinely does, at
-        // `/var/lib/flatpak/app/io.mpv.Mpv` — a real, not injectable,
-        // constant in `flatpak_mpv_installed`) — both properties this test
-        // shouldn't depend on. `command_override` bypasses detection
-        // entirely and deterministically, on any machine, points at a
-        // program that can't actually be spawned, proving the same "typed
-        // error, never a panic" property via the `Spawn` variant instead.
+        // A `command_override` skips detection, so this is machine-independent
+        // (the `NotResolvable` path would depend on the host's PATH and Flatpak).
         let result = resume_playback(
             "/definitely/does/not/exist/tsuzuki-fake-mpv",
             None,
@@ -279,13 +230,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_non_executable_file_named_mpv_on_path_is_not_resolved_as_native() {
-        // Sweep finding: `native_mpv_on_path` originally used `is_file()`
-        // alone, which can't distinguish "exists" from "is actually
-        // runnable" — a stray non-executable file literally named `mpv`
-        // sitting on PATH would have falsely resolved as native, only
-        // failing later at spawn time. This proves the fix at the real
-        // `is_executable_file` level: a file with no execute bit set must
-        // not be reported as present.
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -298,7 +242,7 @@ mod tests {
 
         assert!(!is_executable_file(&fake_mpv));
 
-        // And the inverse: marking it executable makes it resolve.
+        // Setting the execute bit makes it count.
         let mut perms = fs::metadata(&fake_mpv).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&fake_mpv, perms).unwrap();
@@ -318,14 +262,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_is_scoped_to_the_file_with_per_file_option_braces() {
-        // Regression test for the dogfood-found bug: a bare trailing
-        // `--start=` is a session-wide default in mpv, so it silently
-        // leaked onto whatever file mpv played next (autoload, EOF
-        // auto-advance, playlist-next). Wrapping it in `--{ --}` scopes it
-        // to just the one file passed here. Uses a fake "mpv" shell script
-        // that dumps its own argv, since this is the one property that
-        // can't be checked by inspecting `Command` without actually
-        // spawning something.
+        // A fake "mpv" script dumps its argv, since the arguments can't be
+        // inspected without spawning.
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
@@ -350,7 +288,7 @@ mod tests {
         };
         spawn(&resolved, Path::new("/x.mkv"), 42.5).unwrap();
 
-        // Give the fake script a moment to run and write its output.
+        // Poll with a deadline until the child writes its output.
         for _ in 0..100 {
             if argv_out.exists() {
                 break;

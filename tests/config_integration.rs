@@ -1,11 +1,4 @@
-//! Real end-to-end integration test for `tsuzuki config` (bare = show the
-//! resolved config, `edit` = open it in `$EDITOR`) — same shape as
-//! `tests/doctor_integration.rs`/`tests/state_persistence.rs`, the required
-//! real-binary test for this phase (CLAUDE.md's "Every phase needs at least
-//! one real-binary, real-XDG-path integration test"). `config edit` is the
-//! one command in this codebase that blocks on an external interactive
-//! program, so every test here drives it through `$EDITOR` set to a real,
-//! non-interactive program instead — never a real editor.
+//! Real-binary tests for `tsuzuki config`; `edit` runs a non-interactive `$EDITOR`.
 
 use std::fs;
 use std::path::Path;
@@ -41,8 +34,7 @@ fn bare_config_shows_the_real_path_resolved_defaults_and_edit_hint() {
         stdout.contains(&config_path.display().to_string()),
         "must show the real config path, got:\n{stdout}"
     );
-    // Defaults that aren't just u64/String::default() — the whole point of
-    // showing the *resolved* config rather than the raw file.
+    // Resolved defaults, not the raw file.
     assert!(stdout.contains("resume_seconds = 120"));
     assert!(stdout.contains("completion_remaining_seconds = 180"));
     assert!(stdout.contains("redirect_port = 8734"));
@@ -53,9 +45,7 @@ fn bare_config_shows_the_real_path_resolved_defaults_and_edit_hint() {
         "must hint at the one other action, got:\n{stdout}"
     );
 
-    // The bare invocation must have actually created the file on disk too
-    // (via config::read's own "write defaults if missing" behavior at
-    // startup) — not just held it in memory.
+    // The bare invocation writes the defaults to disk.
     assert!(config_path.is_file());
 }
 
@@ -83,9 +73,7 @@ fn edit_with_a_noop_editor_saves_and_persists_across_separate_invocations() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
-    // `true` is a standard, always-present, no-op program — never touches
-    // the file, so this exercises the blocking-spawn-then-revalidate path
-    // without needing a real interactive editor.
+    // `true` is a no-op editor that leaves the file untouched.
     let edit = base_command(home)
         .args(["config", "edit"])
         .env("EDITOR", "true")
@@ -98,9 +86,7 @@ fn edit_with_a_noop_editor_saves_and_persists_across_separate_invocations() {
     );
     assert!(String::from_utf8_lossy(&edit.stdout).contains("config saved"));
 
-    // A separate process invocation must still see a valid, unchanged
-    // config — proves this genuinely persisted to disk, not just held
-    // in-memory within the one process that ran `edit`.
+    // A separate process sees the config persisted on disk.
     let show = base_command(home).arg("config").output().unwrap();
     assert!(show.status.success());
     let stdout = String::from_utf8_lossy(&show.stdout);
@@ -112,8 +98,7 @@ fn edit_that_leaves_invalid_toml_behind_is_caught_immediately() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
-    // Bare `config` first, so config.toml genuinely exists before the
-    // "editor" overwrites it.
+    // Create config.toml first so the editor has something to overwrite.
     let show = base_command(home).arg("config").output().unwrap();
     assert!(show.status.success());
 

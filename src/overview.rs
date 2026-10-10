@@ -1,12 +1,8 @@
-//! Per-series display data shared by `list`/`status`/`start`/the resume
-//! picker (design.md §6/§9, CLAUDE.md's "`list` ordering and episode-number
-//! display" and "`start`'s listing has three distinct display words").
+//! Per-series display data shared by `list`, `status`, `start` and the resume
+//! picker.
 //!
 //! Built from a live directory walk of every tracked root cross-referenced
-//! with `state.toml` — never from `state.toml` alone — so a deleted series
-//! simply never appears here, structurally, matching the same
-//! `series_in_root`-vs-`state.toml` precedent CLAUDE.md already established
-//! for `start`/`list`.
+//! with `state.toml`, so a deleted series never appears.
 
 use std::path::Path;
 
@@ -16,8 +12,8 @@ use crate::roots::{expand_tilde, normalize};
 use crate::series;
 use crate::state::{SeriesRecord, State, Status};
 
-/// One tracked series' current display state. `status: None` means
-/// never-started — no `state.toml` record exists for it at all.
+/// One tracked series' display state. `status: None` means never started
+/// (no record in `state.toml`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeriesOverview {
     pub root: String,
@@ -28,11 +24,8 @@ pub struct SeriesOverview {
     pub file_count: usize,
 }
 
-/// Enumerates every series under every tracked root, cross-referenced with
-/// `state`. A root that currently can't be read (unmounted, permission
-/// denied) is silently skipped — consistent with `exclude.rs`'s
-/// `suggest_candidates` precedent for the same situation, since this isn't
-/// the place to surface a filesystem error for one bad root out of many.
+/// Every series under every tracked root, matched against `state`.
+/// A root that can't be read (unmounted, permission denied) is skipped.
 pub fn all_series(config: &Config, state: &State, home: Option<&Path>) -> Vec<SeriesOverview> {
     let mut overviews = Vec::new();
     let tracked_root_real_paths: Vec<_> = config
@@ -93,8 +86,7 @@ fn overview_for(
     }
 }
 
-/// Sort rank for `list`'s grouping: `in_progress` -> `paused` -> `dropped`
-/// -> `completed` -> never-started.
+/// Group rank for `list`: in progress, paused, dropped, completed, never started.
 fn status_rank(status: Option<Status>) -> u8 {
     match status {
         Some(Status::InProgress) => 0,
@@ -105,9 +97,7 @@ fn status_rank(status: Option<Status>) -> u8 {
     }
 }
 
-/// `list`'s fixed ordering: grouped by status rank first, alphabetical by
-/// series name within each group; `root` breaks ties for the same name
-/// across composable roots, keeping output deterministic.
+/// `list` order: by status rank, then series name, then root.
 pub fn sorted_for_list(mut overviews: Vec<SeriesOverview>) -> Vec<SeriesOverview> {
     overviews.sort_by(|a, b| {
         status_rank(a.status)
@@ -165,13 +155,10 @@ pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// `start`'s per-state display word, exactly per CLAUDE.md: never-started
-/// (no record) -> `"Start"`; paused -> `"Resume"`; dropped or completed ->
-/// `"Rewatch?"`.
-/// `in_progress` never legitimately reaches this function — those series
-/// belong to the automatic resume picker, not `start`'s listing — but it
-/// stays total (falls back to `"Resume"`, the same word a real resumable
-/// position uses) rather than panicking on an unexpected input.
+/// `start`'s display word: never started -> `"Start"`, paused -> `"Resume"`,
+/// dropped or completed -> `"Rewatch?"`.
+/// `in_progress` series belong to the resume picker, not `start`'s listing;
+/// they map to `"Resume"` so the function stays total.
 pub fn start_display_word(status: Option<Status>) -> &'static str {
     match status {
         None => "Start",
@@ -181,9 +168,7 @@ pub fn start_display_word(status: Option<Status>) -> &'static str {
     }
 }
 
-/// Series eligible for `start`'s listing/picker: everything *not* currently
-/// `in_progress` (design.md §6: "not currently in the automatic in_progress
-/// picker").
+/// Series offered by `start`: everything not `in_progress`.
 pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
     overviews
         .iter()
@@ -192,8 +177,7 @@ pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
         .collect()
 }
 
-/// One human-readable line for `start`'s listing/picker, e.g.
-/// `"Monster — Resume (ep. 9, 74 files)"` or
+/// One `start` listing line, e.g. `"Monster — Resume (ep. 9, 74 files)"` or
 /// `"Apothecary Diaries — Start (12 files)"`.
 pub fn start_line(overview: &SeriesOverview) -> String {
     let word = start_display_word(overview.status);
@@ -246,8 +230,7 @@ mod tests {
 
     #[test]
     fn paused_display_word_never_contains_rewatch() {
-        // The bug CLAUDE.md specifically flags as having been gotten wrong
-        // once already: a paused series must never be mislabeled "Rewatch?".
+        // A paused series must never be labeled "Rewatch?".
         let word = start_display_word(Some(Status::Paused));
         assert!(!word.contains("Rewatch"));
     }
@@ -263,13 +246,7 @@ mod tests {
 
     #[test]
     fn all_four_real_states_produce_correct_and_distinct_words_together() {
-        // Gap-audit sweep item: four separate single-state tests could each
-        // individually pass while still being wrong relative to each other
-        // (e.g. two states accidentally sharing a string). This constructs
-        // one series per real state — never-started, paused, dropped,
-        // in_progress — in a single test and asserts on all four outputs
-        // together, so a regression that makes any two collide is caught
-        // here even if each one still "looks right" in isolation.
+        // Asserted together so two states can't silently share a word.
         let never_started = start_display_word(None);
         let paused = start_display_word(Some(Status::Paused));
         let dropped = start_display_word(Some(Status::Dropped));
@@ -278,9 +255,7 @@ mod tests {
         assert_eq!(never_started, "Start");
         assert_eq!(paused, "Resume");
         assert_eq!(dropped, "Rewatch?");
-        // in_progress never legitimately reaches start's listing (filtered
-        // out by eligible_for_start), but the function stays total — it
-        // falls back to the same word a real resumable position uses.
+        // in_progress is filtered out by eligible_for_start; the word is a total fallback.
         assert_eq!(in_progress, "Resume");
 
         let words = [never_started, paused, dropped];
@@ -390,11 +365,8 @@ mod tests {
 
     #[test]
     fn a_nested_tracked_root_does_not_also_appear_as_a_series_of_its_parent_root() {
-        // Regression test for a dogfood-found bug: with both `Anime` and
-        // `Anime/Rewatches` registered as tracked roots, `list`/`status`
-        // (backed by `all_series`) showed `Rewatches` twice — once
-        // correctly as its own root's series, and once incorrectly as a
-        // "series" named "Rewatches" under `Anime`.
+        // With `Anime` and `Anime/Rewatches` both tracked, `Rewatches` is a
+        // root, not a series of `Anime`.
         use std::fs;
         use tempfile::tempdir;
 
@@ -429,10 +401,7 @@ mod tests {
 
     #[test]
     fn episode_number_falls_back_to_ordinal_when_anitomy_cannot_parse() {
-        // A record's episode_number is populated entirely by reconcile (via
-        // anitomy::episode_identity's own ordinal fallback) — this proves
-        // overview.rs surfaces exactly what's stored, verbatim, without a
-        // second normalization pass of its own.
+        // The stored episode_number is surfaced verbatim, with no re-parsing.
         let record = SeriesRecord {
             root: "~/Anime".to_string(),
             name: "No Numbers".to_string(),
@@ -449,7 +418,7 @@ mod tests {
 
     #[test]
     fn start_word_for_every_status_matches_the_hand_written_table() {
-        // Wildcard-free: a new `Status` variant must be added here.
+        // No wildcard: a new `Status` variant must be added here.
         fn expected(status: Status) -> &'static str {
             match status {
                 Status::InProgress => "Resume",

@@ -1,22 +1,4 @@
-//! Real end-to-end integration test against the *compiled binary*, driven
-//! through a genuine XDG-style `$HOME` — not an in-process function call
-//! with an explicit tempdir path handed straight to `state::write`/
-//! `config::write`, which is what every one of the 213 unit tests in
-//! `src/` does instead.
-//!
-//! That distinction is the actual gap this closes. Every existing test
-//! constructs its own `state_path`/`config_path` via `tempdir().join(...)`
-//! and passes it directly as an argument — none of them ever calls
-//! `state::state_path()` or `config::config_path()` themselves, so none of
-//! them exercise `dirs::data_dir()`/`dirs::config_dir()` real environment-
-//! variable-driven resolution, and none of them invoke `main()`/`dispatch()`
-//! at all. A bug in that specific wiring (wrong `dirs` function used, a
-//! path resolution that silently diverges between config and state, an
-//! env var not being read the way it's expected to) could pass all 213
-//! unit tests and still be broken for a real user — which is exactly the
-//! shape of bug this was written to investigate. Spawns the real compiled
-//! binary via `env!("CARGO_BIN_EXE_tsuzuki")` with an explicit `HOME` and
-//! both `XDG_*` overrides cleared, matching a normal user's shell.
+//! Real-binary tests of `dirs`-based `config.toml`/`state.toml` path resolution, which unit tests bypass with explicit paths.
 
 use std::fs;
 use std::path::Path;
@@ -53,9 +35,7 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
         String::from_utf8_lossy(&add.stderr)
     );
 
-    // The real config.toml path, resolved the same way `dirs::config_dir()`
-    // resolves it (~/.config on Linux with no XDG_CONFIG_HOME override) —
-    // not a path this test invents itself.
+    // config.toml under ~/.config, as `dirs::config_dir()` resolves it.
     let config_path = home.join(".config").join("tsuzuki").join("config.toml");
     assert!(
         config_path.exists(),
@@ -63,17 +43,13 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
         config_path.display()
     );
 
-    // Bypass real mpv detection entirely so this test doesn't depend on
-    // mpv being installed on the machine running it — `true` is a
-    // standard, always-present, instantly-exiting program.
+    // `true` stands in for mpv so the test doesn't need it installed.
     let patched = fs::read_to_string(&config_path)
         .unwrap()
         .replace("command_override = \"\"", "command_override = \"true\"");
     fs::write(&config_path, patched).unwrap();
 
-    // Fabricate a real (>= the default 120s resume_seconds) mpv
-    // watch_later bookmark, exactly as mpv itself would leave one behind
-    // after being quit mid-episode.
+    // A watch_later bookmark above the default 120s `resume_seconds`, as mpv leaves after a mid-episode quit.
     let watch_later_dir = home.join(".local/state/mpv/watch_later");
     fs::create_dir_all(&watch_later_dir).unwrap();
     fs::write(
@@ -85,9 +61,7 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
     )
     .unwrap();
 
-    // The real state.toml path — ~/.local/share on Linux, per
-    // `dirs::data_dir()` — computed here independently of the source
-    // under test, the same way a real user's shell would resolve it.
+    // state.toml under ~/.local/share, as `dirs::data_dir()` resolves it.
     let state_path = home.join(".local/share/tsuzuki/state.toml");
     assert!(
         !state_path.exists(),
@@ -142,10 +116,7 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
 
 #[test]
 fn list_and_status_read_back_the_same_real_persisted_state() {
-    // A second, independent invocation of the real binary, reading back
-    // what the first one (via `resume`) actually wrote to disk — proving
-    // persistence survives across process invocations, not just within
-    // the one process that wrote it.
+    // A second process reads back what `resume` wrote.
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 

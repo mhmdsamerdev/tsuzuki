@@ -68,12 +68,8 @@ fn main() -> ExitCode {
     )
 }
 
-/// `is_tty` is resolved once here (the one real call to
-/// `picker::stdin_is_tty()` in the whole binary) and threaded down as a
-/// plain `bool`, rather than `resume_command`/`start_command` each querying
-/// it internally — this is what makes "an explicit series argument bypasses
-/// the picker even when a TTY is available" a testable claim rather than
-/// just a structural one only provable by reading the code.
+/// `is_tty` is resolved once in `main` and passed down as a plain `bool`, so
+/// tests can force it.
 fn dispatch(
     command: Command,
     config: &mut Config,
@@ -126,9 +122,8 @@ fn dispatch(
     }
 }
 
-/// `tsuzuki add <path>...` — validates, checks idempotency, and persists new
-/// tracked roots (CLAUDE.md's "`tsuzuki add` validation and idempotency").
-/// A failing path doesn't stop the rest; config is written once, and the
+/// `tsuzuki add <path>...`: validates and persists new tracked roots. A
+/// failing path doesn't stop the rest; config is written once, and the
 /// per-path lines are printed only after that write succeeds.
 fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
     let mut lines = Vec::new();
@@ -169,13 +164,10 @@ fn exit_code(failed: bool) -> ExitCode {
     }
 }
 
-/// `tsuzuki exclude <path>... [--root <root>]` — resolves each path against
-/// tracked roots and persists the exclusions (CLAUDE.md's "Exclusion
-/// persistence and disambiguation"). Ambiguous matches and validation
-/// failures print `ExcludeError`'s `Display` output as-is — it already
-/// includes the exact `--root` re-invocations design.md §3 specifies. A
-/// failing path doesn't stop the rest; config is written once, and the
-/// per-path lines are printed only after that write succeeds.
+/// `tsuzuki exclude <path>... [--root <root>]`: resolves each path against
+/// tracked roots and persists the exclusions. A failing path doesn't stop
+/// the rest; config is written once, and the per-path lines are printed only
+/// after that write succeeds.
 fn exclude_command(
     paths: &[String],
     root: Option<&Path>,
@@ -232,12 +224,9 @@ fn exclude_command(
     exit_code(failed)
 }
 
-/// Bare `tsuzuki exclude` (no path) — lists Anitomy-suggested OVA/Special/
-/// Movie/etc candidates plus the exact `tsuzuki exclude "<path>"` command
-/// for each (CLAUDE.md's "Anitomy-candidate confirmation stays list-only,
-/// not interactive", design.md §5). Never mutates `config` or excludes
-/// anything itself — confirming a candidate is a separate, explicit
-/// re-invocation of `exclude` with a path.
+/// Bare `tsuzuki exclude`: lists Anitomy-suggested OVA/Special/Movie
+/// candidates with the `exclude` command for each. Never excludes anything
+/// itself.
 fn suggest_candidates_command(config: &Config) {
     let candidates = exclude::suggest_candidates(config, dirs::home_dir().as_deref());
 
@@ -254,13 +243,9 @@ fn suggest_candidates_command(config: &Config) {
     }
 }
 
-/// Bare `tsuzuki config` — CLAUDE.md's CLI bare-invocation contract: `config`
-/// *does* have a single default action, showing the resolved config, the
-/// same way bare `sync` runs the sync rather than printing a menu. Prints
-/// the real config.toml path as a `#` (valid-TOML) comment header, the
-/// fully resolved config — defaults filled in for anything missing from the
-/// file on disk, which `cat config.toml` can't show you — and a footer
-/// pointing at `config edit`, the one other action here.
+/// Bare `tsuzuki config`: prints the config path as a `#` comment header,
+/// then the resolved config (defaults filled in for anything missing on
+/// disk), then a pointer to `config edit`.
 fn config_show_command(config: &Config, config_path: &Path) -> ExitCode {
     println!("# {}", config_path.display());
     println!();
@@ -273,15 +258,9 @@ fn config_show_command(config: &Config, config_path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `tsuzuki config edit` — opens the real config.toml in `$EDITOR`,
-/// blocking until it exits (unlike `launch.rs`'s fire-and-forget mpv spawn,
-/// this one needs the real terminal and needs Tsuzuki to actually wait).
-/// No guessed fallback if `$EDITOR` is unset — this project only ever picks
-/// an external program from a curated, verified candidate list (mpv's
-/// native/Flatpak detection), never a blind guess, and there's no such list
-/// for editors. After the editor exits, re-reads the file through the same
-/// `config::read` every other invocation uses — a syntax error introduced
-/// by the edit is surfaced immediately, not left for the next command.
+/// `tsuzuki config edit`: opens config.toml in `$EDITOR` and waits for it to
+/// exit. No fallback editor is guessed if `$EDITOR` is unset. Re-reads the
+/// file afterwards so a syntax error surfaces immediately.
 fn config_edit_command(config_path: &Path) -> ExitCode {
     let editor = match std::env::var("EDITOR") {
         Ok(e) if !e.is_empty() => e,
@@ -311,21 +290,15 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `✓ <subject> — <result>` — the one-shot confirmation shape shared by
-/// `add`, `exclude`, `pause`, `drop`, and `sync link`, matching the same
-/// `✓`/`⚠`/`✗` vocabulary `doctor`/`sync` already established.
+/// `✓ <subject> — <result>`, the confirmation line shared by `add`,
+/// `exclude`, `pause`, `drop`, and `sync link`.
 fn confirm(subject: &str, result: &str) {
     println!("✓ {subject} — {result}");
 }
 
-// --- Phase 5: state machine & core commands ---
-
-/// Reads `state.toml`, runs the shared `reconcile` pass, and — only if it
-/// actually changed anything — persists the result (CLAUDE.md's "Every
-/// state-touching command reconciles against current mpv reality first").
-/// Any `ScanWarning` from the underlying `watch_later` scan is returned
-/// alongside, for the caller to print to stderr (CLAUDE.md's "warnings on
-/// stderr, real output on stdout").
+/// Reads `state.toml`, runs the shared `reconcile` pass, and persists the
+/// result only if it changed. Any `ScanWarning` from the `watch_later` scan
+/// is returned for the caller to print to stderr.
 fn reconcile_state(
     config: &Config,
     state_path: &Path,
@@ -364,29 +337,20 @@ fn print_scan_warning(warning: &mpv::ScanWarning) {
     }
 }
 
-/// What to actually play: the resolved file, starting position, and its
-/// episode number.
+/// The resolved file, starting position, and episode number to play.
 struct PlaybackTarget {
     file: PathBuf,
     position_seconds: f64,
     episode_number: u32,
 }
 
-/// Resolves what file + starting position to actually play for a given
-/// series: a real `in_progress`/`paused` record resumes at its saved
-/// position; a `dropped` record or no record at all starts at the first
-/// episode, position 0 (design.md §6's three `start` cases, and — since
-/// `resume`/`start` share one selection mechanism per CLAUDE.md — this
-/// single function backs both). `None` means the series currently has no
-/// video files to play at all.
+/// Resolves the file and position to play for a series. An `in_progress` or
+/// `paused` record resumes at its saved position; a `dropped` or `completed`
+/// record, or no record, starts at the first episode at 0. `None` means the
+/// series has no video files.
 ///
-/// The episode number is always freshly resolved here via
-/// `anitomy::episode_identity` — the exact same mechanism `reconcile.rs`
-/// uses to populate a record's own `episode_number` — rather than trusting
-/// `record.episode_number` directly. That field is only meaningful for a
-/// non-`Dropped` record continuing at its own stored position; the
-/// start-fresh case (no record, or `Dropped`) has no record-side episode
-/// number to fall back on at all, and would otherwise show nothing.
+/// The episode number comes from `anitomy::episode_identity`, not
+/// `record.episode_number`, since the start-fresh case has no usable record.
 fn playback_target(
     config: &Config,
     home: Option<&Path>,
@@ -404,14 +368,8 @@ fn playback_target(
         return None;
     }
 
-    // `Some((idx, position))` only when a usable (non-`Dropped`) record's
-    // own file was actually found in the current ordering — carrying both
-    // its real index and its real stored position together, so there's no
-    // way for one to resolve from the record while the other silently
-    // defaults (the bug in an earlier draft of this function: treating
-    // "index happens to be 0" as indistinguishable from "no record was
-    // found," which would have shown position 0 even for a record
-    // genuinely paused/in-progress at episode 1's own real position).
+    // `Some((idx, position))` only when the record's file is found in the
+    // current ordering; index and position resolve together or not at all.
     let resolved = record
         .filter(|r| !matches!(r.status, Status::Dropped | Status::Completed))
         .and_then(|r| {
@@ -437,8 +395,7 @@ fn playback_target(
     })
 }
 
-/// `mm:ss` (or `h:mm:ss` past an hour) — matches the display format
-/// CLAUDE.md's resume-message wording expects.
+/// `mm:ss`, or `h:mm:ss` past an hour.
 fn format_timestamp(seconds: f64) -> String {
     let total = seconds.max(0.0).round() as u64;
     let hours = total / 3600;
@@ -451,10 +408,8 @@ fn format_timestamp(seconds: f64) -> String {
     }
 }
 
-/// Launches `name` under `root`, printing a one-line confirmation on
-/// success. Shared by every path that ends in actually playing a series:
-/// explicit `resume`/`start <series>`, the bare single-`in_progress` case,
-/// and both pickers' selections.
+/// Launches `name` under `root` and prints a confirmation line. Every path
+/// that plays a series ends here.
 fn play_series(
     config: &Config,
     state: &State,
@@ -489,8 +444,7 @@ fn play_series(
 }
 
 /// Resolves an explicit `series [--root]` argument and plays it, bypassing
-/// any picker entirely — TTY or not (CLAUDE.md: "An explicit series
-/// argument always bypasses the picker entirely and proceeds directly").
+/// the picker whether or not there is a TTY.
 fn explicit_play(
     series: &str,
     root_arg: Option<&Path>,
@@ -601,14 +555,8 @@ fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode
     }
 }
 
-/// Shared rendering for "`subject` exists under more than one tracked root" —
-/// used by both `print_target_error` (`resume`/`start`/`pause`/`drop`/`sync
-/// link`'s `--root` resolution) and `exclude_command` (a previously separate,
-/// independently-drifted implementation). Drops the numbered
-/// resolved-path enumeration the two previous implementations disagreed on
-/// showing — the exact `--root` re-invocation *is* the actionable content,
-/// same "detail that's neither the result nor a next step is dropped"
-/// reasoning `doctor`'s report already established.
+/// Renders "`subject` exists under more than one tracked root" with the
+/// exact `--root` re-invocation for each root.
 fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitCode {
     eprintln!(
         "✗ \"{subject}\" is ambiguous — tracked under {} roots",
@@ -620,8 +568,8 @@ fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitC
     ExitCode::FAILURE
 }
 
-/// `tsuzuki` / `tsuzuki resume [series] [--root <root>]` — design.md §6's
-/// 0/1/many logic. An explicit `series` always bypasses this entirely.
+/// `tsuzuki` / `tsuzuki resume [series] [--root <root>]`: with no explicit
+/// series, resumes the only `in_progress` series or picks among several.
 fn resume_command(
     series: Option<String>,
     root: Option<PathBuf>,
@@ -662,8 +610,7 @@ fn resume_command(
     );
 
     match in_progress.len() {
-        // Zero `in_progress` series falls through to `start`'s behavior
-        // (design.md §6), unless a root was asked for.
+        // Nothing in progress falls through to `start`, unless a root was asked for.
         0 => match &scope {
             Some(root) => fail(&format!("nothing in progress in {}", scope_label(root))),
             None => start_command(None, None, config, state_path, home, is_tty),
@@ -703,8 +650,7 @@ fn resume_command(
     }
 }
 
-/// `tsuzuki status` — every currently `in_progress` series (`current` was
-/// cut per CLAUDE.md; this is its replacement).
+/// `tsuzuki status`: every `in_progress` series.
 fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -740,8 +686,7 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
     ExitCode::SUCCESS
 }
 
-/// `tsuzuki list` — every tracked series, grouped/ordered per CLAUDE.md's
-/// "`list` ordering and episode-number display".
+/// `tsuzuki list`: every tracked series, grouped by status.
 fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -811,9 +756,8 @@ fn start_verb(status: Option<Status>) -> &'static str {
     }
 }
 
-/// `tsuzuki start [series] [--root <root>]` — design.md §6, CLAUDE.md's
-/// three-display-word decision. Lists/picks among everything *not*
-/// currently `in_progress`.
+/// `tsuzuki start [series] [--root <root>]`: lists or picks among every
+/// series not currently `in_progress`.
 fn start_command(
     series: Option<String>,
     root: Option<PathBuf>,
@@ -997,14 +941,8 @@ fn transition_series(
     exit_code(failed)
 }
 
-// --- Phase 8a: MAL OAuth login ---
-
-/// `tsuzuki sync login` — design.md §7's one-time OAuth authorization,
-/// Authorization Code grant with PKCE (`code_challenge_method=plain`, MAL
-/// doesn't support S256). Orchestration lives here, matching this project's
-/// existing convention (`doctor_command` does the same): `mal.rs` exposes
-/// small, individually-testable building blocks; the actual sequencing and
-/// all user-facing output happen in `main.rs`.
+/// `tsuzuki sync login`: one-time OAuth authorization (Authorization Code
+/// grant with PKCE; MAL only supports `code_challenge_method=plain`).
 fn sync_login_command(config: &Config) -> ExitCode {
     let client_id = mal::resolve_client_id(config);
 
@@ -1070,12 +1008,8 @@ fn sync_login_command(config: &Config) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// --- Phase 8b: MAL linking and the two-way merge ---
-
-/// Resolves a real, usable bearer token for `sync`/`sync link` — the one
-/// top-level failure mode that aborts before touching any series at all
-/// (no token, no possible sync), distinct from a per-series failure inside
-/// the loop.
+/// Resolves a usable bearer token for `sync`/`sync link`. Failing here
+/// aborts before any series is touched.
 fn ensure_sync_access_token(
     client: &dyn mal::MalHttpClient,
     config: &Config,
@@ -1091,12 +1025,10 @@ fn ensure_sync_access_token(
     .map_err(|e| fail(&e.to_string()))
 }
 
-/// `tsuzuki sync` (bare) — design.md §7 + this phase's own instructions:
-/// every available, non-paused series with real progress, attempt linking
-/// first if not already linked, then merge if linked. Paused and orphaned
-/// records are filtered before MAL authentication, so a library with no
-/// eligible records performs no network work. One series failing never
-/// aborts the run.
+/// `tsuzuki sync` (bare): links each eligible series if not yet linked, then
+/// merges progress. Paused and orphaned records are filtered before MAL
+/// authentication, so nothing eligible means no network work. One series
+/// failing never aborts the run.
 fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let (mut state, warning) = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
@@ -1192,11 +1124,8 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
     }
 }
 
-/// Comma-joined, zero-count categories omitted — "1 synced, 2 need manual
-/// linking", never "1 synced, 2 need manual linking, 0 failed". Keeps the
-/// common all-good run's summary a single short clause instead of padding
-/// it with categories that didn't happen. `synced` counts only real pushes
-/// and pulls; unchanged series are deliberately absent from the report.
+/// Comma-joined summary with zero-count categories omitted, e.g.
+/// "1 synced, 2 need manual linking". `synced` counts only real changes.
 fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
     let mut parts = Vec::new();
     if synced > 0 {
@@ -1215,10 +1144,8 @@ fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
     }
 }
 
-/// Concise, action-oriented output for one series. A no-op produces no
-/// lines: unchanged series are the normal case and listing every one hides
-/// the results that matter. `✓` is reserved for a real push/pull, `⚠` for
-/// required user action, and `✗` for a failure.
+/// Output lines for one series. A no-op produces none. `✓` is a real
+/// push/pull, `⚠` needs user action, `✗` is a failure.
 fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>) -> Vec<String> {
     let name = &outcome.name;
     match &outcome.kind {
@@ -1255,10 +1182,9 @@ fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>)
     }
 }
 
-/// `tsuzuki sync link <series> --mal-id <id> [--root <root>]` — design.md
-/// §7's manual override, for when exact-title matching fails. Verifies
-/// `mal_id` actually appears on the user's MAL list before persisting the
-/// link (see `sync.rs`'s `manual_link` doc comment for the reasoning).
+/// `tsuzuki sync link <series> --mal-id <id> [--root <root>]`: manual link
+/// for when exact-title matching fails. Verifies `mal_id` is on the user's
+/// MAL list before persisting.
 fn sync_link_command(
     series: &str,
     mal_id: u32,
@@ -1275,9 +1201,7 @@ fn sync_link_command(
         print_scan_warning(w);
     }
 
-    // Cheap, local validation first — same "check before spawn" ordering
-    // `launch.rs` already follows — so an unresolvable/ambiguous series
-    // name fails immediately, with no network call attempted at all.
+    // Resolve locally first so a bad or ambiguous name fails with no network call.
     let root = match target::resolve_series_root(config, series, root_arg, home) {
         Ok(r) => r,
         Err(e) => return print_target_error(&e, "sync link"),
@@ -1307,25 +1231,11 @@ fn sync_link_command(
     }
 }
 
-// --- Phase 7: doctor ---
-
-/// `tsuzuki doctor [--fix] [--forget-orphans]` — CLAUDE.md's Phase 7 full
-/// check list (1a-1i). Reconciles against mpv reality first, per the same
-/// "every state-touching command reconciles first" rule every other
-/// state-touching command already follows — `--fix --forget-orphans` is a
-/// real mutation of `state.toml`, so this counts. Prints one concise,
-/// scannable line per conceptual check to stdout (this report *is* the
-/// command's real output, not an incidental warning about something else —
-/// CLAUDE.md's stderr convention is for warnings a command surfaces about
-/// achieving some other goal, and doctor's entire goal is exactly this
-/// report). Several install-scoped checks (mpv config, the companion
-/// script) fold multiple per-install results into one row via
-/// `doctor::combine` — CLAUDE.md's "doctor groups related checks
-/// conceptually rather than one row per internal artifact"; a check with
-/// nothing to check against (no mpv install detected at all) is omitted
-/// entirely rather than printed as a hollow "skipped" row. Exits non-zero
-/// only if at least one check is FAIL after any `--fix`/`--forget-orphans`
-/// mutation is applied — never on WARN alone.
+/// `tsuzuki doctor [--fix] [--forget-orphans]`: reconciles first, then
+/// prints one line per conceptual check to stdout. Install-scoped checks are
+/// folded into one row via `doctor::combine`; a check with nothing to check
+/// against is omitted. Exits non-zero only if a check still FAILs after any
+/// fixes, never on WARN alone.
 fn doctor_command(
     fix: bool,
     forget_orphans: bool,
@@ -1333,10 +1243,8 @@ fn doctor_command(
     state_path: &Path,
     home: Option<&Path>,
 ) -> ExitCode {
-    // Local only — never calls update::check_for_update(). This exists so
-    // a pasted doctor report (the standard ask on a GitHub issue) names
-    // the exact version a bug was filed against; whether a newer release
-    // exists is `tsuzuki update`'s job alone (CLAUDE.md).
+    // Local only, never `update::check_for_update()`; the version lets a pasted
+    // report name the build it came from.
     println!("Tsuzuki v{}", update::current_version());
     println!();
 
@@ -1481,9 +1389,8 @@ fn doctor_command(
     }
 }
 
-/// "All checks passed." when every row is `Ok`; otherwise a plain issue
-/// count (`Warn` and `Fail` both count — either is something worth the
-/// user's attention, even though only `Fail` affects the exit code).
+/// "All checks passed." when every row is `Ok`; otherwise the count of `Warn`
+/// and `Fail` rows.
 fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
     let issues = results
         .iter()
@@ -1496,25 +1403,13 @@ fn doctor_summary_line(results: &[doctor::CheckResult]) -> String {
     }
 }
 
-/// `tsuzuki update` — the sole place in this crate other than `sync` that
-/// ever touches the network, and only because this command was explicitly
-/// invoked (CLAUDE.md's "network only touched on request"). Takes no
-/// `config`/`state_path`/`home`: unlike every other command, updating has
-/// nothing to do with tracked series or local state.
-///
-/// Installs directly, with no separate `--install` flag to wait for —
-/// running `update` at all is already the explicit action; gating the one
-/// thing it does behind a second flag would only add a step for no real
-/// safety benefit (there's nothing destructive here: the installer just
-/// replaces the binary with what `/releases/latest` already publishes).
+/// `tsuzuki update`: checks for a newer release and installs it. Needs no
+/// config or state.
 fn update_command() -> ExitCode {
     let current = update::current_version();
     let status = match update::check_for_update() {
         Ok(status) => status,
-        // Fail fast: never attempts the installer against network already
-        // proven broken. UpdateCheckError's own Display is already a
-        // short, curated line (no raw HTTP bodies), so this needs no
-        // further translation before reaching the terminal.
+        // Don't run the installer when the check itself failed.
         Err(e) => return fail(&format!("could not check for updates: {e}")),
     };
     println!("{}", status.render(current));
@@ -1565,13 +1460,8 @@ mod tests {
         for root in roots {
             config.roots.paths.push(root.to_string_lossy().into_owned());
         }
-        // Any test that reaches `play_series` ends up calling
-        // `launch::resume_playback` with the real, unmocked native/Flatpak
-        // detection — on a machine with a real Flatpak mpv install (this
-        // dev machine has one, discovered during the implementation
-        // session), that would actually spawn it. `true` is a standard,
-        // always-present, instantly-exiting program — bypasses detection
-        // entirely and keeps these tests side-effect-free and fast.
+        // `true` exits immediately and bypasses mpv detection, so tests that
+        // reach `play_series` never spawn a real mpv.
         config.mpv.command_override = "true".to_string();
         config
     }
@@ -1625,18 +1515,8 @@ mod tests {
         );
     }
 
-    /// Writes a real mpv-style `watch_later` entry matching `record()`'s
-    /// own stored position (200.0s) for a single-episode series. Needed
-    /// since reconcile now runs before every state-touching command and
-    /// auto-drops a single/last-episode `InProgress` record whose current
-    /// file has no matching bookmark at all (CLAUDE.md's "When the CURRENT
-    /// tracked episode itself completes" — genuinely correct behavior for
-    /// a real absence, but these fixtures fabricate a bare `InProgress`
-    /// record with no corresponding mpv state at all, which reconcile can
-    /// no longer tell apart from "mpv deleted the bookmark, it's done").
-    /// Matching the stored position exactly keeps reconcile a true no-op,
-    /// restoring these tests' original intent: exercising `--root`
-    /// disambiguation, not reconcile's completion handling.
+    /// Writes a `watch_later` entry at `record()`'s stored position (200s) for
+    /// a single-episode series, so reconcile leaves the fixture record alone.
     fn fabricate_matching_bookmark(
         config: &mut Config,
         watch_later_dir: &Path,
@@ -1661,9 +1541,7 @@ mod tests {
         .unwrap();
     }
 
-    // --- Sweep item: `pause`/`drop` --root disambiguation against a real
-    // name collision (two actually identically-named series under two real
-    // tracked roots), verified via the resulting state.toml mutation. ---
+    // `pause`/`drop` `--root` disambiguation between identically named series.
 
     #[test]
     fn pause_command_root_disambiguates_between_two_real_identically_named_series() {
@@ -1799,20 +1677,8 @@ mod tests {
         );
     }
 
-    // --- Phase 8b: sync_link_command's --root disambiguation ---
-    //
-    // `sync_link_command` resolves `--root` (a cheap, local, no-network
-    // check) before ever touching the network, mirroring pause/drop's own
-    // ordering — so the ambiguous-without-`--root` case is fully testable
-    // here without a real MAL token. A "root disambiguates AND completes a
-    // real link" test is not attempted at this level: past target
-    // resolution, `sync_link_command` hardcodes the real `mal::UreqClient`
-    // and needs a genuine access token, which is exactly what the
-    // `#[ignore]`d real-API integration test (`tests/mal_sync_integration.rs`)
-    // covers instead — `sync.rs`'s own `manual_link` unit tests already
-    // exhaustively cover the actual linking/persistence logic via a fake
-    // client, so nothing about *that* is untested, just not re-verified a
-    // second time through this real-network-dependent entry point.
+    // `sync_link_command` resolves `--root` before any network call, so only the
+    // ambiguous case is testable here; the linking itself is covered in `sync.rs`.
 
     #[test]
     fn sync_link_command_without_root_on_a_real_collision_is_ambiguous_and_mutates_nothing() {
@@ -1850,20 +1716,17 @@ mod tests {
         );
     }
 
-    // --- Sweep item: `resume`/`start`'s explicit-arg path, --root
-    // disambiguation via the shared `explicit_play`/`target::resolve_series_root`
-    // mechanism, proven via exit code (one root's series has playable
-    // episodes, the other's doesn't — a wrong resolution would flip which
-    // call succeeds). ---
+    // `explicit_play` `--root` disambiguation, proven by exit code: only one
+    // root's series has episodes.
 
     #[test]
     fn explicit_play_root_disambiguates_between_two_real_identically_named_series() {
         let dir = tempdir().unwrap();
         let root_a = dir.path().join("Anime");
         let root_b = dir.path().join("AltAnime");
-        // root_a's "Monster" exists but has no video files at all.
+        // root_a's "Monster" has no video files.
         fs::create_dir_all(root_a.join("Monster")).unwrap();
-        // root_b's "Monster" has a real episode.
+        // root_b's "Monster" has an episode.
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
         let config = tracked_config(&[&root_a, &root_b]);
@@ -1903,18 +1766,9 @@ mod tests {
 
     #[test]
     fn resume_command_explicit_arg_bypasses_the_picker_even_when_a_tty_is_available() {
-        // Multiple in_progress series exist — enough that the bare/no-arg
-        // path would hit the `_ =>` many-choices branch and call the real
-        // `dialoguer`-backed picker. `is_tty: true` is passed explicitly
-        // (the whole point of threading it in from `dispatch` instead of
-        // querying it inside this function) — if an explicit series
-        // argument ever regressed into reaching the picker code under
-        // these exact conditions, `dialoguer::Select::interact_opt()` would
-        // either error out (no real controllable terminal in a test
-        // harness) or, worse, hang. Run on a background thread with a
-        // bounded wait so a real regression fails loudly instead of
-        // hanging the whole test binary — same precedent as
-        // `series.rs`'s symlink-cycle test.
+        // Two in_progress series with `is_tty: true`: the bare path would reach
+        // the real picker. Run with a timeout so a regression fails instead of
+        // hanging.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Monster").join("ep01.mkv"));
@@ -1945,11 +1799,8 @@ mod tests {
         assert_eq!(exit, ExitCode::SUCCESS);
     }
 
-    /// Runs `f` on a background thread and polls for completion instead of
-    /// blocking on `.join()`, so a regression that hangs (e.g. an
-    /// accidental interactive prompt in a non-interactive test) fails this
-    /// test loudly via a bounded wait instead of hanging the whole test
-    /// binary indefinitely.
+    /// Runs `f` on a background thread and returns `None` if it doesn't finish
+    /// within `timeout`.
     fn wait_with_timeout<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
         timeout: Duration,
@@ -1967,19 +1818,8 @@ mod tests {
         }
     }
 
-    // --- Phase 7: doctor_command wiring ---
-    //
-    // These exercise the glue in `doctor_command` itself (orphan
-    // detection/clearing, the `--fix`/`--forget-orphans` flow) — the
-    // individual checks' own logic is already exhaustively unit-tested in
-    // `doctor.rs`. `command_override = "true"` (via `tracked_config`) keeps
-    // the mpv-availability check deterministic; the mpv.conf/tsuzuki.lua
-    // checks still depend on this development machine's real, standing
-    // Flatpak `io.mpv.Mpv` install being detected (same accepted dependency
-    // `tracked_config`'s own doc comment and `launch.rs`'s tests already
-    // rely on) — since the Flatpak candidate path is `home`-relative, this
-    // is still fully contained within each test's own fabricated tempdir
-    // home, never the real system's mpv config.
+    // `doctor_command` wiring: orphan detection and the `--fix`/`--forget-orphans`
+    // flow. The individual checks are tested in `doctor.rs`.
 
     fn state_with_orphan(root: &Path) -> State {
         State {
@@ -2093,11 +1933,7 @@ mod tests {
         };
         state::write(&state_path, &before).unwrap();
 
-        // Not asserting the overall exit code here (this machine's real
-        // Flatpak mpv install may independently FAIL the mpv.conf/
-        // tsuzuki.lua checks against this fabricated, script-free home) —
-        // only that state.toml is byte-for-byte unchanged, since nothing
-        // here is actually orphaned or otherwise reconcilable.
+        // The exit code is not asserted: unrelated mpv checks may FAIL on this home.
         doctor_command(false, false, &config, &state_path, Some(&home));
 
         let after = state::read(&state_path).unwrap();

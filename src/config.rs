@@ -1,7 +1,7 @@
 //! `~/.config/tsuzuki/config.toml` — human-tunable configuration.
 //!
-//! Read/write via serde+toml. If the file doesn't exist on read, defaults
-//! are written and returned rather than erroring (see CLAUDE.md §3).
+//! Read/write via serde+toml. A missing file on read is written with defaults
+//! and returned rather than erroring.
 
 use std::fs;
 use std::io;
@@ -23,40 +23,28 @@ pub struct Config {
     pub exclusions: Vec<Exclusion>,
 }
 
-/// `120`, per design.md §8 — below this a saved position is noise, not a
-/// real bookmark.
+/// `120`: below this a saved position is noise, not a bookmark.
 fn default_resume_seconds() -> u64 {
     120
 }
 
-/// `180`, per design.md §8 — this close to a file's end counts as watched.
+/// `180`: this close to a file's end counts as watched.
 fn default_completion_remaining_seconds() -> u64 {
     180
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thresholds {
-    /// Two defaulting layers, both needed and both covering a genuinely
-    /// different missing-file shape: `Config.thresholds`'s own
-    /// `#[serde(default)]` (via `Thresholds: Default`, below) covers a
-    /// config.toml with no `[thresholds]` table at all; these per-field
-    /// defaults cover a `[thresholds]` table that's present but missing
-    /// this one key — e.g. an old config.toml from before
-    /// `completion_remaining_seconds` existed. A bare `#[serde(default)]`
-    /// would be silently *wrong* here (defaults to `0`, not the documented
-    /// `120`/`180`), not just imprecise — `0` for `resume_seconds` means
-    /// literally no noise filtering at all, and `0` for
-    /// `completion_remaining_seconds` means nothing is ever completed via
-    /// the duration-proximity signal. Named functions, not inline closures,
-    /// since `serde(default = "...")` requires a path, and reused by
-    /// `Thresholds::default()` below so the two layers can't drift apart.
+    /// Per-field defaults cover a `[thresholds]` table that exists but lacks
+    /// this key; `Config.thresholds`'s own default covers a missing table. A
+    /// bare `#[serde(default)]` would give `0`, disabling noise filtering and
+    /// duration-based completion. Named functions because `serde(default = ..)`
+    /// takes a path; `Thresholds::default()` reuses them.
     #[serde(default = "default_resume_seconds")]
     pub resume_seconds: u64,
     #[serde(default = "default_completion_remaining_seconds")]
     pub completion_remaining_seconds: u64,
-    /// `0` is both the documented default (design.md §8: "never
-    /// auto-pause") and `u64`'s own `Default::default()` — a bare
-    /// `#[serde(default)]` is correct here, unlike its two siblings above.
+    /// `0` means never auto-pause.
     #[serde(default)]
     pub auto_pause_days: u64,
 }
@@ -71,14 +59,8 @@ impl Default for Thresholds {
     }
 }
 
-/// `["mkv", "mp4", "avi", "webm", "mov"]`, per design.md §8. A bare
-/// `#[serde(default)]` on `video_extensions` would silently produce an
-/// *empty* list instead — not a parse failure, but a config that now
-/// matches zero video files and excludes an entire library. This is the
-/// exact bug found during Phase 5's human dogfood pass: an old config.toml
-/// from before this field existed failed to parse at all (no default of
-/// any kind), which a bare `#[serde(default)]` would have "fixed" into a
-/// different, quieter failure instead of the documented list.
+/// `["mkv", "mp4", "avi", "webm", "mov"]`. Needs a named default: a bare
+/// `#[serde(default)]` would give an empty list that matches no video files.
 fn default_video_extensions() -> Vec<String> {
     ["mkv", "mp4", "avi", "webm", "mov"]
         .iter()
@@ -88,9 +70,7 @@ fn default_video_extensions() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Roots {
-    /// Empty is the genuinely correct default (a fresh install has no
-    /// tracked roots yet) — `Vec::default()` already matches, so a bare
-    /// `#[serde(default)]` is correct, unlike `video_extensions` below.
+    /// Empty by default: a fresh install tracks no roots.
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default = "default_video_extensions")]
@@ -106,50 +86,33 @@ impl Default for Roots {
     }
 }
 
-/// Both fields correctly default to `""` (`String::default()`), so
-/// `#[derive(Default)]` needs no field-level overrides — unlike
-/// `Thresholds`/`Roots`, nothing here would be silently wrong under a bare
-/// `#[serde(default)]`.
+/// Both fields default to `""`, so a derived `Default` is correct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Mpv {
     #[serde(default)]
     pub watch_later_dir: String,
-    /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`), skipping
-    /// native/Flatpak auto-detection entirely. Empty = auto-detect — same
-    /// empty-means-default shape as `watch_later_dir` (CLAUDE.md's "Launching
-    /// mpv" decision).
+    /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`) that skips
+    /// native/Flatpak auto-detection. Empty means auto-detect.
     #[serde(default)]
     pub command_override: String,
 }
 
-/// `8734`, the local OAuth-callback listener's port (`tsuzuki sync login`,
-/// Phase 8a) — arbitrary but fixed, matching this project's "every tunable
-/// is genuinely configurable" rule for the case where the default happens to
-/// collide with something else already running on the user's machine.
+/// `8734`: the local OAuth-callback listener port for `tsuzuki sync login`.
+/// Configurable in case something else already uses it.
 fn default_mal_redirect_port() -> u16 {
     8734
 }
 
-/// `client_id`'s correct default is `""`, same reasoning as `Mpv`.
-/// `redirect_port` needs the same two-defaulting-layers treatment
-/// `Thresholds` uses — its correct default (`8734`) isn't `u16::default()`
-/// (`0`, which isn't even a valid listener port), so a bare
-/// `#[serde(default)]` would be silently wrong the same way it would for
-/// `resume_seconds`.
+/// `redirect_port` needs a named default: `u16::default()` is `0`, not a valid port.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mal {
     #[serde(default)]
     pub client_id: String,
     #[serde(default = "default_mal_redirect_port")]
     pub redirect_port: u16,
-    /// The minimum title-similarity score (`sync::title_similarity`, `0.0`
-    /// to `1.0`) a fuzzy candidate must clear before `tsuzuki sync` will
-    /// suggest it as a "did you mean...?" — below this, `sync`'s own output
-    /// shows a plain "no matching series found" instead of a low-confidence
-    /// guess (CLAUDE.md's "sync output only ever suggests a confident fuzzy
-    /// match"). Same two-defaulting-layers reasoning as `redirect_port`: the
-    /// correct default (`0.8`) isn't `f64::default()` (`0.0`, which would
-    /// suggest literally anything on the user's list).
+    /// Minimum `sync::title_similarity` (`0.0` to `1.0`) a fuzzy candidate must
+    /// reach to be suggested as "did you mean...?". Needs a named default:
+    /// `f64::default()` is `0.0`, which would suggest anything.
     #[serde(default = "default_fuzzy_match_threshold")]
     pub fuzzy_match_threshold: f64,
 }
@@ -164,28 +127,23 @@ impl Default for Mal {
     }
 }
 
-/// `0.8`, chosen so an unrelated series (typically well under 0.6 similarity
-/// even for same-franchise titles like "One Piece" vs. "One Piece Special")
-/// never surfaces as a suggestion, while a genuine minor-formatting/
-/// synonym-level difference (the common real case) still does.
+/// `0.8`: keeps unrelated titles (e.g. "One Piece" vs. "One Piece Special",
+/// well under 0.6) out of suggestions while still matching minor formatting
+/// or synonym differences.
 fn default_fuzzy_match_threshold() -> f64 {
     0.8
 }
 
-/// One `tsuzuki exclude`d file or directory (CLAUDE.md's "Exclusion
-/// persistence and disambiguation"). `root` stores the tracked root's own
-/// persisted literal form (whatever's in `roots.paths`, e.g. `~/Anime`),
-/// never a resolved absolute path — this is what keeps an exclusion
-/// portable across machines the same way a tracked root is. `path` is
-/// relative to that root, exactly as passed to `exclude`.
+/// One excluded file or directory. `root` is the tracked root as stored in
+/// `roots.paths` (e.g. `~/Anime`), never resolved, so it stays portable.
+/// `path` is relative to that root, as passed to `exclude`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Exclusion {
     pub root: String,
     pub path: String,
 }
 
-/// Resolves `~/.config/tsuzuki/config.toml` via the `dirs` crate's
-/// XDG-aware `config_dir()` — never a hand-rolled `$HOME` join.
+/// Resolves `config.toml` under the XDG config dir via `dirs::config_dir()`.
 pub fn config_path() -> io::Result<PathBuf> {
     let base = dirs::config_dir().ok_or_else(|| {
         io::Error::new(
@@ -196,8 +154,7 @@ pub fn config_path() -> io::Result<PathBuf> {
     Ok(base.join("tsuzuki").join("config.toml"))
 }
 
-/// Reads config from `path`. If the file doesn't exist, writes and returns
-/// defaults instead of erroring.
+/// Reads config from `path`, writing and returning defaults if the file is missing.
 pub fn read(path: &Path) -> io::Result<Config> {
     let mut config = match fs::read_to_string(path) {
         Ok(contents) => {
@@ -214,11 +171,8 @@ pub fn read(path: &Path) -> io::Result<Config> {
     Ok(config)
 }
 
-/// Strips a leading `.` from each `video_extensions` entry, so a
-/// hand-typed `.mkv` behaves identically to the documented bare `mkv`
-/// form (CLAUDE.md's "video_extensions entries are normalized on read").
-/// In-memory only — the on-disk file is never silently rewritten just
-/// because it was read; only an explicit `write` changes it.
+/// Strips a leading `.` from each `video_extensions` entry so `.mkv` and `mkv`
+/// behave the same. In-memory only; the file on disk is not rewritten.
 fn normalize_video_extensions(config: &mut Config) {
     for ext in &mut config.roots.video_extensions {
         if let Some(stripped) = ext.strip_prefix('.') {
@@ -228,8 +182,7 @@ fn normalize_video_extensions(config: &mut Config) {
 }
 
 /// Writes `config` to `path`, creating parent directories as needed.
-/// A hand-edited config file is not state, so this is a plain write —
-/// not the atomic temp-file-then-rename path `state.rs` uses.
+/// A plain write, not the atomic temp-file-then-rename path `state.rs` uses.
 pub fn write(path: &Path, config: &Config) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -273,12 +226,8 @@ mod tests {
 
     #[test]
     fn write_fails_gracefully_when_parent_path_is_occupied_by_a_file() {
-        // config.toml is deliberately a plain (non-atomic) write — see the
-        // doc comment on `write` — so there's no rename-swap guarantee to
-        // test the way state.rs's write is tested. What's worth locking in
-        // instead: a failure here returns `Err` rather than panicking, and
-        // (since `fs::create_dir_all` fails before `fs::write` is ever
-        // reached) never touches an existing file at a colliding path.
+        // A failed write returns `Err` rather than panicking, and
+        // `create_dir_all` failing means the colliding file is never touched.
         let dir = tempfile::tempdir().unwrap();
         let occupied = dir.path().join("not-a-directory");
         fs::write(&occupied, b"unrelated file, blocks the parent dir").unwrap();
@@ -286,7 +235,7 @@ mod tests {
 
         let result = write(&config_path, &Config::default());
         assert!(result.is_err());
-        // The blocking file itself must be untouched.
+        // The blocking file must be untouched.
         assert_eq!(
             fs::read(&occupied).unwrap(),
             b"unrelated file, blocks the parent dir"
@@ -378,14 +327,8 @@ mod tests {
 
     #[test]
     fn missing_video_extensions_key_defaults_to_the_documented_list_not_empty() {
-        // Regression test for the real bug found during Phase 5's human
-        // dogfood pass: `tsuzuki add` against a real (if old) config.toml
-        // missing `video_extensions` failed with "missing field" — this
-        // field was added in Phase 1 with no serde default at all. Asserts
-        // on the actual resulting value, not just "doesn't error" — a bare
-        // `#[serde(default)]` would also "not error" while silently
-        // producing an empty list (which matches zero video files), so
-        // that alone wouldn't prove the fix is correct.
+        // A missing `video_extensions` must give the default list, not an empty one
+        // (which would match zero video files).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -401,22 +344,15 @@ paths = ["~/Anime"]
         assert_eq!(
             config.roots.video_extensions,
             vec!["mkv", "mp4", "avi", "webm", "mov"],
-            "must default to the documented list from design.md §8, not an empty one"
+            "must default to the documented list, not an empty one"
         );
         assert_eq!(config.roots.paths, vec!["~/Anime".to_string()]);
     }
 
     #[test]
     fn missing_thresholds_table_and_missing_individual_threshold_keys_both_default_correctly() {
-        // Same bug class, found during the gap-audit's field-by-field
-        // sweep: `resume_seconds`/`completion_remaining_seconds` had no
-        // serde default either, and their correct defaults (120/180) are
-        // non-zero — a bare `#[serde(default)]` would silently produce `0`
-        // for both, which is wrong in a different, quieter way (0 = no
-        // noise filtering at all / nothing ever counts as near-complete).
-        // Covers both defaulting layers: the whole `[thresholds]` table
-        // absent (config_a), and the table present but missing one key
-        // (config_b).
+        // Covers both layers: `[thresholds]` table absent (config_a), and table
+        // present but missing keys (config_b). A bare `#[serde(default)]` gives `0`.
         let dir = tempfile::tempdir().unwrap();
 
         let path_a = dir.path().join("no_thresholds_table.toml");
@@ -447,16 +383,13 @@ paths = []
             config_b.thresholds.completion_remaining_seconds, 180,
             "must default to 180, not 0"
         );
-        // The one key that *was* present must still be read correctly, not
-        // overridden by the default-filling logic.
+        // The key that was present must not be overridden by defaults.
         assert_eq!(config_b.thresholds.auto_pause_days, 7);
     }
 
     #[test]
     fn missing_exclusions_key_defaults_to_empty_on_read() {
-        // A config.toml written before Phase 2 (or hand-edited without an
-        // [[exclusions]] section) must still read cleanly rather than
-        // erroring on a missing field.
+        // A config without an `[[exclusions]]` section must read cleanly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -486,8 +419,7 @@ client_id = ""
 
     #[test]
     fn missing_command_override_key_defaults_to_empty_on_read() {
-        // A config.toml written before Phase 5 has no `command_override`
-        // key under `[mpv]` at all — must still read cleanly.
+        // A missing `command_override` key under `[mpv]` must read cleanly.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -517,11 +449,7 @@ client_id = ""
 
     #[test]
     fn missing_redirect_port_key_defaults_to_8734_not_zero() {
-        // Same defaulting-layer bug class as `resume_seconds`/
-        // `completion_remaining_seconds`: a config.toml written before Phase
-        // 8a has no `redirect_port` key under `[mal]` at all — a bare
-        // `#[serde(default)]` would silently produce `0`, not a valid
-        // listener port.
+        // A missing `redirect_port` must default to 8734; a bare `#[serde(default)]` gives `0`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -551,9 +479,7 @@ client_id = ""
 
     #[test]
     fn missing_fuzzy_match_threshold_key_defaults_to_zero_point_eight_not_zero() {
-        // Same defaulting-layer bug class again: a bare `#[serde(default)]`
-        // would silently produce `0.0`, which would suggest literally any
-        // candidate on the user's MAL list regardless of similarity.
+        // A bare `#[serde(default)]` would give `0.0`, suggesting any candidate.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(

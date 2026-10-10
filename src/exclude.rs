@@ -1,12 +1,8 @@
-//! `tsuzuki exclude <path> [--root <root>]` — resolving a relative path
-//! against tracked roots and persisting the result (CLAUDE.md's
-//! "Exclusion persistence and disambiguation", design.md §3) — plus bare
-//! `tsuzuki exclude`'s Anitomy-suggested candidate listing (design.md §5's
-//! Phase 3 paragraph, CLAUDE.md's "Anitomy-candidate confirmation stays
-//! list-only, not interactive").
+//! `tsuzuki exclude <path> [--root <root>]`: resolves a relative path against
+//! tracked roots and records it. Bare `tsuzuki exclude` lists
+//! Anitomy-suggested candidates.
 //!
-//! This module only mutates the in-memory `Config`; the caller (main.rs)
-//! is responsible for writing it to disk, same pattern as `roots.rs`.
+//! Only mutates the in-memory `Config`; the caller writes it to disk.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -21,46 +17,38 @@ use crate::series;
 /// exist on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
-    /// The root's own persisted literal form (e.g. `~/Anime`) — what an
-    /// exclusion referencing this root would store, never a resolved
-    /// absolute path.
+    /// The root as stored (e.g. `~/Anime`), never a resolved absolute path.
     pub root: String,
-    /// The expanded, joined path — for display and on-disk validation
-    /// only, never persisted.
+    /// The expanded, joined path. For display and validation only.
     pub resolved: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExcludeOutcome {
-    /// Newly appended to `config.exclusions`. Caller must persist `Config`.
+    /// Appended to `config.exclusions`; the caller must persist `Config`.
     Excluded { root: String, relative_path: String },
-    /// Already present in `config.exclusions` — idempotent, not an error.
+    /// Already in `config.exclusions`; not an error.
     AlreadyExcluded { root: String, relative_path: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExcludeError {
-    /// `relative_path` doesn't exist under any tracked root (or, when
-    /// `--root` was given, doesn't exist under that specific root).
+    /// The path doesn't exist under any tracked root, or under the given
+    /// `--root`.
     NotFound(PathBuf),
-    /// `--root` was given but doesn't match any currently tracked root.
+    /// `--root` doesn't match any tracked root.
     RootNotFound(String),
-    /// The relative path exists under more than one tracked root and no
-    /// `--root` was given to disambiguate.
+    /// The path exists under more than one tracked root and no `--root` was
+    /// given.
     Ambiguous {
         relative_path: String,
         matches: Vec<Match>,
     },
-    /// The relative path resolves to a depth-1 directory — a whole series
-    /// folder — which `exclude` refuses to touch (CLAUDE.md: that's what
-    /// not tracking it, or a future `drop`, is for).
+    /// The path is a depth-1 directory, i.e. a whole series; untrack or
+    /// drop it instead.
     WholeSeries { relative_path: String },
-    /// `relative_path` was given as an absolute path. Rejected before it
-    /// ever reaches a `.join()` call — `PathBuf::join` silently discards
-    /// its base entirely when given an absolute argument, which would
-    /// otherwise resolve against the filesystem root instead of the
-    /// tracked root (CLAUDE.md's "must be validated as relative before
-    /// any join").
+    /// The path is absolute. Checked before any `join`, which would discard
+    /// the root and resolve against the filesystem root.
     NotRelative(PathBuf),
 }
 
@@ -85,12 +73,8 @@ impl fmt::Display for ExcludeError {
                 "path must be relative to a tracked root, not absolute: {}",
                 p.display()
             ),
-            // `exclude_command` in main.rs matches this variant directly and
-            // renders it via the shared `print_ambiguous` (same shape
-            // `target::TargetError::Ambiguous` uses) instead of printing
-            // this `Display` output — this text only remains as a total,
-            // reasonable fallback for any other caller (e.g. tests calling
-            // `.to_string()` directly). Don't "fix" only this copy.
+            // The CLI renders this variant via the shared `print_ambiguous`;
+            // this text is the fallback for other callers.
             ExcludeError::Ambiguous {
                 relative_path,
                 matches,
@@ -117,9 +101,8 @@ impl fmt::Display for ExcludeError {
     }
 }
 
-/// Resolves `relative_path` against tracked roots and, on success, records
-/// the exclusion in `config`. See module docs and CLAUDE.md's "Exclusion
-/// persistence and disambiguation" for the full decision table.
+/// Resolves `relative_path` against tracked roots and records the exclusion
+/// in `config`.
 pub fn exclude(
     config: &mut Config,
     relative_path: &Path,
@@ -134,9 +117,7 @@ fn exclude_with_home(
     root_arg: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<ExcludeOutcome, ExcludeError> {
-    // Validated before any `.join()` involving `relative_path` — see
-    // `ExcludeError::NotRelative`'s doc comment for why this has to come
-    // first, not just be "one more check somewhere in here".
+    // Must precede every `join` with `relative_path`.
     if relative_path.is_absolute() {
         return Err(ExcludeError::NotRelative(relative_path.to_path_buf()));
     }
@@ -159,10 +140,7 @@ fn exclude_with_home(
         }
     };
 
-    // Redundant with the lookup above in the unambiguous case, but kept as
-    // its own explicit, independently-testable check per CLAUDE.md's
-    // validate-now rule (matching `add`'s behavior) — and it's the only
-    // check exercised at all in the `--root`-given path.
+    // Only check on the `--root` path; redundant after `find_matches`.
     let expanded_root = expand_tilde(Path::new(&chosen_root), home);
     let resolved = expanded_root.join(relative_path);
     if !resolved.exists() {
@@ -177,13 +155,8 @@ fn exclude_with_home(
         });
     }
 
-    // Idempotency is checked against the normalized (tilde-expanded,
-    // canonicalized) path, not a raw string comparison on `path` — the
-    // same reused `roots::normalize` helper `add`'s own idempotency check
-    // uses (CLAUDE.md: "if these two checks ever diverge again, that's a
-    // bug, not an acceptable inconsistency"). This is what makes a
-    // trailing slash, a `..` that resolves to the same location, or a
-    // symlink alias all correctly collapse to the same comparison target.
+    // Compare normalized paths, as `add` does, so a trailing slash, `..` or
+    // symlink alias counts as the same exclusion.
     let new_normalized = normalize(&resolved, home);
     let already_excluded = config
         .exclusions
@@ -206,17 +179,13 @@ fn exclude_with_home(
     })
 }
 
-/// A depth-1 directory directly under its root is a whole series folder
-/// (CLAUDE.md §3: "Series identity = depth-1 directory under a tracked
-/// root") — `exclude` rejects removing one of those entirely, distinct
-/// from excluding a file or a deeper subdirectory within one.
+/// True for a depth-1 directory, which is a whole series.
 fn is_whole_series_exclusion(relative_path: &Path, resolved: &Path) -> bool {
     relative_path.components().count() == 1 && resolved.is_dir()
 }
 
-/// Every tracked root under which `relative_path` currently exists on
-/// disk. Follows symlinks (`Path::exists` uses stat semantics), consistent
-/// with CLAUDE.md's "Symlinks are followed everywhere".
+/// Every tracked root under which `relative_path` exists on disk, following
+/// symlinks.
 fn find_matches(config: &Config, relative_path: &Path, home: Option<&Path>) -> Vec<Match> {
     let mut matches = Vec::new();
     for root in &config.roots.paths {
@@ -232,11 +201,8 @@ fn find_matches(config: &Config, relative_path: &Path, home: Option<&Path>) -> V
     matches
 }
 
-/// Finds the tracked root (in its stored literal form) that `root_arg`
-/// refers to, using the same expand-then-canonicalize comparison `add`
-/// uses for its own idempotency check — so `--root ~/Anime` and
-/// `--root /home/user/Anime` are recognized as the same tracked root
-/// regardless of which form was originally passed to `add`.
+/// Finds the tracked root (as stored) that `root_arg` refers to, comparing
+/// normalized paths so `~/Anime` and `/home/user/Anime` match.
 fn find_tracked_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
     let target = normalize(root_arg, home);
     config
@@ -247,11 +213,8 @@ fn find_tracked_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> O
         .cloned()
 }
 
-/// Every currently-stored exclusion under `root` (matched by its literal
-/// stored form), expanded to an absolute-ish filesystem path — ready to
-/// hand to `series::ordered_episodes_excluding`. A path outside a given
-/// series' own subtree simply never matches anything during that series'
-/// walk, so this doesn't need to be pre-filtered per series.
+/// Every stored exclusion under `root`, expanded to a filesystem path for
+/// `series::ordered_episodes_excluding`.
 pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>) -> Vec<PathBuf> {
     config
         .exclusions
@@ -261,27 +224,11 @@ pub fn excluded_paths_for_root(config: &Config, root: &str, home: Option<&Path>)
         .collect()
 }
 
-/// Anitomy `Type` values that count as suggest-worthy for bare `tsuzuki
-/// exclude` — matched case-insensitively, since Anitomy preserves the
-/// filename's original casing in the parsed value (confirmed by direct
-/// testing: `"ova"` in a filename parses to `Type = "ova"`, not a
-/// normalized `"OVA"`).
+/// Anitomy `Type` values worth suggesting for exclusion, matched
+/// case-insensitively because Anitomy keeps the filename's casing.
 ///
-/// Every `Type` keyword in Anitomy's own table is marked ambiguous
-/// (requires bracket-enclosure, or specific surrounding context, to be
-/// recognized at all — see `vendor/anitomy/src/keyword.rs`), so "ambiguous
-/// per the keyword table" doesn't by itself distinguish any of these from
-/// each other. `"TV"` and `"SP"` are excluded here on different, more
-/// concrete grounds: `"TV"` denotes the ordinary/mainline broadcast
-/// category — the opposite of what an exclude-candidate should flag — and
-/// Anitomy's own keyword table carries an inline comment documenting a
-/// real `"SP"`-in-an-ordinary-title collision ("Yumeiro Patissiere SP
-/// Professional"). `"Gekijouban"` is added on top of the literal list
-/// given in this phase's task brief: it's a confirmed real `Type` value
-/// (verified by direct testing) carrying the exact same ambiguity
-/// classification as `"Movie"`, and is semantically its direct synonym
-/// (theatrical release) — there's no principled reason to suggest one and
-/// not the other.
+/// `"TV"` is left out (mainline broadcast) and so is `"SP"`, which collides
+/// with ordinary titles like "Yumeiro Patissiere SP Professional".
 const SUGGEST_WORTHY_TYPES: &[&str] = &[
     "OVA",
     "Special",
@@ -293,25 +240,18 @@ const SUGGEST_WORTHY_TYPES: &[&str] = &[
     "OAV",
 ];
 
-/// One Anitomy-suggested exclude candidate: a file under a tracked root
-/// whose parsed `Type` element looks like an OVA/Special/Movie/etc, not
-/// already excluded.
+/// A not-yet-excluded file whose filename parses as an OVA, special, movie
+/// or similar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
-    /// The root's own persisted literal form (e.g. `~/Anime`) — what the
-    /// suggested `exclude` command's `--root`-free form resolves against.
+    /// The root as stored (e.g. `~/Anime`).
     pub root: String,
     /// Relative to `root`, ready to hand straight to `exclude`.
     pub relative_path: String,
 }
 
-/// Scans every tracked root's series trees — respecting existing
-/// exclusions, so an already-excluded file is never suggested again — and
-/// returns every file whose filename Anitomy parses a suggest-worthy
-/// `Type` element from. Unreadable roots/series (e.g. a root that's
-/// currently unmounted) are silently skipped, consistent with `series.rs`'s
-/// own failure-tolerant walk — a bare `exclude` scan isn't the place to
-/// surface an I/O error for one bad root out of many.
+/// Returns every non-excluded file under the tracked roots whose filename
+/// parses a suggest-worthy `Type`. Unreadable roots and series are skipped.
 pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     let tracked_root_real_paths: Vec<_> = config
@@ -356,9 +296,8 @@ pub fn suggest_candidates(config: &Config, home: Option<&Path>) -> Vec<Candidate
     candidates
 }
 
-/// True if `path`'s filename (never the full path — see CLAUDE.md's
-/// bare-filename calling rule) parses at least one `Type` element whose
-/// value case-insensitively matches `SUGGEST_WORTHY_TYPES`.
+/// True if the filename (never the full path) parses a `Type` in
+/// `SUGGEST_WORTHY_TYPES`.
 fn is_suggest_worthy(path: &Path) -> bool {
     let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
         return false;
@@ -485,9 +424,7 @@ mod tests {
 
     #[test]
     fn excluding_a_lone_file_directly_under_root_is_not_rejected_as_a_whole_series() {
-        // A depth-1 *file* isn't a series (a series is always a
-        // directory) — only a depth-1 directory triggers the
-        // whole-series rejection.
+        // A depth-1 file isn't a series; only a directory is.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("loose-clip.mkv"));
@@ -676,9 +613,7 @@ mod tests {
 
     #[test]
     fn excluded_paths_for_root_is_empty_when_no_exclusions_match_that_root() {
-        // A root with zero exclusions of its own (while a *different*
-        // root does have some) must not panic and must not pick up
-        // entries that belong to that other root.
+        // A root without exclusions of its own must not pick up another root's.
         let mut config = Config::default();
         config.exclusions.push(Exclusion {
             root: "~/AltAnime".to_string(),
@@ -689,10 +624,7 @@ mod tests {
         assert!(paths.is_empty());
     }
 
-    // --- Gap-audit: overlapping/redundant exclusions (never deduped or
-    // merged across granularities — consistent with "never infer",
-    // CLAUDE.md §2: Tsuzuki doesn't decide two exclusions overlap, it only
-    // recognizes the *exact same* path being re-excluded as idempotent) ---
+    // --- overlapping exclusions are never merged ---
 
     #[test]
     fn excluding_a_file_already_covered_by_a_prior_directory_exclusion_is_accepted_as_a_separate_entry()
@@ -713,9 +645,7 @@ mod tests {
         )
         .unwrap();
 
-        // Not recognized as already-covered — a distinct, narrower path
-        // string is a distinct exclusion entry, not an error and not
-        // idempotent-with the broader one.
+        // A narrower path is a distinct exclusion, not idempotent with the broader one.
         assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
         assert_eq!(config.exclusions.len(), 2);
     }
@@ -741,9 +671,7 @@ mod tests {
 
         assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
         assert_eq!(config.exclusions.len(), 2);
-        // The now-redundant file-level entry is left in place, not
-        // cleaned up — nothing in `exclude` reasons about one exclusion
-        // shadowing another.
+        // The redundant file-level entry is left in place.
         assert!(
             config
                 .exclusions
@@ -758,7 +686,7 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: `--root` in the unambiguous case ---
+    // --- `--root` ---
 
     #[test]
     fn root_flag_works_when_only_one_tracked_root_exists_no_ambiguity_to_resolve() {
@@ -788,9 +716,7 @@ mod tests {
 
     #[test]
     fn root_flag_naming_a_tracked_root_that_does_not_contain_the_path_returns_not_found() {
-        // Distinct from `RootNotFound`: the root itself is valid and
-        // tracked, it just doesn't contain this particular relative path
-        // (it exists only under a different tracked root).
+        // The root is tracked but doesn't contain the path, unlike `RootNotFound`.
         let dir = tempdir().unwrap();
         let root_a = dir.path().join("Anime");
         let root_b = dir.path().join("AltAnime");
@@ -814,7 +740,7 @@ mod tests {
         assert!(config.exclusions.is_empty());
     }
 
-    // --- Gap-audit: symlink interaction ---
+    // --- symlinks ---
 
     #[cfg(unix)]
     #[test]
@@ -831,9 +757,7 @@ mod tests {
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
 
-        // The symlink resolves to a directory (stat semantics), so this
-        // must succeed exactly like excluding a real directory would —
-        // not be treated as a file, not silently rejected.
+        // A symlink to a directory is excluded like a real directory.
         let outcome =
             exclude_with_home(&mut config, Path::new("One Piece/Specials"), None, None).unwrap();
         assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
@@ -844,10 +768,7 @@ mod tests {
     fn excluding_a_symlinked_top_level_entry_is_still_rejected_as_a_whole_series() {
         use std::os::unix::fs::symlink;
 
-        // A depth-1 entry that's a symlink to a real directory elsewhere
-        // must still be recognized as a directory (and thus a whole
-        // series) by `is_whole_series_exclusion`'s `resolved.is_dir()`
-        // check, which follows symlinks.
+        // A depth-1 symlink to a directory is still a whole series.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let real_series = dir.path().join("real-storage").join("Monster");
@@ -867,10 +788,7 @@ mod tests {
         );
     }
 
-    // --- Correction pass: these two used to be `#[ignore]`d bug
-    // reproductions (gap-audit). Now fixed — un-ignored and asserting the
-    // correct behavior is the proof. See CLAUDE.md's "Exclusion
-    // persistence and disambiguation" for the fix reasoning. ---
+    // --- idempotency and absolute paths ---
 
     #[test]
     fn a_trailing_slash_variant_of_an_already_excluded_path_is_recognized_as_idempotent() {
@@ -914,9 +832,7 @@ mod tests {
             .paths
             .push(root_b.to_string_lossy().into_owned());
 
-        // "/etc" is used only because it reliably exists on any Linux box
-        // this test runs on — the point is that an absolute path must be
-        // rejected outright, never silently resolved against it.
+        // `/etc` exists on any Linux box; the absolute path must be rejected, not resolved.
         let err = exclude_with_home(&mut config, Path::new("/etc"), None, None).unwrap_err();
 
         assert_eq!(err, ExcludeError::NotRelative(PathBuf::from("/etc")));
@@ -925,9 +841,7 @@ mod tests {
 
     #[test]
     fn an_absolute_path_argument_is_rejected_even_with_root_given() {
-        // The guard runs before the `root_arg`/`find_matches` branch
-        // entirely, so this must be rejected the same way regardless of
-        // whether `--root` was also passed.
+        // Rejected the same way with or without `--root`.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         fs::create_dir_all(&root).unwrap();
@@ -940,7 +854,7 @@ mod tests {
         assert_eq!(err, ExcludeError::NotRelative(PathBuf::from("/etc")));
     }
 
-    // --- Phase 3: Anitomy-suggested candidates for bare `exclude` ---
+    // --- suggested candidates ---
 
     fn default_extensions() -> Vec<String> {
         vec!["mkv".to_string()]
@@ -1007,8 +921,7 @@ mod tests {
         config.roots.paths.push(root.to_string_lossy().into_owned());
         config.roots.video_extensions = default_extensions();
 
-        // Exclude the OVA's containing directory first, exactly like a
-        // user running the suggested `exclude` command would.
+        // Exclude the OVA's directory, as the suggested command would.
         exclude_with_home(&mut config, Path::new("One Piece/Specials"), None, None).unwrap();
 
         let candidates = suggest_candidates(&config, None);
@@ -1060,7 +973,7 @@ mod tests {
         );
     }
 
-    // --- Gap audit: candidate-suggestion completeness ---
+    // --- suggestion completeness ---
 
     #[test]
     fn a_suggest_worthy_file_several_directories_deep_is_still_found() {
@@ -1089,14 +1002,7 @@ mod tests {
 
     #[test]
     fn a_suggest_worthy_type_with_no_parseable_episode_number_is_still_suggested() {
-        // Candidate suggestion only cares about the `Type` element — it
-        // must not implicitly depend on an `Episode` element also being
-        // present. A pure OVA release with no number in its filename at
-        // all (confirmed by direct testing: this parses `Type = "OVA"`
-        // and no `Episode` element whatsoever) is exactly the case where
-        // episode-identity parsing (a separate, independent feature) would
-        // fall back to ordinal — that must have zero effect on whether
-        // this file gets suggested.
+        // A pure OVA filename with no `Episode` element is still suggested.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("One Piece").join("One Piece - OVA [1080p].mkv"));
@@ -1115,13 +1021,7 @@ mod tests {
 
     #[test]
     fn suggestion_matching_is_case_insensitive_on_the_type_value_itself() {
-        // The case-insensitivity claim documented on `SUGGEST_WORTHY_TYPES`
-        // was previously only exercised indirectly (via `is_suggest_worthy`
-        // unit-level reasoning) — this proves it end-to-end through
-        // `suggest_candidates`, using both a fully-lowercase and a
-        // mixed-case `Type` value, both confirmed by direct testing to be
-        // exactly what Anitomy hands back for these filenames (it
-        // preserves the filename's original casing verbatim).
+        // Lowercase and mixed-case `Type` values both match.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Show").join("[Group] Show - ova 1 [1080p].mkv"));
@@ -1138,14 +1038,7 @@ mod tests {
     #[test]
     fn a_video_file_whose_own_filename_has_no_type_keyword_is_not_suggested_even_inside_a_specials_folder()
      {
-        // Locks in the "no directory-name inference" design decision as
-        // an explicit regression test, not just an implicit consequence
-        // of "only ever pass the bare filename to Anitomy" (CLAUDE.md's
-        // bare-filename calling rule). A file sitting inside a
-        // `Specials/` folder whose own filename carries no OVA/Special/
-        // Movie keyword must NOT be suggested just because of where it
-        // lives — that would be exactly the folder-based content
-        // classification CLAUDE.md §2/§3 rules out everywhere else.
+        // A file in a `Specials/` folder is not suggested on folder name alone.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(
@@ -1169,13 +1062,7 @@ mod tests {
 
     #[test]
     fn tv_and_sp_type_values_are_never_suggested() {
-        // Direct negative-case coverage for CLAUDE.md's documented
-        // exclusion of "TV" and "SP" from the suggest-worthy list — up to
-        // now only the *positive* suggest-worthy values had any test
-        // coverage at all. Both filenames are confirmed by direct testing
-        // to parse `Type = "TV"` / `Type = "SP"` respectively (proving
-        // this isn't just "these never get recognized as Type in the
-        // first place" — they do, and are still correctly filtered out).
+        // `TV` and `SP` parse as `Type` but are not suggested.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Show").join("[Group] Show TV - 05 [1080p].mkv"));
@@ -1192,7 +1079,7 @@ mod tests {
         );
     }
 
-    // --- Gap audit: symlink interaction with candidate suggestion ---
+    // --- symlinks in suggestions ---
 
     #[cfg(unix)]
     #[test]
@@ -1221,12 +1108,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_file_inside_an_excluded_symlinked_directory_is_never_suggested() {
-        // Same ancestry-based, resolved-real-path exclusion check Phase 2
-        // fixed for `series.rs`'s ordering walk (CLAUDE.md's "Exclusion
-        // enforcement checks the resolved path") — `suggest_candidates`
-        // reuses `ordered_episodes_excluding` directly, so this proves
-        // that reuse actually carries the fix through, rather than
-        // assuming it does because the two features share code.
+        // Exclusion applies by resolved path, so symlinked files aren't suggested.
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -1249,21 +1131,11 @@ mod tests {
         );
     }
 
-    // --- Gap audit: vendor workspace-dependency soundness (item 5) ---
+    // --- vendor dependency ---
 
     #[test]
     fn the_tsuzuki_binary_crate_can_call_into_the_vendored_workspace_dependency() {
-        // Not testing Anitomy's parsing correctness (that's
-        // `tsuzuki-anitomy`'s own regression suite, `cargo test -p
-        // tsuzuki-anitomy`) — this is a deliberately named, minimal smoke
-        // test proving the *dependency edge itself* is sound: that code
-        // living in the `tsuzuki` crate can call `tsuzuki_anitomy::parse`
-        // and get real element data back, through the workspace path
-        // dependency the vendor/anitomy/Cargo.toml dev-dependency rename
-        // fix was needed to unblock. Every other test in this file and in
-        // `anitomy.rs` already exercises this same edge incidentally;
-        // this one exists so the guarantee is explicit and self-
-        // documenting rather than a side effect nobody named.
+        // Smoke test: `tsuzuki_anitomy::parse` is callable from this crate.
         let elements = tsuzuki_anitomy::parse("[Group] Show - 05 [1080p].mkv");
         assert!(
             elements

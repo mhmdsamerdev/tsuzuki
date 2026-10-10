@@ -1,14 +1,4 @@
-//! Real end-to-end integration test for `tsuzuki update`, against the
-//! compiled binary — same `env!("CARGO_BIN_EXE_tsuzuki")` shape as
-//! `tests/doctor_integration.rs` (CLAUDE.md's "Every phase needs at least
-//! one real-binary, real-XDG-path integration test").
-//!
-//! `update`'s only real-network test below never actually finds a newer
-//! release against this checked-out source (it's always at or ahead of
-//! whatever's published), so it never exercises the actual install spawn
-//! — there is no way to sandbox a real `curl -LsSf ... | sh` the way a
-//! temp `$HOME` sandboxes MAL's token file, so that path is deliberately
-//! left untested by any automated test, ignored or not.
+//! Real-binary tests for `tsuzuki update`; the install spawn (`curl ... | sh`) is untested.
 
 use std::path::Path;
 use std::process::Command;
@@ -29,8 +19,7 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
 
 #[test]
 fn update_help_describes_the_command() {
-    // clap short-circuits --help before any dispatch/network code runs —
-    // zero network, confirms the cli.rs wiring end to end.
+    // clap short-circuits --help before any dispatch or network code runs.
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 

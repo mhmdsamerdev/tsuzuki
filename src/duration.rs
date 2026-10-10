@@ -1,22 +1,13 @@
-//! Episode duration probing (CLAUDE.md's "Completion threshold needs
-//! episode duration").
+//! Episode duration probing.
 //!
-//! mpv's `watch_later` entries only ever store the resume position, never a
-//! file's total duration, so the completion threshold (§8:
-//! `completion_remaining_seconds`) needs Tsuzuki to read duration itself,
-//! from the video file's own container header. `symphonia` (pure Rust) does
-//! this for metadata/probe purposes only — this module never asks it to
-//! decode actual audio or video frames, only to read format headers.
+//! mpv's `watch_later` entries store only the resume position, so the
+//! completion threshold needs the duration read from the file's own container
+//! header. Symphonia (pure Rust) is used for header probing only, never for
+//! decoding.
 //!
-//! Dispatch is by content-probe, never by file extension: [`probe_duration`]
-//! never looks at `path`'s extension at all, only its bytes. Symphonia's own
-//! format auto-detection is tried first; if it can't identify the file, a
-//! small hand-written fallback reader for AVI's `avih` RIFF header is tried
-//! next — reached on probe failure, not gated on the `.avi` extension.
-//!
-//! No caller yet (Phase 5 wires this into the completion-threshold check via
-//! `mpv::classify`) — `#[allow(dead_code)]`, matching `series.rs`/
-//! `anitomy.rs`'s established not-yet-wired convention.
+//! Dispatch is by content, never by file extension. Symphonia's format
+//! auto-detection runs first; if it can't identify the file, a small AVI
+//! `avih` header reader is tried.
 
 use std::fs::File;
 use std::io::Read;
@@ -27,11 +18,8 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-/// The result of probing a video file's duration. Never collapses an
-/// unreadable duration to a bare `None` — the reason is preserved so a
-/// later phase (Phase 5's completion check, or `doctor`) can decide whether
-/// and how to surface it, per CLAUDE.md's "Unreadable duration is
-/// surfaced, never silently dropped."
+/// The result of probing a video file's duration. An unreadable duration keeps
+/// its reason so callers can surface it.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum DurationOutcome {
@@ -49,10 +37,8 @@ pub enum DurationError {
     Unreadable,
 }
 
-/// Determines `path`'s total duration in seconds. Tries Symphonia's own
-/// content-based format probing first; if that fails to identify or read
-/// the file, falls back to a hand-written AVI `avih` RIFF header reader.
-/// Neither attempt ever inspects `path`'s extension.
+/// Determines `path`'s total duration in seconds, trying Symphonia first and
+/// the AVI header reader second. Never inspects the extension.
 #[allow(dead_code)]
 pub fn probe_duration(path: &Path) -> DurationOutcome {
     if let Some(secs) = probe_with_symphonia(path) {
@@ -67,11 +53,9 @@ pub fn probe_duration(path: &Path) -> DurationOutcome {
     }
 }
 
-/// Hands `path` to Symphonia's own format auto-detection (no extension
-/// hint given at all — content is the only signal used) and reads the
-/// container's overall duration from `FormatReader::media_info()`. Returns
-/// `None` on any failure (unsupported/unrecognized format, no duration
-/// reported, I/O error) — the caller decides what to try next.
+/// Reads the container duration via Symphonia's format auto-detection, with
+/// no extension hint. Returns `None` if the format is unrecognized, reports no
+/// duration, or can't be read.
 fn probe_with_symphonia(path: &Path) -> Option<f64> {
     let file = File::open(path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -93,22 +77,17 @@ fn probe_with_symphonia(path: &Path) -> Option<f64> {
     Some(time.as_secs_f64())
 }
 
-/// The size of the leading window read from the file when searching for an
-/// AVI `avih` chunk. A well-formed AVI's `hdrl` LIST — which `avih` is
-/// always the first member of — sits near the very start of the file, so
-/// there's no need to read further than this to find it.
+/// Leading bytes searched for the `avih` chunk, which sits in the `hdrl` LIST
+/// near the start of a well-formed AVI.
 const AVI_SEARCH_WINDOW: usize = 4096;
 
-/// `AVIMAINHEADER`'s `dwTotalFrames` field offset within the `avih` chunk's
-/// data, in bytes: `dwMicroSecPerFrame`, `dwMaxBytesPerSec`,
-/// `dwPaddingGranularity`, `dwFlags` each precede it as one `u32` (4 bytes)
-/// apiece.
+/// Byte offset of `dwTotalFrames` in the `avih` chunk data, after four `u32`
+/// fields (`dwMicroSecPerFrame`, `dwMaxBytesPerSec`, `dwPaddingGranularity`,
+/// `dwFlags`).
 const AVIH_TOTAL_FRAMES_OFFSET: usize = 16;
 
-/// Hand-written reader for AVI's `avih` RIFF header — duration =
-/// total-frames × microseconds-per-frame. Only reached when Symphonia's own
-/// probe couldn't identify the file (never gated on a `.avi` extension).
-/// Reads only a small leading window of the file, never the whole thing.
+/// Reads an AVI `avih` header: duration = total frames × microseconds per
+/// frame. Reads only the leading window of the file.
 fn probe_avi_fallback(path: &Path) -> Option<f64> {
     let mut file = File::open(path).ok()?;
     let mut buf = vec![0u8; AVI_SEARCH_WINDOW];
@@ -120,8 +99,7 @@ fn probe_avi_fallback(path: &Path) -> Option<f64> {
     }
 
     let tag_pos = buf.windows(4).position(|w| w == b"avih")?;
-    // Skip the 4-byte "avih" tag itself and its 4-byte chunk-size field to
-    // reach the start of the chunk's data.
+    // Skip the "avih" tag and the 4-byte chunk size to reach the chunk data.
     let data_start = tag_pos + 8;
     if buf.len() < data_start + AVIH_TOTAL_FRAMES_OFFSET + 4 {
         return None;
@@ -144,10 +122,8 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    /// Builds a minimal-but-valid AVI byte layout: a `RIFF`/`AVI ` header
-    /// followed directly by a `LIST`/`hdrl` containing an `avih` chunk with
-    /// the given `dwMicroSecPerFrame`/`dwTotalFrames` values. Every other
-    /// `AVIMAINHEADER` field is zeroed — this reader never looks at them.
+    /// Builds a minimal AVI: a `RIFF`/`AVI ` header, then a `LIST`/`hdrl`
+    /// holding an `avih` chunk with the given values and all other fields zero.
     fn fake_avi(micro_sec_per_frame: u32, total_frames: u32) -> Vec<u8> {
         let mut avih_data = vec![0u8; 56];
         avih_data[0..4].copy_from_slice(&micro_sec_per_frame.to_le_bytes());
@@ -155,10 +131,10 @@ mod tests {
 
         let mut buf = Vec::new();
         buf.extend_from_slice(b"RIFF");
-        buf.extend_from_slice(&0u32.to_le_bytes()); // file size, unused by this reader
+        buf.extend_from_slice(&0u32.to_le_bytes()); // file size, unused
         buf.extend_from_slice(b"AVI ");
         buf.extend_from_slice(b"LIST");
-        buf.extend_from_slice(&0u32.to_le_bytes()); // list size, unused by this reader
+        buf.extend_from_slice(&0u32.to_le_bytes()); // list size, unused
         buf.extend_from_slice(b"hdrl");
         buf.extend_from_slice(b"avih");
         buf.extend_from_slice(&(avih_data.len() as u32).to_le_bytes());
@@ -213,12 +189,8 @@ mod tests {
 
     #[test]
     fn avi_fallback_does_not_false_positive_on_avih_bytes_without_a_riff_avi_header() {
-        // Gap-audit: the reverse of "AVI fallback is reached via probe
-        // failure, not extension dispatch" — proves the fallback isn't
-        // just naively searching for an "avih" substring anywhere in the
-        // file. Garbage bytes that happen to contain "avih" but never
-        // start with a real "RIFF"/"AVI " header must still be rejected
-        // at the header check, before the "avih" search even runs.
+        // Junk containing "avih" but no RIFF/AVI header is rejected at the
+        // header check, before the "avih" search.
         let mut buf = b"this is not a riff file but it does contain the substring ".to_vec();
         buf.extend_from_slice(b"avih");
         buf.extend_from_slice(b" somewhere in the middle of otherwise unrelated junk");
@@ -274,13 +246,8 @@ mod tests {
 
     #[test]
     fn probe_duration_is_reached_via_content_probe_not_the_avi_extension() {
-        // A real, Symphonia-parseable MKV file, saved with a `.avi`
-        // extension. Symphonia must still succeed on content alone — this
-        // is what proves `probe_duration` never dispatches by extension:
-        // if it did (a hardcoded ".avi" -> AVI-reader branch), this file
-        // would be handed to `probe_avi_fallback`, which would fail to
-        // find a RIFF/AVI header in real MKV bytes and this test would see
-        // `Unknown`, not `Known`.
+        // A real MKV saved as `.avi` must still probe as Known; extension
+        // dispatch would send it to the AVI reader and yield Unknown.
         let real_mkv_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/short.mkv"
@@ -315,11 +282,7 @@ mod tests {
         ));
     }
 
-    // --- Gap-audit: genuinely corrupt/non-video files, distinct from
-    // malformed watch_later *entries* (that's mpv.rs's job) — these prove
-    // `probe_duration` resolves cleanly to `Unknown` with no panic and no
-    // hang for a corrupt file sitting right under a tracked video
-    // extension. ---
+    // Corrupt or non-video files resolve to `Unknown` without panic or hang.
 
     #[test]
     fn duration_unknown_for_a_zero_byte_file_no_panic() {
@@ -330,12 +293,8 @@ mod tests {
 
     #[test]
     fn duration_unknown_for_a_plain_text_file_renamed_with_a_video_extension() {
-        // A non-video file sitting under a tracked, video-extension name
-        // (e.g. an .nfo mistakenly renamed .mkv, or a corrupt/truncated
-        // download) — `probe_duration` never looks at the extension at
-        // all, so this exercises exactly the same content-probe path a
-        // genuinely corrupt real video file would hit, without needing to
-        // fabricate byte-for-byte broken container data.
+        // Text content under a video extension, standing in for a corrupt
+        // download.
         let dir = tempfile::tempdir().unwrap();
         let fake_video = dir.path().join("Not Actually A Video.mkv");
         std::fs::write(

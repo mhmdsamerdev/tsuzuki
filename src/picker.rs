@@ -1,11 +1,8 @@
-//! The interactive resume/start picker (CLAUDE.md's "Series selection:
-//! interactive by default, explicit when scripted").
+//! Interactive resume/start picker.
 //!
-//! A real arrow-key selector when a TTY is available; in a non-TTY context
-//! (piped/scripted invocation), never hangs waiting for input — instead
-//! lists the choices with an index and reports that no action was taken, so
-//! the caller can exit non-zero (CLAUDE.md's "informed but did not complete
-//! the action" precedent).
+//! Arrow-key selector on a TTY. Without one it never blocks: it lists the
+//! choices with an index and reports that nothing was selected, so the
+//! caller can exit non-zero.
 
 use std::io::IsTerminal;
 
@@ -13,36 +10,23 @@ use crate::overview;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PickerOutcome<T> {
-    /// The user picked (or there was only one choice worth auto-selecting —
-    /// callers handle the true 0/1/many dispatch themselves; this type only
-    /// covers "prompted and got an answer" vs. "could not prompt").
+    /// The user picked an item.
     Selected(T),
-    /// No TTY was available — every choice was printed with its index and
-    /// nothing was selected or acted on.
+    /// No TTY: every choice was printed with its index and nothing was selected.
     Listed,
-    /// A TTY was available but the prompt was aborted (e.g. Ctrl-C) without
-    /// a selection.
+    /// The prompt was aborted (e.g. Ctrl-C) without a selection.
     Cancelled,
 }
 
-/// True if stdin is a real terminal — the one signal this module uses to
-/// decide interactive vs. listing mode. Kept as its own function (rather
-/// than inlined at call sites) so production code has exactly one place
-/// that makes this check, matching CLAUDE.md's "one call site" convention
-/// used elsewhere (e.g. `mpv.rs`'s OS-candidate dispatch).
+/// True if stdin is a terminal; decides interactive vs. listing mode.
 pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// Presents `items` for selection. When `is_tty` is true, calls `select`
-/// with the rendered labels and returns whichever index it picks (`None` =
-/// cancelled); otherwise prints each item (via `label`) with a 1-based
-/// index through `print_line` and returns `Listed` without ever blocking on
-/// input. Both `is_tty` and `select` are passed in rather than the real TTY
-/// check / `dialoguer` call being hardcoded — this is what makes the actual
-/// selection path (not just the non-TTY fallback) genuinely unit-testable:
-/// a test can inject a fake `select` and drive a fabricated choice all the
-/// way through to `PickerOutcome::Selected`, without a real terminal.
+/// Presents `items` for selection. With a TTY, passes the labels to `select`
+/// (`None` = cancelled). Otherwise prints each item with a 1-based index
+/// through `print_line` and returns `Listed`.
+/// `is_tty` and `select` are injected so tests can drive both paths.
 ///
 /// When `items` span more than one `route` (callers pass them route-contiguous),
 /// the non-TTY listing gets a route header per group and the TTY labels get an
@@ -86,10 +70,7 @@ pub fn pick<T: Clone>(
     }
 }
 
-/// The real, production `select` implementation: a `dialoguer` arrow-key
-/// selector. This is the *only* place `dialoguer` is touched in this
-/// module — `pick` itself never references it — so production code passes
-/// this function pointer while tests pass a fake closure instead.
+/// The production `select`: a `dialoguer` arrow-key selector.
 pub fn dialoguer_select(prompt: &str, labels: &[String]) -> Option<usize> {
     dialoguer::Select::new()
         .with_prompt(prompt)
@@ -143,12 +124,7 @@ mod tests {
 
     #[test]
     fn tty_selection_path_drives_a_fabricated_choice_through_to_selected() {
-        // Sweep finding: the TTY branch used to call `dialoguer::Select`
-        // directly, with no way to exercise it in a test at all. `select`
-        // being injected is what makes this possible: a fake selector
-        // stands in for a real terminal, proving `pick`'s own selection
-        // logic (labels built correctly, chosen index mapped back to the
-        // right item) independent of `dialoguer` or a real TTY.
+        // A fake selector stands in for a terminal.
         let items = vec!["Monster".to_string(), "One Piece".to_string()];
 
         let outcome = pick(
@@ -210,9 +186,7 @@ mod tests {
 
     #[test]
     fn stdin_is_tty_does_not_panic_in_a_test_harness() {
-        // Test harnesses typically run with stdin redirected — this just
-        // proves the check itself is safe to call, not any particular
-        // result.
+        // Stdin is usually redirected under a harness; only the call is checked.
         let _ = stdin_is_tty();
     }
 

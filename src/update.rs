@@ -1,18 +1,7 @@
-//! `tsuzuki update`'s version check and installer invocation (CLAUDE.md's
-//! "doctor's version line is local-only; update alone touches the
-//! network" decision).
+//! `tsuzuki update`: version check against GitHub and installer invocation.
 //!
-//! The only network call this module makes is the GitHub "latest release"
-//! lookup, and only when [`check_for_update`] is called directly — never
-//! implicitly, never from `doctor` or any startup path. This is the sole
-//! place in the crate other than `mal.rs` that ever touches the network;
-//! both go through `crate::http`'s shared `Agent`/result-mapping plumbing
-//! so the native-tls gotcha documented there is only solved once.
-//!
-//! [`current_version`] also backs `doctor`'s version banner (`main.rs`) —
-//! the two must report the exact same compiled-in value by definition, so
-//! it's shared rather than each site calling `env!("CARGO_PKG_VERSION")`
-//! independently.
+//! The GitHub "latest release" lookup is the only network call here, made
+//! only from [`check_for_update`]; `doctor` and startup never reach it.
 
 use std::fmt;
 use std::process::ExitStatus;
@@ -21,26 +10,19 @@ use serde::Deserialize;
 
 use crate::http::{HttpResponse, build_agent, map_ureq_result};
 
-/// The compiled-in crate version (`Cargo.toml`'s `version` field). Never
-/// itself makes a network call — safe to call from `doctor` as well as
-/// `update`.
+/// The compiled-in crate version. Shared with `doctor`'s version banner.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// `owner`/`name` from `Cargo.toml`'s `repository` field, parsed once.
+/// Owner and name from `Cargo.toml`'s `repository` field.
 struct GithubRepo {
     owner: String,
     name: String,
 }
 
-/// Parses a `github.com` repository URL into its owner/name, tolerating an
-/// optional trailing slash and an optional `.git` suffix. Returns `None`
-/// for anything that isn't exactly `https://github.com/<owner>/<name>`
-/// (a different host, too few/many path segments) — this project's own
-/// `Cargo.toml` is the only input this ever sees, but a wrong parse should
-/// fail loudly (via `github_repo`'s `.expect()`) rather than silently
-/// resolve to a nonsense API URL.
+/// Parses `https://github.com/<owner>/<name>`, allowing a trailing slash or
+/// `.git`. Returns `None` for any other host or path shape.
 fn parse_repository_url(url: &str) -> Option<GithubRepo> {
     let rest = url.strip_prefix("https://github.com/")?;
     let rest = rest.strip_suffix('/').unwrap_or(rest);
@@ -57,11 +39,8 @@ fn parse_repository_url(url: &str) -> Option<GithubRepo> {
     })
 }
 
-/// Parses `env!("CARGO_PKG_REPOSITORY")` — a compile-time constant this
-/// project's own `Cargo.toml` controls, not user/runtime input, so a
-/// parse failure here means `Cargo.toml` itself is wrong and should fail
-/// the build's test suite (see the `github_repo_matches_the_real_cargo_toml`
-/// unit test), not degrade gracefully at runtime.
+/// Parses the compile-time repository URL. A failure means `Cargo.toml` is
+/// wrong; `github_repo_matches_the_real_cargo_toml` catches it in tests.
 fn github_repo() -> GithubRepo {
     parse_repository_url(env!("CARGO_PKG_REPOSITORY")).expect(
         "Cargo.toml's repository field must be a github.com URL of the form https://github.com/<owner>/<repo>",
@@ -84,8 +63,7 @@ impl GithubRepo {
     }
 }
 
-/// GitHub's REST API requires a `User-Agent` header on every request (an
-/// anonymous one can be rejected with 403) — unlike MAL, which needs none.
+/// GitHub's API can reject requests without a `User-Agent` header.
 fn user_agent() -> String {
     format!(
         "tsuzuki/{} (+https://github.com/{}/{})",
@@ -95,12 +73,8 @@ fn user_agent() -> String {
     )
 }
 
-/// Strips an optional leading `v`, then requires exactly three dot-
-/// separated `u32` segments. A tag like `v1.2.3-beta` or `v1.2` returns
-/// `None` — an honest "can't compare" result, never a coerced guess.
-/// This project's own release process (`docs/development.md` §8) only
-/// ever produces plain `vX.Y.Z` tags, so this hand-rolled comparison is a
-/// safe, dependency-free stand-in for a full semver parser.
+/// Parses `vX.Y.Z` (the `v` is optional). Anything else, such as
+/// `v1.2.3-beta` or `v1.2`, returns `None` rather than a guess.
 fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
     let rest = tag.strip_prefix('v').unwrap_or(tag);
     let mut parts = rest.split('.');
@@ -113,26 +87,23 @@ fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// The result of comparing the running binary's version against GitHub's
-/// latest published release tag.
+/// The running version compared against the latest release tag.
 #[derive(Debug, PartialEq, Eq)]
 pub enum UpdateStatus {
     UpToDate,
     UpdateAvailable {
         latest: String,
     },
-    /// Running ahead of the latest published release — a source build, or
-    /// a tag pushed whose release build hasn't finished yet. Neither a
-    /// pass nor a problem, so `render` gives it no ✓/⚠/✗ symbol.
+    /// Newer than the latest release (a source build or an unfinished
+    /// release); neither ok nor a problem, so it gets no symbol.
     Ahead {
         latest: String,
     },
 }
 
 impl UpdateStatus {
-    /// `UpdateAvailable`'s message states the transition, not a command to
-    /// run — `update_command` installs immediately after printing this,
-    /// with no separate flag to wait for.
+    /// `UpdateAvailable` states the transition because the install follows
+    /// immediately.
     pub fn render(&self, current: &str) -> String {
         match self {
             UpdateStatus::UpToDate => format!("✓ up to date — v{current}"),
@@ -146,20 +117,11 @@ impl UpdateStatus {
     }
 }
 
-/// Same three-variant shape as `mal.rs`'s `TokenExchangeError` and
-/// `sync.rs`'s `SyncApiError`: `Transport` never reached GitHub at all,
-/// `Rejected` is a real non-2xx response, `Parse` is a 2xx body that
-/// wasn't the JSON shape expected.
+/// `Transport`: GitHub was never reached. `Rejected`: non-2xx response.
+/// `Parse`: 2xx body of an unexpected shape.
 ///
-/// **`Rejected` carries only the numeric status, not the response body.**
-/// Unlike `mal.rs`/`sync.rs` (whose `Rejected` embeds the raw body — a
-/// deliberate MAL OAuth-troubleshooting call, since that's a rare,
-/// interactive action where the exact `invalid_grant`-style JSON is real
-/// debug signal), a `tsuzuki update` failure is a plain command error a
-/// user may see routinely. GitHub's own error bodies (e.g. a 404 when this
-/// repository has no releases yet) are JSON blobs that would otherwise get
-/// dumped verbatim into `error: ...` output — exactly the noise this
-/// command's `Display` is meant to stay clean of.
+/// `Rejected` keeps only the status; GitHub's JSON error bodies would just
+/// add noise to the error line.
 #[derive(Debug)]
 pub enum UpdateCheckError {
     Transport(String),
@@ -182,10 +144,8 @@ struct ReleaseJson {
     tag_name: String,
 }
 
-/// The only real-network function in this module — GET GitHub's "latest
-/// release" endpoint via `crate::http`'s shared agent. Note GitHub's
-/// `/releases/latest` already excludes draft and pre-release releases
-/// server-side, so no client-side filtering is needed here.
+/// GETs the latest-release endpoint, which already excludes drafts and
+/// pre-releases.
 fn fetch_latest_release(repo: &GithubRepo) -> Result<HttpResponse, UpdateCheckError> {
     let agent = build_agent().map_err(|e| UpdateCheckError::Transport(e.to_string()))?;
     let req = agent
@@ -194,10 +154,7 @@ fn fetch_latest_release(repo: &GithubRepo) -> Result<HttpResponse, UpdateCheckEr
     map_ureq_result(req.call()).map_err(|e| UpdateCheckError::Transport(e.to_string()))
 }
 
-/// Extracts the release tag from a response, folding the status check in
-/// here (rather than a separate helper) so the `Rejected` path is
-/// unit-testable from a fabricated `HttpResponse`, matching `mal.rs`'s
-/// `parse_token_response(resp: &HttpResponse, ...)` shape.
+/// Checks the status, then extracts the release tag.
 fn parse_latest_release_tag(resp: &HttpResponse) -> Result<String, UpdateCheckError> {
     if !(200..300).contains(&resp.status) {
         return Err(UpdateCheckError::Rejected(resp.status));
@@ -225,10 +182,7 @@ fn compare_to_latest_tag(
     })
 }
 
-/// Checks GitHub for the latest published release and compares it against
-/// [`current_version`]. The only function in this crate other than
-/// `mal.rs`'s token/list calls that ever makes a real network request —
-/// only reached because `tsuzuki update` was explicitly invoked.
+/// Compares [`current_version`] against GitHub's latest release.
 pub fn check_for_update() -> Result<UpdateStatus, UpdateCheckError> {
     let repo = github_repo();
     let resp = fetch_latest_release(&repo)?;
@@ -238,18 +192,12 @@ pub fn check_for_update() -> Result<UpdateStatus, UpdateCheckError> {
     compare_to_latest_tag(current, &tag)
 }
 
-/// The exact one-liner `README.md` documents manually — pure, so it can be
-/// checked by string equality without ever spawning a shell. Not printed
-/// to the user by `main.rs` (the status line already names the version
-/// being installed); kept only for `run_install` and its own test.
+/// The install one-liner documented in `README.md`.
 fn install_command_line() -> String {
     format!("curl -LsSf {} | sh", github_repo().install_script_url())
 }
 
-/// Two variants, not `launch.rs`'s three-way `NotResolvable`/`Spawn`
-/// split — there's no "resolution" step here (`sh` is assumed present, the
-/// same floor `config_edit_command`'s `$EDITOR` spawn already assumes), so
-/// a missing `sh` is just an ordinary `Spawn(io::Error)`.
+/// `sh` is assumed present, so a missing one is just `Spawn`.
 #[derive(Debug)]
 pub enum InstallError {
     Spawn(std::io::Error),
@@ -267,12 +215,8 @@ impl fmt::Display for InstallError {
     }
 }
 
-/// Spawns `sh -c "<install_command_line()>"`, blocking until it exits with
-/// real stdio inherited (mirrors `config_edit_command`'s `$EDITOR`
-/// pattern, not `launch.rs`'s fire-and-forget mpv spawn — the user needs
-/// to see curl/the installer's own output and get a real exit code back).
-/// Prints nothing itself; `main.rs` owns all `println!`/`eprintln!`
-/// narration, matching every other domain module's boundary in this crate.
+/// Runs the installer through `sh`, blocking with inherited stdio so the
+/// user sees its output. Prints nothing itself.
 pub fn run_install() -> Result<(), InstallError> {
     let status = std::process::Command::new("sh")
         .arg("-c")

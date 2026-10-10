@@ -1,62 +1,6 @@
-//! The single shared "resolve `state.toml` against current mpv reality"
-//! step every state-touching command runs first (CLAUDE.md's "Every
-//! state-touching command reconciles against current mpv reality first").
-//!
-//! Implements, together, per CLAUDE.md's "Cursor movement" decision:
-//! - the noise rule: a sub-`resume_seconds` reading is invisible to
-//!   `state.toml` — it never creates a record and never overwrites an
-//!   existing real one.
-//! - two real, equally-weighted completion signals for the series' CURRENT
-//!   tracked episode: a missing `watch_later` entry (mpv's own
-//!   played-to-true-EOF signal), and a present entry `mpv::classify()`
-//!   scores `Completed` (a real position within `completion_remaining_seconds`
-//!   of the file's own duration). Neither is a landing candidate on its
-//!   own file — both instead trigger `apply_completion_advance`, which
-//!   resolves the cursor to the *next* episode (position 0), chaining past
-//!   any further episode that's ALSO already completed, or transitions the
-//!   record to `Dropped` once the walk runs out of episodes (CLAUDE.md's
-//!   "When the CURRENT tracked episode itself completes" rule). An earlier
-//!   version of this scan discarded a `Completed` reading outright instead
-//!   (a real, shipped bug: the record's position permanently stopped
-//!   updating the moment it crossed into the completion window); a later,
-//!   still-incomplete fix recorded that reading's own raw position in
-//!   place instead of actually advancing the cursor — CLAUDE.md's rule
-//!   above is what settled the actual intended behavior.
-//! - single-run chaining, two distinct forms: (1) ordinary — one call
-//!   resolves however many steps happened since the last check when a real
-//!   `Resume` position already exists further ahead (the forward scan
-//!   always finds the *furthest* real `Resume` entry, unaffected by
-//!   completion handling); (2) completion-driven — `apply_completion_advance`
-//!   itself walks forward through any number of *consecutively* completed
-//!   episodes in one call before landing or auto-`Drop`ping.
-//! - a series whose folder no longer resolves on disk (moved/deleted) is
-//!   left inert, never crashed on or auto-removed.
-//! - opening any episode of a `paused`/`dropped` series directly in mpv is
-//!   picked up here too, the same forward-scan mechanism, and flips status
-//!   back to `in_progress` — this is the *only* mechanism by which a
-//!   `dropped` series ever returns to `in_progress` (CLAUDE.md: no
-//!   `dropped -> paused` transition exists).
-//!
-//! Phase 6 adds a second, independent candidate source: the optional mpv
-//! companion script's log (`script_log.rs`, CLAUDE.md's "Optional mpv
-//! companion script"). Candidate discovery is now a per-path union of both
-//! sources ([`merge_candidates`]) — a script-log entry with no corresponding
-//! `watch_later` entry at all (a clean binge, watched straight through with
-//! the script installed) still surfaces as real activity, closing the
-//! "clean binge leaves no trace" blind spot documented above for anyone who
-//! has the script installed. When a path has entries from both sources, the
-//! fresher one wins by the underlying entry file's own mtime (an exact tie
-//! goes to the script entry, deterministically). Everything downstream of
-//! source selection — the forward scan, `any_completed_found`, cursor
-//! advancement, and auto-`Dropped`-on-no-next-episode — is unchanged; it
-//! only now classifies through [`classify_candidate`], which fans out to
-//! `mpv::classify()` unchanged for a `watch_later`-sourced reading, treats a
-//! script-sourced `reason == "eof"` reading as an unconditional `Completed`
-//! (a direct signal — no proximity-to-duration guessing needed), and treats
-//! any other script-sourced reason with a real position exactly like a
-//! `watch_later` reading (through the same `mpv::classify()` call), just fed
-//! the script's own duration when it has one instead of a Symphonia/AVI
-//! probe.
+//! Resolves `state.toml` against current mpv reality; every state-touching
+//! command runs it first. Readings below `resume_seconds` are noise, and
+//! absence of an entry is never evidence.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -77,8 +21,7 @@ pub struct ReconcileOutcome {
     pub warning: Option<ScanWarning>,
 }
 
-/// One merged, per-path candidate reading, tagged with which source it came
-/// from — the winner of [`merge_candidates`]'s per-path source selection.
+/// One per-path reading, tagged with the source that won [`merge_candidates`].
 #[derive(Debug, Clone, PartialEq)]
 enum Candidate {
     WatchLater(WatchLaterEntry),
@@ -100,14 +43,9 @@ impl Candidate {
         }
     }
 
-    /// Whether this candidate is real enough to mark its (root, series) pair
-    /// as needing reconciliation at all (the top-level `pairs` collection in
-    /// [`reconcile`], extending the existing sub-`resume_seconds`-is-noise
-    /// rule to script-sourced entries). A script `eof` reading is always
-    /// real activity regardless of its raw position — it's a direct
-    /// completion signal, not a position to threshold-check; any other
-    /// script reason still needs a real (>= `resume_seconds`) position, same
-    /// as a `watch_later` reading.
+    /// Whether this reading is above the noise floor. A script `eof` always
+    /// counts, whatever its position; any other reading needs a position of
+    /// at least `resume_seconds`.
     fn is_real_activity(&self, resume_seconds: u64) -> bool {
         match self {
             Candidate::WatchLater(e) => e.position_seconds >= resume_seconds as f64,
@@ -117,13 +55,9 @@ impl Candidate {
     }
 }
 
-/// Merges `watch_later` and script-log entries into one per-path candidate
-/// map, keyed by each path's normalized (canonicalized-with-fallback) form.
-/// When a path has an entry from only one source, that entry wins
-/// unconditionally. When both are present, the underlying entry files'
-/// mtimes decide: strictly fresher wins, and an exact tie goes to the script
-/// entry (CLAUDE.md's decision, deterministic like the OS-candidate merge's
-/// own exact-mtime-tie precedent).
+/// Merges `watch_later` and script-log entries into one candidate per
+/// normalized path. The fresher entry file wins; an exact mtime tie goes to
+/// the script entry.
 fn merge_candidates(
     watch_later: Vec<WatchLaterEntry>,
     script_log: Vec<ScriptLogEntry>,
@@ -147,12 +81,9 @@ fn merge_candidates(
     map
 }
 
-/// Classifies one merged candidate's reading against `file`'s thresholds,
-/// per source (CLAUDE.md's per-source classification rules). Returns `None`
-/// when the candidate carries no usable signal for this file — a
-/// below-`resume_seconds` reading (either source), or a script entry with a
-/// non-`eof` reason and no position at all — which the forward scan then
-/// treats exactly like "no entry for this file."
+/// Classifies one candidate against the thresholds. Returns `None` for a
+/// below-`resume_seconds` reading or a non-`eof` script entry with no
+/// position; the scan treats that like no entry.
 fn classify_candidate(
     candidate: &Candidate,
     file: &Path,
@@ -194,24 +125,15 @@ fn classify_candidate(
     }
 }
 
-/// Runs the full reconcile pass over every series that either already has a
-/// `state.toml` record or has fresh real activity (from either candidate
-/// source) under a tracked root. Mutates `state` in place; the caller
-/// decides whether/how to persist it (comparing before/after, same pattern
-/// every other module in this codebase uses of leaving I/O to the caller).
+/// Reconciles every series that has a record or real activity under a tracked
+/// root. Mutates `state` in place; persisting it is the caller's job.
 pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
     let script_log_dirs = script_log::mpv_log_dirs(home);
     reconcile_with_script_log_dirs(config, state, home, &script_log_dirs)
 }
 
-/// The actual reconcile implementation, parameterized on the script-log
-/// directories to scan — split out from [`reconcile`] purely for
-/// testability: unlike `watch_later_dir`, the script-log directory is
-/// deliberately not a `config.toml` field (CLAUDE.md: "No new config field
-/// for the script-log directory"), so tests can't redirect it the way
-/// `mpv.rs`'s tests redirect `watch_later_dir`. This function stays
-/// private; `reconcile` is the only public entry point, always resolving
-/// the real candidate directories via [`script_log::mpv_log_dirs`].
+/// [`reconcile`] with the script-log directories injected, since they have no
+/// config field for tests to override.
 fn reconcile_with_script_log_dirs(
     config: &Config,
     state: &mut State,
@@ -258,30 +180,9 @@ fn reconcile_with_script_log_dirs(
     }
 }
 
-/// Auto-`Pause`s every `in_progress` record whose `updated_at` has gone
-/// idle for at least `auto_pause_days` days (CLAUDE.md's "`auto_pause_days`
-/// defaults to 0 (never auto-pause)", design.md §8's "nonzero opts an idle
-/// series into auto-`paused`, never auto-`dropped`"). `auto_pause_days ==
-/// 0` (the default) disables this pass entirely — a nonzero value is the
-/// only thing that ever turns it on, never guessed or defaulted-on.
-///
-/// A deliberately separate, final pass over `state.series` rather than
-/// folded into `reconcile_one_series`'s own branching: idleness is a
-/// property of `updated_at` alone, independent of whether this particular
-/// invocation found any fresh activity for that series (most idle series
-/// have none — that's the whole point) or took any of
-/// `reconcile_one_series`'s many early-return paths. Running it *after*
-/// that loop is what makes it safe: a series that this same reconcile pass
-/// just genuinely touched already has `updated_at == now`, so it can never
-/// immediately idle-pause itself in the same call.
-///
-/// Only `InProgress -> Paused` — `Paused` and `Dropped` records are already
-/// excluded from the automatic resume picker, so there is nothing for
-/// idleness to act on there (and `Dropped` has no `Paused` transition at
-/// all, CLAUDE.md's allowed-transitions table). Bumping `updated_at` to
-/// `now` on the transition matches `pause_drop::pause`'s own precedent:
-/// this is a genuine, persisted status change, the same category of event
-/// that already moves it everywhere else in this codebase.
+/// Auto-pauses every `in_progress` record idle for at least `auto_pause_days`
+/// days. 0 disables it. Runs after the per-series pass, so a series touched in
+/// this same call (`updated_at == now`) can't idle-pause itself.
 fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
     if auto_pause_days == 0 {
         return;
@@ -297,27 +198,13 @@ fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
     }
 }
 
-/// Finds which tracked root `source_path` falls under, and the series name
-/// (the root's immediate child directory) it belongs to. When more than one
-/// tracked root matches (composable roots, e.g. `~/Anime` and
-/// `~/Anime/Rewatches`), the most specific (longest/most-nested) match
-/// wins — otherwise a file under `Anime/Rewatches/Monster` would misresolve
-/// to series name `"Rewatches"` under the `Anime` root instead of series
-/// `"Monster"` under the `Anime/Rewatches` root.
+/// Finds the tracked root `source_path` falls under and its series name (the
+/// root's depth-1 directory). With nested roots (`~/Anime` and
+/// `~/Anime/Rewatches`) the most specific match wins.
 ///
-/// Each root is checked two ways: a cheap whole-root prefix match first
-/// (the common case), falling back to canonicalizing that root's own
-/// depth-1 children individually only when the whole-root match fails. The
-/// fallback matters for a real, confirmed reason, not a hypothetical: a
-/// depth-1 series folder can itself be a symlink pointing entirely outside
-/// the root's own real location (CLAUDE.md's "Symlinks are followed
-/// everywhere... a symlinked series folder behaves exactly like a real
-/// one"). `normalize` canonicalizes the *whole* entry path, which resolves
-/// straight through such a symlink to wherever it actually points — a
-/// plain root-vs-source prefix comparison can never match that, so the
-/// series would never reconcile at all. Confirmed directly: a real tracked
-/// root with one symlinked series folder never reconciled, while an
-/// ordinary sibling series under the same root worked correctly.
+/// Tries a whole-root prefix match first. If that fails, matches against each
+/// depth-1 child's own normalized path, because `normalize` resolves a
+/// symlinked series folder to a location outside the root.
 fn classify_root_and_series(
     config: &Config,
     source_path: &Path,
@@ -339,9 +226,7 @@ fn classify_root_and_series(
                 let name = first.as_os_str().to_string_lossy().into_owned();
                 consider_match(&mut best, real_root, root, &name);
             }
-            // Whole-root prefix match succeeded (even if it didn't yield a
-            // usable child component) — the fallback below exists only for
-            // when this comparison fails entirely, so it's skipped here.
+            // The child fallback below only applies when the prefix match fails.
             continue;
         }
 
@@ -359,10 +244,7 @@ fn classify_root_and_series(
     best.map(|(_, root, name)| (root, name))
 }
 
-/// Updates `best` to `(matched_prefix, root, name)` when `matched_prefix`
-/// is more specific (longer) than whatever `best` already holds — the
-/// shared "most specific match wins" tie-break used by both the whole-root
-/// and per-child-fallback matches in `classify_root_and_series`.
+/// Replaces `best` when `matched_prefix` is longer than its current prefix.
 fn consider_match(
     best: &mut Option<(PathBuf, String, String)>,
     matched_prefix: PathBuf,
@@ -380,9 +262,7 @@ fn consider_match(
     }
 }
 
-/// Reconciles one (root, series name) pair. See module docs for the full
-/// algorithm; this is the per-series worker `reconcile` calls for every
-/// candidate pair discovered.
+/// Reconciles one (root, series name) pair.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_one_series(
     config: &Config,
@@ -396,9 +276,7 @@ fn reconcile_one_series(
 ) {
     let expanded_root = expand_tilde(Path::new(root), home);
     let series_path = expanded_root.join(name);
-    // A moved/deleted series folder is indistinguishable from a brand-new
-    // one (CLAUDE.md §3) — either way, if it doesn't resolve as a directory
-    // right now, this record (if any) is left completely untouched.
+    // A moved or deleted folder leaves its record untouched.
     if !series_path.is_dir() {
         return;
     }
@@ -422,9 +300,7 @@ fn reconcile_one_series(
         Some(i) => {
             let record = &state.series[i];
             if matches!(record.status, Status::Dropped | Status::Completed) {
-                // Drop (or a finished series) resets progress; any episode picking it back up
-                // (including episode 1) must count as new real evidence —
-                // see CLAUDE.md's "Paused/dropped -> in_progress" note.
+                // Any episode, including the first, counts as new activity.
                 0
             } else {
                 let target = expanded_root.join(&record.current_relative_path);
@@ -434,11 +310,8 @@ fn reconcile_one_series(
                     .position(|p| normalize(p, home) == real_target)
                 {
                     Some(idx) => idx,
-                    // The record's own file isn't in the current ordering
-                    // (excluded since, or individually removed while the
-                    // rest of the series remains) — degrade gracefully by
-                    // skipping this series' reconciliation this run, rather
-                    // than guessing where "forward" starts from.
+                    // The tracked file is gone or excluded; skip rather than
+                    // guess where "forward" starts.
                     None => return,
                 }
             }
@@ -446,39 +319,14 @@ fn reconcile_one_series(
         None => 0,
     };
 
-    // Forward scan from `start_index`: for each ordered file, a real
-    // (>= resume_seconds) watch_later entry is classified via
-    // `mpv::classify()` (probing duration only for entries that already
-    // have a real position, per CLAUDE.md — never for noise). Only `Resume`
-    // is a landing candidate here — `Completed` never lands an episode on
-    // its own raw position; per CLAUDE.md's "When the CURRENT tracked
-    // episode itself completes" rule, a confirmed-complete episode instead
-    // advances the cursor to the *next* episode (or auto-`Drop`s if there
-    // is none), handled below once the scan finds nothing real anywhere.
-    // `best` is still unconditionally overwritten as the scan moves
-    // forward, so a later real `Resume` always wins over an earlier one —
-    // this is what makes ordinary multi-step binge chaining (a real
-    // position already exists further ahead) resolve in one pass,
-    // unaffected by the completion-advance logic below.
+    // Forward scan from `start_index`. Only `Resume` is a landing candidate,
+    // and a later one overwrites an earlier one. `Completed` is handled below
+    // when no `Resume` exists.
     //
-    // `any_completed_found` tracks whether a `Completed` classification
-    // was observed *anywhere* in this scan (at `start_index` or later) —
-    // deliberately not just at `start_index`. Absence of the current
-    // episode's own entry is never, by itself, evidence of anything: mpv's
-    // own `--resume-playback` (on by default) deletes a file's bookmark
-    // the instant it's loaded, regardless of who launched mpv or what
-    // happens afterward, so "no entry" is produced identically by a
-    // genuine completion and by an ordinary abandon-mid-file-via-skip —
-    // these are provably indistinguishable from watch_later state alone.
-    // Treating absence as positive proof (an earlier version of this scan
-    // did, via the stored record's own old position as a "baseline") was a
-    // real, shipped bug: skipping to a later episode and watching under
-    // `resume_seconds` of it silently discarded real progress on the
-    // episode being left and could even auto-`Drop` the whole series. A
-    // `Completed` classification, by contrast, is a positive reading
-    // captured from a real, still-existing entry — unaffected by the
-    // deletion-on-load problem — so it remains a valid, sufficient signal
-    // on its own, wherever in the scan it's found.
+    // `any_completed_found` covers the whole range, not just `start_index`.
+    // A missing entry proves nothing: mpv deletes a bookmark on load, so
+    // completing a file and abandoning it look the same. A `Completed`
+    // reading comes from a real entry, so it is enough on its own.
     let mut best: Option<(usize, f64)> = None;
     let mut any_completed_found = false;
     for (idx, file) in ordered.iter().enumerate().skip(start_index) {
@@ -503,32 +351,12 @@ fn reconcile_one_series(
     }
 
     let Some((found_index, position)) = best else {
-        // Nothing real (Resume) exists anywhere from `start_index` on. If
-        // a `Completed` reading was found anywhere in that same range,
-        // resolve the cursor one or more steps further instead of
-        // freezing (CLAUDE.md's "When the CURRENT tracked episode itself
-        // completes" rule). Absence alone (no `Completed` reading
-        // anywhere) is deliberately never sufficient — see the scan loop's
-        // own comment above.
+        // No `Resume` from `start_index` on. A `Completed` reading anywhere in
+        // that range advances the cursor; without one, nothing changes.
         //
-        // A never-tracked series (`existing_index` is `None`) gets this
-        // exact same treatment, not just a frozen "never started" — a
-        // brand-new series watched straight through for the very first
-        // time (a script `eof` reading, or an ordinary near-the-end
-        // `Completed` position, with nothing else ever observed) is real
-        // activity and must not be silently discarded just because no
-        // record existed yet to advance. This is the same index-0-baseline
-        // precedent `Dropped`/never-started already share for the ordinary
-        // `Resume` forward-scan (CLAUDE.md's "Forward-scan is strictly
-        // forward"), extended to completion-advance: a placeholder record
-        // is created at `start_index` (always episode 0 here) purely as a
-        // landing spot for `apply_completion_advance` to resolve — every
-        // field on it is overwritten by that call before this function
-        // returns, since `any_completed_found` guarantees at least one
-        // step of real advancement happens. `Dropped`/`Completed` stay excluded,
-        // as before: they're deliberate dead ends only a genuine `Resume`
-        // reactivates (CLAUDE.md: no `dropped -> paused` transition), not
-        // something a stray `Completed` reading should auto-undo.
+        // A never-tracked series gets a placeholder record at the first
+        // episode for `apply_completion_advance` to overwrite. Dropped and
+        // Completed records stay put: only a `Resume` reactivates them.
         if !any_completed_found {
             return;
         }
@@ -616,25 +444,12 @@ fn reconcile_one_series(
     }
 }
 
-/// Called only once `reconcile_one_series` has established that
-/// `state.series[i]`'s own currently-tracked episode is confirmed complete
-/// and nothing real (`Resume`) exists anywhere in the series from there on.
-/// Resolves the cursor as many steps further as the evidence actually
-/// supports, in one pass — CLAUDE.md's "When the CURRENT tracked episode
-/// itself completes" rule, including its own single-run-chaining case (the
-/// newly-advanced-to episode having *already* separately completed too,
-/// e.g. a binge that quit near the end of more than one episode in a row):
-/// walks forward past every consecutive episode that also currently has a
-/// real `Completed` reading, landing at position 0 of the first episode
-/// found with no such evidence (a genuinely blank, never-yet-touched
-/// episode) — or transitioning the record to `Completed` if the walk runs
-/// out of episodes entirely, i.e. the completed episode(s) were the actual
-/// end of the series. That exit never mutates the stored
-/// `current_relative_path`/`position_seconds`; only a landing on a real
-/// episode does. `episode_number` is the one exception: it always lands on
-/// the true final episode's own identity on this exit path too, regardless
-/// of how many already-completed episodes the walk chained through to get
-/// there.
+/// Advances the cursor of `state.series[i]` once its tracked episode is
+/// confirmed complete and no `Resume` exists ahead. Skips every consecutive
+/// episode that also reads `Completed` and lands at position 0 of the first
+/// one that doesn't. If the walk runs out of episodes, the record becomes
+/// `Completed`: the path and position stay as they were, but `episode_number`
+/// is set to the final episode's.
 #[allow(clippy::too_many_arguments)]
 fn apply_completion_advance(
     state: &mut State,
@@ -672,12 +487,7 @@ fn apply_completion_advance(
                 ),
                 Some(PlaybackAction::Completed)
             ),
-            // No entry at all — not completion evidence for this episode,
-            // so the walk stops here rather than treating absence as a
-            // signal. (`classify_candidate` itself already collapses a
-            // below-threshold/no-position reading to `None`, so a present
-            // but non-completing candidate falls through to `false` here
-            // too, via the outer `matches!` on `Some(Completed)`.)
+            // No entry is not completion evidence, so the walk stops.
             None => false,
         };
 
@@ -695,7 +505,7 @@ fn apply_completion_advance(
             record.updated_at = now_unix();
             return;
         }
-        // Still completed — keep advancing past it without landing.
+        // Completed too; keep walking.
     }
 }
 
@@ -722,9 +532,7 @@ mod tests {
     }
 
     /// Writes an mpv-style `watch_later` entry file for `source` at
-    /// `position_seconds`, inside `watch_later_dir`, named distinctly from
-    /// any other entry written in the same test (mpv itself names these by
-    /// MD5 hash; the name doesn't matter to the reader, only its contents).
+    /// `position_seconds`, under a name distinct from other entries in the test.
     fn write_entry(watch_later_dir: &Path, entry_name: &str, source: &Path, position_seconds: f64) {
         fs::create_dir_all(watch_later_dir).unwrap();
         fs::write(
@@ -734,16 +542,13 @@ mod tests {
         .unwrap();
     }
 
-    /// Sets an override-based single watch_later directory in `config`, so
-    /// tests don't depend on real OS-default candidate paths / a real HOME.
+    /// Points `config` at a single `watch_later` directory.
     fn with_watch_later_override(config: &mut Config, dir: &Path) {
         config.mpv.watch_later_dir = dir.to_string_lossy().into_owned();
     }
 
-    /// Writes a `tsuzuki.lua`-style script-log entry file for `source`
-    /// inside `log_dir`, named distinctly from any other entry written in
-    /// the same test (mpv itself names these by an 8-hex-char djb2 hash;
-    /// the name doesn't matter to the reader, only its contents).
+    /// Writes a `tsuzuki.lua`-style script-log entry file for `source` in
+    /// `log_dir`, under a name distinct from other entries in the test.
     fn write_script_entry(
         log_dir: &Path,
         entry_name: &str,
@@ -778,7 +583,7 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
 
         let watch_later = dir.path().join("watch_later");
-        // 45s is below the default 120s resume_seconds threshold — noise.
+        // 45s is below the default 120s `resume_seconds`.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
         let mut config = default_config(&root);
@@ -820,8 +625,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        // mpv's own watch_later file now says 45s — a brief accidental
-        // reopen — which would clobber the real 900s if propagated blindly.
+        // A brief reopen leaves a 45s entry that must not overwrite the real 900s.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
@@ -836,8 +640,7 @@ mod tests {
 
     #[test]
     fn reconcile_with_no_entries_and_no_record_creates_no_record() {
-        // No existing record and no entry anywhere in the series — absence
-        // alone must not fabricate a record.
+        // Absence alone must not create a record.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -856,10 +659,8 @@ mod tests {
 
     #[test]
     fn single_run_chaining_resolves_a_multi_step_binge_in_one_call() {
-        // Episode 1 was completed (its bookmark is gone — mpv deleted it on
-        // clean EOF) and the user is already real minutes into episode 3,
-        // all discovered in one reconcile() call starting from a record
-        // still pointing at episode 1.
+        // ep01 has no entry (completed) and ep03 has a real position; one call
+        // resolves from a record still on ep01.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -870,7 +671,7 @@ mod tests {
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // No entry for ep01 (completed, absent) or ep02 (never opened).
+        // No entry for ep01 or ep02.
         write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 300.0);
 
         let mut state = State {
@@ -902,8 +703,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         fs::create_dir_all(&root).unwrap();
-        // "Monster" is never created on disk at all — simulates a
-        // moved/deleted series folder.
+        // "Monster" is never created on disk, like a moved or deleted folder.
 
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
@@ -958,9 +758,7 @@ mod tests {
 
     #[test]
     fn reconcile_own_write_is_stable_across_a_second_call_with_nothing_new_on_disk() {
-        // Reconcile stores exactly the real values it found, so the next call
-        // must see no difference. `updated_at` is pinned to 1 between calls
-        // (a real timestamp would not differ within the same second).
+        // `updated_at` is pinned to 1 so any rewrite shows up as a change.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -983,17 +781,8 @@ mod tests {
 
     #[test]
     fn a_dropped_series_with_an_unchanged_bookmark_stays_dropped_across_reconcile_calls() {
-        // Regression test for a real bug caught during Phase 5's dogfood
-        // pass: `drop` used to zero `position_seconds` while leaving
-        // `current_relative_path` unchanged. The very next reconcile then
-        // compared its freshest real observation (the *same*, untouched
-        // watch_later entry from before the drop) against that artificially
-        // zeroed baseline, saw a "difference", and silently flipped the
-        // series back to `in_progress` — undoing the drop with no user
-        // action at all. `drop_series` no longer mutates the stored
-        // position/path; this locks in that a genuinely unchanged bookmark
-        // must never reactivate a dropped series, across any number of
-        // reconcile calls, not just the first one.
+        // An unchanged bookmark must never reactivate a dropped series, however
+        // many times reconcile runs.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("One Piece");
@@ -1020,7 +809,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        // Two reconcile calls in a row, mpv's own file never touched again.
+        // Two reconciles with the mpv file untouched.
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
 
@@ -1040,7 +829,7 @@ mod tests {
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // Opens episode 1 directly (not even the last-watched one before drop).
+        // Opens episode 1 directly.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State {
@@ -1077,7 +866,7 @@ mod tests {
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // Opens episode 1 directly (not even the last-watched one before finishing).
+        // Opens episode 1 directly.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State {
@@ -1105,11 +894,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_bookmark_never_flips_a_paused_series_back_to_in_progress() {
-        // Pausing doesn't touch mpv's own watch_later file — its entry for
-        // the paused episode still sits there completely unchanged. Every
-        // command reconciles before acting, so if presence-alone were
-        // enough to reactivate, `pause` would be immediately undone by the
-        // very next command. Only a *change* may flip status.
+        // The paused episode's entry is unchanged; only a change may reactivate.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1144,16 +929,8 @@ mod tests {
 
     #[test]
     fn a_paused_series_reactivates_when_a_new_real_bookmark_appears_on_a_later_episode() {
-        // Gap-audit required finding #2: CLAUDE.md's "forward-scan is
-        // strictly forward" note documents that a Paused record must NOT
-        // reactivate from an EARLIER real bookmark. This is the other
-        // direction, which is a genuinely different case and must not be
-        // blocked the same way: the user opens a LATER episode directly,
-        // bypassing tsuzuki entirely, while the series sits paused at
-        // episode 1. That's forward motion from the paused baseline and
-        // must correctly flip the record back to in_progress at the new,
-        // later position — nothing about `Paused` status should suppress
-        // forward movement, only backward movement is meant to be blocked.
+        // Opening a later episode directly moves a paused series forward and
+        // reactivates it.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1199,10 +976,8 @@ mod tests {
 
     #[test]
     fn a_duration_based_completed_reading_is_treated_like_absence_and_scanning_continues() {
-        // Real fixture: ~5.0s duration. With resume_seconds=1 and
-        // completion_remaining_seconds=2, quitting at 4.0s (1.0s remaining)
-        // classifies as Completed, not Resume — must be treated exactly
-        // like an absent bookmark: scanning continues past it.
+        // ~5.0s fixture, `resume_seconds=1`, `completion_remaining_seconds=2`:
+        // quitting at 4.0s classifies as Completed, so the scan continues past it.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1220,9 +995,9 @@ mod tests {
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
 
-        // ep01: 4.0s into a ~5.0s file -> Completed (treated like absence).
+        // ep01: 4.0s of ~5.0s -> Completed.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        // ep02: 1.5s into a ~5.0s file -> Resume (a real landing candidate).
+        // ep02: 1.5s of ~5.0s -> Resume.
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 1.5);
 
         let mut state = State::default();
@@ -1239,16 +1014,8 @@ mod tests {
     #[test]
     fn a_completed_reading_on_the_last_episode_marks_completed_instead_of_freezing_or_updating_in_place()
      {
-        // Supersedes an earlier version of this test from the completion-
-        // freeze fix, which expected a `Completed` reading on the current
-        // file to just update that file's own stored position and stay
-        // `InProgress`. CLAUDE.md's later "When the CURRENT tracked episode
-        // itself completes" rule refines that: recording the fact alone
-        // isn't the full behavior — a confirmed-complete episode must
-        // resolve the cursor one step further. Here the series has only
-        // one episode, so once it's confirmed complete there is no next
-        // episode to advance to, and the correct outcome is `Dropped`, not
-        // a same-file position update.
+        // With one episode, completing it has no next episode, so the series
+        // becomes Completed.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1267,19 +1034,14 @@ mod tests {
 
         let mut state = State::default();
 
-        // Call 1: 1.5s into a ~5.0s file -> 3.5s remaining -> Resume.
-        // Ordinary update, establishes the real baseline this episode
-        // needs before absence/Completed can ever mean anything.
+        // Call 1: 1.5s of ~5.0s -> Resume.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 1.5);
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.status, Status::InProgress);
 
-        // Call 2: quit again, further in -> 4.0s -> 1.0s remaining ->
-        // Completed. This is the actual last (only) episode in the series,
-        // so the record must become Completed, not freeze and not just update its
-        // own position in place.
+        // Call 2: 4.0s of ~5.0s -> Completed on the only episode.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
@@ -1288,29 +1050,19 @@ mod tests {
             Status::Completed,
             "completing the series' actual last episode must mark it Completed"
         );
-        // Like `drop`, completion never zeroes the stored position (same
-        // reconcile-diffing reason):
-        // the stored position is left exactly as it was, not zeroed and
-        // not updated to the Completed reading's own value.
+        // The stored position stays as it was.
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
-        // Sync reads the finale reconcile produced as fully watched.
+        // Sync reads the finale as fully watched.
         assert_eq!(crate::sync::local_effective_episode(record), 1);
 
-        // `overview.rs`'s display must show "Rewatch?" for this series
-        // now, never "Resume" — the same word a manual `drop` produces.
+        // Overview shows "Rewatch?", not "Resume".
         assert_eq!(
             crate::overview::start_display_word(Some(record.status)),
             "Rewatch?"
         );
 
-        // Call 3: nothing changed on disk (mpv's own entry for ep01 is
-        // still sitting there unchanged) — must stay stable, no error, no
-        // further change. Completed records use the same separate,
-        // already-tested reconcile path as Dropped (start_index = 0,
-        // whole-series scan for genuinely new activity) — this confirms
-        // the finale transition doesn't leave anything that path would
-        // misinterpret.
+        // Call 3: nothing changed on disk, so nothing changes.
         reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Completed);
@@ -1319,20 +1071,8 @@ mod tests {
 
     #[test]
     fn absence_alone_never_advances_or_mutates_the_record() {
-        // Regression test for a real, reported data-loss bug: mpv's own
-        // `--resume-playback` (on by default) deletes a file's watch_later
-        // bookmark the instant it's loaded, regardless of who launched mpv
-        // or what happens afterward — so "no entry for ep01" is produced
-        // identically by a genuine completion and by simply reopening
-        // ep01 and then abandoning it (e.g. skipping to ep02 mid-file via
-        // mpv's own `playlist-next`, which never rewrites ep01's entry).
-        // These are provably indistinguishable from watch_later state
-        // alone, so absence must never, by itself, justify a mutation —
-        // ep01's real stored position must survive completely untouched.
-        // Nothing on ep02 either (the reported scenario's "watched under
-        // resume_seconds" and "watched nothing at all" cases behave
-        // identically here, since both fail to produce a `Resume` or
-        // `Completed` reading).
+        // Absence alone never justifies a mutation: mpv deletes a bookmark on
+        // load, so ep01's stored position must survive.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1343,8 +1083,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
 
-        // No entry for ep01 (deleted by mpv on load — not proof of
-        // completion) and nothing at all for ep02.
+        // No entry for ep01 and nothing for ep02.
         let mut state = State {
             series: vec![SeriesRecord {
                 root: root.to_string_lossy().into_owned(),
@@ -1370,14 +1109,8 @@ mod tests {
 
     #[test]
     fn a_sub_threshold_reading_on_the_next_episode_does_not_corroborate_the_current_ones_absence() {
-        // The exact reported scenario: resuming ep01 at a real position,
-        // skipping ahead to ep02 via mpv's `playlist-next` mid-file (which
-        // never rewrites ep01's entry), then quitting after under
-        // `resume_seconds` of ep02. ep01's entry is gone (deletion-on-load,
-        // not completion) and ep02's own reading is real but noise-level —
-        // neither is a `Resume` or `Completed` signal, so the record must
-        // stay exactly on ep01 at its last real position, not jump to ep02
-        // at position 0.
+        // ep01's entry is gone and ep02 has only a sub-threshold reading, so the
+        // record stays on ep01 at its last real position.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1388,8 +1121,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
 
-        // No entry for ep01. ep02: 60s watched, below the 120s default
-        // resume_seconds threshold.
+        // ep02: 60s, below the 120s default `resume_seconds`.
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 60.0);
 
         let mut state = State {
@@ -1417,13 +1149,7 @@ mod tests {
 
     #[test]
     fn current_episode_completes_and_next_episode_already_has_its_own_real_resume_bookmark() {
-        // The "binge" half of scope item 3/4: when the next episode
-        // already has a genuine `Resume`-classified position of its own,
-        // the ordinary forward-scan (unchanged by this feature) must still
-        // find it directly — `apply_completion_advance` should never even
-        // run, since `best` is already set by the normal scan before it's
-        // consulted. Confirms the new auto-advance path doesn't shadow or
-        // interfere with the existing binge-chaining mechanism.
+        // A real `Resume` ahead is found by the scan; completion advance never runs.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1433,8 +1159,7 @@ mod tests {
         let mut config = default_config(&root);
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // No entry for ep01 (absence, completes it) — a real bookmark
-        // already sitting on ep02 from the same binge session.
+        // No entry for ep01; a real bookmark on ep02.
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 700.0);
 
         let mut state = State {
@@ -1464,12 +1189,8 @@ mod tests {
 
     #[test]
     fn current_episode_completes_then_next_also_completes_then_a_third_blank_episode_in_one_call() {
-        // Scope item 3's explicit multi-step case: the current episode
-        // completes (absence), the newly-advanced-to episode has ALSO
-        // already separately completed (a real `Completed` reading of its
-        // own — a binge that quit near the end of more than one episode in
-        // a row), and only the episode after THAT is genuinely blank. All
-        // of this must resolve in a single reconcile() call.
+        // ep01 has no entry, ep02 is Completed and ep03 is blank, so one call lands
+        // on ep03.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1487,8 +1208,8 @@ mod tests {
         config.thresholds.completion_remaining_seconds = 2;
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
-        // ep01: no entry -> absence. ep02: 4.0s into ~5.0s -> Completed.
-        // ep03: no entry -> genuinely blank.
+        // ep01: no entry. ep02: 4.0s of ~5.0s -> Completed.
+        // ep03: no entry.
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 4.0);
 
         let mut state = State {
@@ -1518,16 +1239,8 @@ mod tests {
 
     #[test]
     fn single_run_chains_through_both_completion_signals_and_an_ordinary_resume() {
-        // Gap-audit required finding #3: absence and duration-based
-        // Completed have each only ever been exercised independently (one
-        // signal, nothing after it). Real usage can chain both in the same
-        // sitting: ep01 completes cleanly (mpv writes no entry at all —
-        // absence), ep02 is quit during the credits (a real position within
-        // completion_remaining_seconds of a known duration — Completed),
-        // and the user is already genuinely partway into ep03 (an ordinary
-        // real Resume position). All three must resolve in a single
-        // reconcile() call, landing on ep03 — not stopping at ep02 just
-        // because it was the first entry actually present.
+        // ep01 has no entry, ep02 is Completed and ep03 has a real position, so one
+        // call lands on ep03.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1536,10 +1249,9 @@ mod tests {
             "/tests/fixtures/short.mkv"
         ));
         fs::create_dir_all(&series_path).unwrap();
-        // ep01 has no watch_later entry at all (absence) — no real content
-        // needed, duration is never probed for a file with no entry.
+        // ep01 has no entry, so no content is needed.
         touch(&series_path.join("ep01.mkv"));
-        // ep02/ep03 need a real, probeable duration (~5.0s each).
+        // ep02 and ep03 need a probeable ~5.0s duration.
         fs::copy(&fixture, series_path.join("ep02.mkv")).unwrap();
         fs::copy(&fixture, series_path.join("ep03.mkv")).unwrap();
 
@@ -1549,10 +1261,10 @@ mod tests {
         let watch_later = dir.path().join("watch_later");
         with_watch_later_override(&mut config, &watch_later);
 
-        // ep01: no entry at all -> absence.
-        // ep02: 4.0s into ~5.0s -> 1.0s remaining -> Completed.
+        // ep01: no entry.
+        // ep02: 4.0s of ~5.0s -> Completed.
         write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 4.0);
-        // ep03: 1.5s into ~5.0s -> 3.5s remaining -> ordinary Resume.
+        // ep03: 1.5s of ~5.0s -> Resume.
         write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 1.5);
 
         let mut state = State {
@@ -1615,19 +1327,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_series_folder_reconciles_correctly() {
-        // Regression test for a real, reported bug, reproducing the exact
-        // reported shape: a tracked root whose series folder is a symlink
-        // pointing entirely outside the root's own real location (a
-        // completely normal, expected library layout — CLAUDE.md's
-        // "Symlinks are followed everywhere... a symlinked series folder
-        // behaves exactly like a real one"). `classify_root_and_series`
-        // used to canonicalize the *whole* watch_later entry path,
-        // resolving straight through the symlink to a location that no
-        // longer shared any prefix with the root's own canonical form —
-        // silently dropping every real bookmark for that series,
-        // permanently, on every single invocation. Confirmed directly
-        // against a real (non-symlinked) sibling series continuing to
-        // work throughout.
+        // A symlinked series folder pointing outside the root must still
+        // reconcile.
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -1640,9 +1341,7 @@ mod tests {
         touch(&release_dir.join("Dungeon Meshi - S01E01.mkv"));
         symlink(&real_storage, root.join("Dungeon Meshi")).unwrap();
 
-        // An ordinary, non-symlinked sibling series under the same root —
-        // must keep working throughout, isolating this as specifically a
-        // symlink-resolution bug, not a wholesale regression.
+        // A plain sibling series keeps working.
         touch(&root.join("Shokei Shoujo").join("ep01.mkv"));
 
         let mut config = default_config(&root);
@@ -1691,7 +1390,6 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let mut config = default_config(&root);
-        // A configured override that doesn't exist on disk.
         config.mpv.watch_later_dir = dir
             .path()
             .join("does-not-exist")
@@ -1707,19 +1405,12 @@ mod tests {
         ));
     }
 
-    // --- Phase 6: script-log candidate source ---
-    //
-    // `classify_candidate`/`merge_candidates` are exercised directly first
-    // (mirroring `mpv.rs`'s own precedent of testing `merge_freshest_wins`
-    // below the `scan_*` layer) before the full end-to-end `reconcile()`
-    // behavior tests.
+    // --- script-log candidate source ---
 
     #[test]
     fn classify_candidate_script_eof_is_completed_regardless_of_position_or_duration() {
-        // Decision 3's central claim: an `eof` reading never goes through
-        // the completion_remaining_seconds proximity check at all — not
-        // even when the raw position/duration values would clearly say
-        // otherwise (here: barely any time watched, duration unknown).
+        // An `eof` reading skips the proximity check, even with barely any time
+        // watched and no duration.
         let candidate = Candidate::ScriptLog(ScriptLogEntry {
             source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
             duration: None,
@@ -1772,12 +1463,8 @@ mod tests {
 
     #[test]
     fn classify_candidate_script_non_eof_uses_its_own_duration_not_a_probe() {
-        // duration=1000, position=900 -> remaining=100, under the 180s
-        // completion threshold -> Completed. The file path given doesn't
-        // exist on disk at all, proving the script's own `duration` field
-        // was used directly rather than falling through to
-        // `duration::probe_duration`, which would fail (Unknown) on a
-        // nonexistent file and force a `Resume` classification instead.
+        // 1000s duration, 900s position -> 100s remaining -> Completed. The file
+        // doesn't exist, so the script's own duration must have been used.
         let candidate = Candidate::ScriptLog(ScriptLogEntry {
             source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
             duration: Some(1000.0),
@@ -1906,25 +1593,12 @@ mod tests {
         }
     }
 
-    // --- End-to-end `reconcile()` behavior, both candidate sources ---
+    // --- end-to-end `reconcile()`, both candidate sources ---
 
     #[test]
     fn a_never_tracked_single_episode_series_completed_via_script_eof_marks_completed() {
-        // Regression test for a real gap found by dogfooding the actual
-        // binary (not caught by any prior fabricated-entry test): a
-        // brand-new series with NO existing `state.toml` record, whose
-        // only observed activity is a `Completed` classification (here,
-        // via a script `eof` reading — but the same gap applied to an
-        // ordinary duration-proximity `Completed` reading too, since
-        // neither ever reached `apply_completion_advance` without an
-        // existing record to advance). Before the fix, this silently
-        // produced NO record at all — `list` kept showing "never started"
-        // forever even though the user watched the entire thing. This is
-        // the single most obvious case Phase 6's "closes the clean-binge
-        // blind spot" claim is about (a series' very first viewing, with
-        // the script installed, finished in one sitting) — the fix must
-        // hold for it, not just for a series that already had a baseline
-        // record.
+        // A brand-new series whose only activity is a `Completed` reading still
+        // gets a record.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -1966,11 +1640,8 @@ mod tests {
 
     #[test]
     fn a_never_tracked_series_completed_on_a_non_last_episode_lands_on_the_next_one() {
-        // Same gap, non-last-episode variant: episode 1 completes (script
-        // eof) with no prior record and there IS a next episode — must
-        // land `InProgress` at episode 2, position 0 (the same forward-
-        // looking default a brand-new series' ordinary `start` already
-        // uses), not silently produce nothing.
+        // ep01 completes with no prior record and a next episode exists: lands on
+        // ep02 at position 0.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2008,9 +1679,7 @@ mod tests {
 
     #[test]
     fn a_never_tracked_series_completed_via_an_ordinary_watch_later_reading_also_gets_a_record() {
-        // Confirms the fix isn't script-source-specific: the same gap
-        // applied identically to a plain duration-proximity `Completed`
-        // watch_later reading on a brand-new series with no prior record.
+        // Same for a plain `watch_later` `Completed` reading.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2025,7 +1694,7 @@ mod tests {
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
         let watch_later = dir.path().join("watch_later");
-        // 4.0s into a ~5.0s file -> 1.0s remaining -> Completed.
+        // 4.0s of ~5.0s -> Completed.
         write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
         with_watch_later_override(&mut config, &watch_later);
 
@@ -2040,11 +1709,7 @@ mod tests {
 
     #[test]
     fn a_genuinely_dropped_record_is_not_reactivated_by_a_fresh_completed_reading() {
-        // The one case that must NOT change: `Dropped` stays a deliberate
-        // dead end reachable only by a genuine `Resume` (opening an
-        // episode directly), never by a `Completed` reading — the fix
-        // above must not accidentally start treating Dropped like
-        // never-tracked for this purpose.
+        // `Completed` readings never reactivate a dropped series; only a `Resume` does.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2055,8 +1720,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // A freshly-appearing eof reading on ep01, the record's own
-        // dropped-at position.
+        // A fresh `eof` on ep01.
         write_script_entry(
             &script_log_dir,
             "entry1",
@@ -2099,11 +1763,7 @@ mod tests {
 
     #[test]
     fn a_genuinely_completed_record_is_not_reactivated_by_a_fresh_completed_reading() {
-        // The one case that must NOT change: `Dropped` stays a deliberate
-        // dead end reachable only by a genuine `Resume` (opening an
-        // episode directly), never by a `Completed` reading — the fix
-        // above must not accidentally start treating Dropped like
-        // never-tracked for this purpose.
+        // `Completed` readings never reactivate a dropped series; only a `Resume` does.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2114,8 +1774,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // A freshly-appearing eof reading on ep01, the record's own
-        // dropped-at position.
+        // A fresh `eof` on ep01.
         write_script_entry(
             &script_log_dir,
             "entry1",
@@ -2158,16 +1817,8 @@ mod tests {
 
     #[test]
     fn script_only_eof_on_the_last_episode_marks_completed_flagship() {
-        // The flagship test: a script-log-only `eof` reading, with zero
-        // watch_later trace at all (mpv's own resume-playback deleted the
-        // bookmark on load, exactly as it always does — CLAUDE.md's
-        // documented blind spot), on a series' actual LAST episode. Before
-        // Phase 6, this scenario was permanently unrecoverable: absence
-        // alone is never proof of anything, so the record would freeze at
-        // its old position forever with no way to ever confirm completion.
-        // With the script installed, the direct `eof` signal now closes
-        // that gap completely — completion fires exactly as it would have
-        // for an ordinary duration-proximity `Completed` reading.
+        // A script-log-only `eof` on the last episode completes the series with no
+        // `watch_later` trace.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2215,8 +1866,7 @@ mod tests {
             Status::Completed,
             "a script-only eof reading on the series' last episode must mark it Completed"
         );
-        // Per the pause/drop-never-zeroes-position rule (CLAUDE.md),
-        // extended to completion: the stored position/path are untouched.
+        // The stored position and path are untouched.
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(record.position_seconds, 900.0);
     }
@@ -2224,16 +1874,8 @@ mod tests {
     #[test]
     fn a_multi_hop_completion_chain_lands_episode_number_on_the_true_final_episode_before_completing()
      {
-        // Regression test for a real, reported bug: when the completion-chain
-        // walk in `apply_completion_advance` runs through more than one
-        // already-completed episode before running out of series (the
-        // `cursor + 1 >= ordered.len()` exit branch), it correctly transitions
-        // to `Dropped` but used to leave `episode_number` frozen at whatever
-        // the record held before this call started, even though `cursor`
-        // itself had genuinely advanced several steps further by the time it
-        // exited. Mirrors a real reported shape: a record sitting on episode 2
-        // of a 5-episode series, with episodes 2 through 5 all independently
-        // completed (script `eof`).
+        // A walk chaining through several completed episodes to the end must set
+        // `episode_number` to the final episode's.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
@@ -2247,7 +1889,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // ep02 through ep05 all independently classify Completed (script eof).
+        // ep02 through ep05 all classify Completed (script `eof`).
         for (file_name, entry_name) in [
             ("ep02.mkv", "entry-ep02"),
             ("ep03.mkv", "entry-ep03"),
@@ -2299,8 +1941,7 @@ mod tests {
              starting cursor's episode (2), regardless of how many episodes were chained \
              through"
         );
-        // current_relative_path/position_seconds stay exactly what they were
-        // before this call — only episode_number is corrected.
+        // Path and position are unchanged; only `episode_number` moves.
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(record.position_seconds, 1200.0);
     }
@@ -2318,8 +1959,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // ep01: script-only eof, zero watch_later trace. ep02/ep03: nothing
-        // at all from either source (genuinely blank).
+        // ep01: script-only `eof`. ep02 and ep03: nothing from either source.
         write_script_entry(
             &script_log_dir,
             "entry-ep01",
@@ -2402,7 +2042,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // 45s is below the default 120s resume_seconds threshold.
+        // 45s is below the default 120s `resume_seconds`.
         write_script_entry(
             &script_log_dir,
             "entry1",
@@ -2437,8 +2077,7 @@ mod tests {
         let watch_later = dir.path().join("watch_later"); // left empty
         with_watch_later_override(&mut config, &watch_later);
         let script_log_dir = dir.path().join("mpv-log");
-        // A large, real-looking position on a `redirect` entry must still
-        // never surface as activity.
+        // A `redirect` entry never counts as activity, whatever its position.
         write_script_entry(
             &script_log_dir,
             "entry1",
@@ -2505,14 +2144,8 @@ mod tests {
 
     #[test]
     fn reconcile_twice_against_an_unchanged_script_log_entry_reflecting_a_prior_drop_is_a_no_op() {
-        // Mirrors the existing watch_later regression test for the same
-        // real bug class (drop never zeroing stored position, so a later
-        // reconcile mustn't manufacture a false diff against its own
-        // baseline) — but for a script-log-sourced reading. Script-log
-        // entries persist forever on disk (mpv never deletes them, unlike
-        // watch_later's deletion-on-load), so this is the more likely real
-        // shape of the bug going forward: the same eof entry sitting there,
-        // completely unchanged, on every single future invocation.
+        // Script-log entries persist on disk, so an unchanged `eof` must not
+        // look like new activity on later reconciles.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("One Piece");
@@ -2547,8 +2180,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        // Two reconcile calls in a row, the script-log entry never touched
-        // again in between.
+        // Two reconciles with the script-log entry untouched.
         reconcile_with_script_log_dirs(
             &config,
             &mut state,
@@ -2589,9 +2221,7 @@ mod tests {
 
     #[test]
     fn auto_pause_days_zero_never_pauses_no_matter_how_old() {
-        // The documented default (CLAUDE.md: "auto_pause_days defaults to
-        // 0 (never auto-pause)") — 0 must disable this entirely, not just
-        // set a very long threshold.
+        // 0 disables auto-pause entirely.
         let mut state = State {
             series: vec![idle_in_progress_record(Path::new("~/Anime"), "Monster", 0)],
             mal_links: Vec::new(),
@@ -2624,8 +2254,7 @@ mod tests {
             "the transition itself is a genuine, persisted change and must bump updated_at, \
              matching pause_drop::pause's own precedent"
         );
-        // Design.md §8: "never auto-dropped" — idleness only ever reaches
-        // Paused, position/episode stay exactly as they were.
+        // Idleness only reaches Paused; position and episode are unchanged.
         assert_eq!(record.position_seconds, 500.0);
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
     }
@@ -2642,7 +2271,7 @@ mod tests {
             )],
             mal_links: Vec::new(),
         };
-        // 10-day threshold, only 5 days idle so far.
+        // 10-day threshold, 5 days idle.
         apply_idle_auto_pause(&mut state, 10, now);
         assert_eq!(state.series[0].status, Status::InProgress);
         assert_eq!(state.series[0].updated_at, updated_at);
@@ -2704,17 +2333,14 @@ mod tests {
         let long_ago = now_unix().saturating_sub(30 * 86_400);
         let mut state = State {
             series: vec![
-                // No fresh watch_later activity at all this run — genuinely
-                // idle for 30 days against a 7-day threshold.
+                // No activity this run; idle 30 days against a 7-day threshold.
                 idle_in_progress_record(&root, "Monster", long_ago),
             ],
             mal_links: Vec::new(),
         };
 
-        // Naruto has a brand-new, real bookmark *in this very reconcile
-        // call* — reconcile_one_series will set its updated_at to "now".
-        // A 7-day auto_pause_days must never immediately re-pause activity
-        // this same pass just observed.
+        // Naruto has a new bookmark in this very call, so it must not be
+        // idle-paused.
         write_entry(
             &watch_later,
             "entry1",
@@ -2742,9 +2368,7 @@ mod tests {
 
     #[test]
     fn set_mtime_helper_actually_changes_mtime() {
-        // Sanity check for the `set_mtime` helper itself (used above by the
-        // merge_candidates tie/freshness tests) — not a behavioral test of
-        // reconcile.rs, just a guard against the helper silently no-oping.
+        // Guards against `set_mtime` silently doing nothing.
         let dir = tempdir().unwrap();
         let path = dir.path().join("f");
         fs::write(&path, b"x").unwrap();

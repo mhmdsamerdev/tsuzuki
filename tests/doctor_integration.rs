@@ -1,20 +1,4 @@
-//! Real end-to-end integration test for `tsuzuki doctor`, against the
-//! compiled binary and a genuine XDG-style `$HOME` — same shape as
-//! `tests/state_persistence.rs`/`tests/script_log_integration.rs`, the
-//! required real-binary test for this phase (CLAUDE.md's "Every phase needs
-//! at least one real-binary, real-XDG-path integration test").
-//!
-//! Deliberately broken setup: a configured `watch_later_dir` override that
-//! doesn't resolve, and one orphaned `state.toml` record (a series tracked
-//! in state but whose folder no longer exists under its still-valid root).
-//! The mpv.conf/tsuzuki.lua checks additionally depend on this development
-//! machine's real, standing mpv install (native and/or Flatpak `io.mpv.Mpv`)
-//! being detected — the same accepted real-machine dependency
-//! `src/main.rs`'s own `tracked_config` test helper and `src/launch.rs`'s
-//! tests already rely on (a fresh scratch `$HOME` never has mpv.conf or the
-//! companion script installed, so if *any* install method is detected here,
-//! those checks are guaranteed to FAIL too — this test asserts on that
-//! conditionally, never assuming one specific method).
+//! Real-binary tests for `tsuzuki doctor`. The mpv.conf/tsuzuki.lua assertions depend on whether mpv is installed here.
 
 use std::fs;
 use std::path::Path;
@@ -34,11 +18,7 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to spawn the tsuzuki binary")
 }
 
-/// Whether *this* machine has any mpv install `doctor` would detect —
-/// mirrors `launch::flatpak_mpv_installed`'s own fixed system-install path
-/// check and a plain `$PATH` lookup for native mpv, independently of the
-/// binary under test, purely so this test can decide what it may safely
-/// assert about the mpv.conf/tsuzuki.lua checks' behavior.
+/// Whether this machine has an mpv install `doctor` would detect, checked independently of the binary under test.
 fn any_mpv_install_detected() -> bool {
     if Path::new("/var/lib/flatpak/app/io.mpv.Mpv").is_dir() {
         return true;
@@ -76,9 +56,7 @@ fn doctor_reports_unreachable_watch_later_and_an_orphaned_record_then_clears_the
         );
     fs::write(&config_path, patched).unwrap();
 
-    // Fabricate the orphaned record directly: "GoneSeries" is tracked under
-    // "~/Anime" (the same literal form `add` just persisted) but has no
-    // corresponding directory on disk at all.
+    // An orphan: "GoneSeries" is tracked under "~/Anime" but has no directory on disk.
     let state_path = home.join(".local/share/tsuzuki/state.toml");
     fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     fs::write(
@@ -140,7 +118,7 @@ updated_at = 1
         );
     }
 
-    // Confirmed dead — clear it, and confirm doing so actually did.
+    // Clearing the confirmed orphan must actually remove it.
     let fix = run(home, &["doctor", "--fix", "--forget-orphans"]);
     let fix_stdout = String::from_utf8_lossy(&fix.stdout);
     assert!(
@@ -157,8 +135,7 @@ updated_at = 1
         state_contents.is_empty() || !state_contents.trim().is_empty(),
         "sanity: state.toml must still be valid TOML (readable)"
     );
-    // Re-read via the real command to confirm it's still valid/parseable
-    // state, not just that the string happens to lack "GoneSeries".
+    // Re-read through the real command to confirm the state is still parseable.
     let list = run(home, &["list"]);
     assert!(
         list.status.success(),
@@ -168,11 +145,7 @@ updated_at = 1
 
 #[test]
 fn doctor_forget_orphans_without_fix_is_rejected_by_the_cli() {
-    // clap's own `requires = "fix"` on `--forget-orphans` — never reaches
-    // doctor_command's own logic at all, so this is real clap usage/error
-    // output, not a hand-rolled Tsuzuki error layer (CLAUDE.md's CLI
-    // bare-invocation contract: malformed input stays on clap's own
-    // error/usage output).
+    // clap's `requires = "fix"` rejects this before doctor's own logic runs.
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -190,9 +163,7 @@ fn doctor_forget_orphans_without_fix_is_rejected_by_the_cli() {
 
 #[test]
 fn doctor_prints_the_local_version_banner_first_with_no_network_involved() {
-    // Zero network: this only proves the banner is the compiled-in
-    // CARGO_PKG_VERSION, never a live GitHub lookup (CLAUDE.md's "doctor's
-    // version line is local-only").
+    // The banner is the compiled-in version, never a network lookup.
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 

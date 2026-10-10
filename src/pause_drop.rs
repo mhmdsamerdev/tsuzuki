@@ -1,20 +1,12 @@
-//! `tsuzuki pause <series>` / `tsuzuki drop <series>` state transitions
-//! (CLAUDE.md's "`pause`/`drop`: root disambiguation, no-record errors, and
-//! the allowed transitions").
+//! `pause` / `drop` state transitions.
 //!
-//! Allowed transitions only: `InProgress -> Paused`, `InProgress -> Dropped`,
-//! `Paused -> InProgress`, `Paused -> Dropped`. `Dropped -> Paused` does not
-//! exist, and neither command acts on a `Completed` series (only reconcile
-//! produces that status) — the only way back from `Dropped` or `Completed`
-//! to `InProgress` is opening an episode directly, which `reconcile` (not
-//! this module) picks up. Both
-//! commands act only on *existing* progress: a series with no `state.toml`
-//! record at all is always an error, never a silently-manufactured record.
+//! Allowed: `InProgress -> Paused`, `InProgress -> Dropped`,
+//! `Paused -> InProgress` (via reconcile), `Paused -> Dropped`. `Completed`
+//! is never touched, and `Dropped -> Paused` does not exist. A series with
+//! no record is always an error.
 //!
-//! Caller (`main.rs`) is responsible for running `reconcile` first (per
-//! CLAUDE.md's "every state-touching command reconciles first") and for
-//! persisting `state` afterward — this module only mutates the in-memory
-//! `State`, matching `roots.rs`/`exclude.rs`'s established convention.
+//! The caller reconciles first and persists `state` afterward; this module
+//! only mutates the in-memory `State`.
 
 use std::fmt;
 
@@ -22,13 +14,10 @@ use crate::state::{State, Status, now_unix};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ActionError {
-    /// No `state.toml` record exists at all for this (root, series) pair —
-    /// `pause`/`drop` act on existing progress, they don't manufacture a
-    /// starting point.
+    /// No record exists for this (root, series) pair.
     NoRecord,
-    /// The record exists but isn't in a state this action can start from
-    /// (`pause` on a `Dropped` record — `Dropped -> Paused` doesn't exist —
-    /// and either command on a `Completed` record).
+    /// The record's status can't start this action (`pause` on `Dropped`,
+    /// either command on `Completed`).
     InvalidTransition { from: Status, action: &'static str },
 }
 
@@ -54,15 +43,14 @@ impl fmt::Display for ActionError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// A genuine transition was made; caller must persist `state`.
+    /// The status changed; the caller must persist `state`.
     Changed,
-    /// Already in the target state — idempotent, no change, exit 0.
+    /// Already in the target status; nothing changed.
     NoOp,
 }
 
-/// `InProgress -> Paused`. `Paused -> Paused` is idempotent. `Dropped` and
-/// no-record both error — `pause` only acts on a series with real, currently
-/// active-or-paused progress.
+/// `InProgress -> Paused`. Already `Paused` is a no-op; `Dropped`,
+/// `Completed` and no record error.
 pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
     let record = state.find_mut(root, name).ok_or(ActionError::NoRecord)?;
     match record.status {
@@ -79,26 +67,13 @@ pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, Actio
     }
 }
 
-/// `InProgress -> Dropped`, `Paused -> Dropped`. `Dropped -> Dropped` is
-/// idempotent; a `Completed` series errors — it is finished, not abandoned.
-/// Otherwise only a missing record errors — unlike `pause`, dropping an
-/// already-dropped series is a legitimate no-op, not an invalid source
-/// state (CLAUDE.md: "re-invoking ... drop on an already-dropped one is
-/// idempotent").
+/// `InProgress`/`Paused -> Dropped`. Already `Dropped` is a no-op;
+/// `Completed` and no record error.
 ///
-/// Deliberately does **not** zero `current_relative_path`/`position_seconds`
-/// — design.md §8's "position reset" is a *display/playback* behavior
-/// (`playback_target` in `main.rs` already special-cases `Dropped` to always
-/// start at episode 1, ignoring whatever is stored), not a requirement to
-/// mutate the stored fields. Mutating them here would actively break
-/// reconcile's own "only a genuine change reactivates" rule: reconcile
-/// compares its freshest real observation against these exact stored
-/// values, and a still-unchanged `watch_later` entry would then look like
-/// "new activity" purely because this function had reset the baseline out
-/// from under it — reproduced directly against the dogfood scenario (drop,
-/// then the very next reconcile silently flipped back to `in_progress`
-/// with the old, unchanged position). Leaving them untouched is what makes
-/// "no real change" and "genuinely new activity" distinguishable at all.
+/// Leaves `current_relative_path` and `position_seconds` untouched: reconcile
+/// compares new observations against them, so resetting them would make an
+/// unchanged `watch_later` entry look like new activity and reactivate the
+/// series.
 pub fn drop_series(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
     let record = state.find_mut(root, name).ok_or(ActionError::NoRecord)?;
     match record.status {
@@ -149,11 +124,7 @@ mod tests {
 
     #[test]
     fn pause_never_mutates_position_or_current_path() {
-        // Gap-audit required finding #1: `pause` is the other write path
-        // besides `drop` that could in principle repeat the same
-        // zero/clear-causes-a-false-reconcile-diff mistake CLAUDE.md now
-        // documents. Explicit evidence it doesn't: every field except
-        // `status`/`updated_at` must be byte-for-byte identical afterward.
+        // Every field except `status`/`updated_at` must stay identical.
         let before = record(Status::InProgress);
         let mut state = State {
             series: vec![before.clone()],
@@ -243,13 +214,8 @@ mod tests {
 
     #[test]
     fn drop_transitions_in_progress_to_dropped_without_mutating_position() {
-        // The stored position is deliberately left as-is (see drop_series's
-        // doc comment) — "position reset" is a playback-time behavior, not
-        // a stored-field mutation; zeroing it here would make an unchanged
-        // watch_later entry look like new activity to the next reconcile.
-        // Checks every non-status field, not just position_seconds — the
-        // same class of bug could just as easily have zeroed
-        // current_relative_path or episode_number instead.
+        // Checks every non-status field, not just the position (see
+        // `drop_series`).
         let before = record(Status::InProgress);
         let mut state = State {
             series: vec![before.clone()],
@@ -302,11 +268,7 @@ mod tests {
 
     #[test]
     fn dropped_to_paused_transition_does_not_exist() {
-        // There is no `unpause`/`resume`-style function in this module that
-        // could take a Dropped record to Paused — `pause()` on a Dropped
-        // record is rejected (proven above), and nothing else in this
-        // module writes `Status::Paused` onto a `Dropped` record. This test
-        // documents the invariant by exhaustively trying both functions.
+        // Neither function may take a Dropped record to Paused.
         let mut state = State {
             series: vec![record(Status::Dropped)],
 

@@ -1,21 +1,11 @@
-//! Series identity and episode ordering (CLAUDE.md §3, design.md §3/§5).
-//!
-//! Pure filesystem logic, zero external I/O beyond reading directory
-//! entries — no mpv, no network, so this is fully testable against
-//! `tempfile`-fabricated trees. Not wired into any user-facing command yet
-//! (that's Phase 5); this module only needs to be callable and correct.
+//! Series identity and episode ordering. Pure filesystem logic: no mpv, no network.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// A series: the immediate child of a tracked root, named verbatim after
-/// its directory (design.md §3 — no parsing, no bracket-stripping).
-///
-/// Unused outside tests until Phase 5 wires ordering into a user-facing
-/// command (`list`, `status`, `start`, ...) — this phase only needs the
-/// module to be callable and independently testable, per CLAUDE.md.
+/// A series: the immediate child of a tracked root, named verbatim after its directory.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Series {
@@ -23,30 +13,11 @@ pub struct Series {
     pub path: PathBuf,
 }
 
-/// Enumerates the immediate child directories of `root` as series — depth
-/// 1 only, no recursion into what counts as a series, verbatim directory
-/// name. Non-directory entries directly under `root` are ignored; a series
-/// is always a directory. Follows symlinks (stat semantics, not lstat) —
-/// a symlinked series folder behaves exactly like a real one (CLAUDE.md's
-/// "Symlinks are followed everywhere, with cycle protection"). No cycle
-/// protection is needed here: this function never recurses, so a symlink
-/// cycle among `root`'s immediate children can't cause unbounded work.
+/// Lists the depth-1 directories of `root` as series, naturally sorted by name.
+/// Symlinked directories count; loose files are ignored.
 ///
-/// `tracked_root_real_paths` is every currently-tracked root's own
-/// canonicalized real path (this root included — harmless, since a
-/// directory is never its own depth-1 child). A child directory that is
-/// itself a tracked root (e.g. `Anime/Rewatches` when `~/Anime/Rewatches`
-/// is separately registered) is excluded from the results: composable
-/// roots (CLAUDE.md §3) means that folder contributes its own series
-/// independently, and showing it a second time as a series of its parent
-/// would double-count it. Comparison is on the canonicalized real path via
-/// the same `roots::normalize` helper `add`/`exclude` already use for
-/// root/exclusion idempotency, so a symlink or `..`-relative alias to a
-/// tracked root is caught exactly like a literal path match would be.
-///
-/// Results are naturally sorted by name for deterministic output, but this
-/// ordering isn't meaningful yet — Phase 5's `list`/`start` decide how
-/// series are actually presented.
+/// A child whose real path is in `tracked_root_real_paths` is skipped: it is its own
+/// root and contributes its series independently.
 #[allow(dead_code)]
 pub fn series_in_root(root: &Path, tracked_root_real_paths: &[PathBuf]) -> io::Result<Vec<Series>> {
     let mut series = Vec::new();
@@ -67,19 +38,10 @@ fn is_a_tracked_root(path: &Path, tracked_root_real_paths: &[PathBuf]) -> bool {
     tracked_root_real_paths.contains(&real)
 }
 
-/// Hierarchical natural sort over a series' full path tree (design.md §5):
-/// at each directory level, subdirectories are compared naturally against
-/// each other and recursed into depth-first, then this directory's own
-/// video files are compared naturally against each other and appended.
-/// Only files whose extension matches `video_extensions` (case-insensitive)
-/// are included as leaves — directories are never filtered by extension.
-///
-/// Follows symlinks (stat semantics) for both directories and files, per
-/// CLAUDE.md — a symlinked subdirectory is recursed into and a symlinked
-/// episode file is included exactly like a real one. Because following
-/// symlinks makes cycles possible, the walk tracks canonicalized real
-/// paths already visited and stops descending into a repeat rather than
-/// recursing forever.
+/// Episodes of a series in natural order: at each level, subdirectories (depth-first)
+/// come before that level's own video files.
+/// Only files matching `video_extensions` (case-insensitive) are listed. Symlinks are
+/// followed; a directory whose real path was already visited is not entered again.
 #[allow(dead_code)]
 pub fn ordered_episodes(
     series_path: &Path,
@@ -88,16 +50,8 @@ pub fn ordered_episodes(
     ordered_episodes_excluding(series_path, video_extensions, &[])
 }
 
-/// Same as [`ordered_episodes`], but any path in `excluded` (files or
-/// directories, given as real filesystem paths — not necessarily
-/// canonicalized by the caller, this function does that) is removed from
-/// the tree entirely before the natural sort runs, never as a post-filter
-/// on the sorted result (CLAUDE.md's "Exclusions run before ordering,
-/// always"). Excluding a directory excludes everything under it
-/// recursively, simply by never descending into it. Kept as a distinct
-/// function — rather than folding exclusion-filtering and sorting into one
-/// pass — so exclusion behavior stays independently testable from the sort
-/// itself.
+/// Like [`ordered_episodes`], but paths in `excluded` (files or directories) are
+/// dropped before sorting. Excluding a directory drops everything under it.
 #[allow(dead_code)]
 pub fn ordered_episodes_excluding(
     series_path: &Path,
@@ -111,9 +65,7 @@ pub fn ordered_episodes_excluding(
 
     let mut episodes = Vec::new();
     let mut visited = HashSet::new();
-    // Seed with the series root's own real path so a symlink anywhere in
-    // the tree that points back to the root is caught immediately, rather
-    // than causing one full duplicate pass over the root's own files.
+    // Seed with the root so a symlink back to it is not walked as a second copy.
     if let Ok(real_root) = fs::canonicalize(series_path) {
         visited.insert(real_root);
     }
@@ -140,28 +92,12 @@ fn walk(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        // `fs::metadata` follows symlinks (unlike `DirEntry::file_type`,
-        // which reports the symlink itself). A broken symlink or a
-        // read/permission race makes this fail — such an entry is
-        // silently skipped rather than aborting the whole walk, the same
-        // way a non-matching extension is silently excluded.
+        // Follows symlinks; broken links and unreadable entries are skipped.
         let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
 
-        // Exclusion filtering happens here, at collection time — before
-        // this level's entries are even handed to `sort_by` below, not as
-        // a post-filter on the sorted result. Skipping an excluded
-        // directory here means `walk` never recurses into it, which is
-        // what makes a directory exclusion recursive for free.
-        //
-        // The check is against this entry's *resolved* (symlink-followed)
-        // real path, and against exclusion *ancestry* — not just exact
-        // membership — so a symlink located outside an excluded directory
-        // but pointing into excluded content still resolves onto (i.e. is
-        // a descendant of) an excluded real path and is correctly caught,
-        // rather than silently bypassing the exclusion (CLAUDE.md's
-        // "Exclusion enforcement checks the resolved path").
+        // Checked on the resolved path so a symlink into excluded content is caught too.
         let real_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if is_excluded(&real_path, excluded) {
             continue;
@@ -178,11 +114,7 @@ fn walk(
     files.sort_by(|a, b| natord::compare(&entry_name(a), &entry_name(b)));
 
     for subdir in &subdirs {
-        // Cycle protection: only descend if this subdirectory's real
-        // (symlink-resolved) path hasn't been visited yet in this walk.
-        // Also naturally deduplicates two different aliases (e.g. two
-        // symlinks) that resolve to the same real directory, which would
-        // otherwise list the same episodes twice.
+        // Cycle protection; also dedupes aliases of the same real directory.
         let real_path = fs::canonicalize(subdir).unwrap_or_else(|_| subdir.clone());
         if visited.insert(real_path) {
             walk(subdir, video_extensions, excluded, out, visited)?;
@@ -193,10 +125,7 @@ fn walk(
     Ok(())
 }
 
-/// True if `real_path` is itself an excluded real path, or a descendant of
-/// one — an ancestry check, not exact-set membership, since an excluded
-/// directory's own real path is the only entry recorded for it (nothing
-/// pre-expands it into every descendant path underneath).
+/// True if `real_path` is an excluded path or lies under one.
 fn is_excluded(real_path: &Path, excluded: &HashSet<PathBuf>) -> bool {
     excluded
         .iter()
@@ -253,7 +182,7 @@ mod tests {
         let root = dir.path();
         std_fs::create_dir_all(root.join("Monster")).unwrap();
         std_fs::create_dir_all(root.join("One Piece")).unwrap();
-        // A loose file directly under root is not a series.
+        // A loose file is not a series.
         touch(&root.join("readme.txt"));
 
         let series = series_in_root(root, &[]).unwrap();
@@ -270,9 +199,7 @@ mod tests {
         std_fs::create_dir_all(anime_root.join("Monster")).unwrap();
         std_fs::create_dir_all(rewatches_root.join("Monster")).unwrap();
 
-        // Rewatches/ is an ordinary subfolder here — it isn't separately
-        // registered as its own tracked root — so it must still show up
-        // as a plain series, exactly like any other depth-1 directory.
+        // Not a tracked root here, so it is a plain series.
         let anime_series = series_in_root(&anime_root, &[]).unwrap();
         let anime_names: Vec<_> = anime_series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(anime_names, vec!["Monster", "Rewatches"]);
@@ -280,11 +207,7 @@ mod tests {
 
     #[test]
     fn a_child_that_is_itself_a_tracked_root_is_excluded_from_its_parents_series_list() {
-        // Regression test for a dogfood-found bug: with both `Anime` and
-        // `Anime/Rewatches` registered as tracked roots, `Rewatches` must
-        // not double as a "series" under `Anime` in addition to
-        // contributing its own series independently (composable roots,
-        // design.md §3) — it was, incorrectly, showing up both ways.
+        // `Rewatches` is its own root, so it must not also appear as a series of `Anime`.
         let dir = tempdir().unwrap();
         let anime_root = dir.path().join("Anime");
         let rewatches_root = anime_root.join("Rewatches");
@@ -304,7 +227,7 @@ mod tests {
         let rewatches_names: Vec<_> = rewatches_series.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(rewatches_names, vec!["Monster"]);
 
-        // Distinct paths -> independent ordering trees, per design.md §3.
+        // The two `Monster` series are distinct paths.
         assert_ne!(
             anime_series
                 .iter()
@@ -426,8 +349,7 @@ mod tests {
     fn series_in_root_with_no_subdirectories_returns_an_empty_vec() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Root");
-        // Only loose files directly under root, no series (directories) at
-        // all.
+        // Loose files only, no directories.
         touch(&root.join("readme.txt"));
         touch(&root.join("ep01.mkv"));
 
@@ -437,11 +359,7 @@ mod tests {
 
     #[test]
     fn ordering_recurses_genuinely_arbitrarily_deep_not_just_two_levels() {
-        // Every other ordering test nests exactly 2 levels deep (series
-        // root -> one subdirectory -> file). This fixture nests 3
-        // directories deep, with branching at the third level, to prove
-        // `walk` actually recurses rather than happening to work only for
-        // the shallow fixtures used elsewhere.
+        // Three directories deep, branching at the third level.
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("Long Runner");
         touch(
@@ -473,10 +391,7 @@ mod tests {
 
     #[test]
     fn empty_video_extensions_list_excludes_every_file() {
-        // An empty allowlist is an explicit user choice (however
-        // self-defeating) — per CLAUDE.md's "never infer" principle there's
-        // no fallback to the default list; every file is correctly excluded,
-        // not an error.
+        // An empty allowlist is explicit: no fallback to defaults.
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("No Extensions Configured");
         touch(&series_path.join("ep01.mkv"));
@@ -488,16 +403,7 @@ mod tests {
 
     #[test]
     fn leading_dot_in_configured_extension_does_not_match_bare_file_extension() {
-        // `Path::extension()` returns the extension without its leading
-        // dot, and `is_video_file` compares against whatever list it's
-        // given as-is, with no normalization of its own — normalizing a
-        // leading dot is config.rs's job at load time (see
-        // config.rs::video_extensions_with_leading_dots_are_normalized_on_read),
-        // deliberately not repeated per-file-comparison here (CLAUDE.md).
-        // This test documents that `ordered_episodes` itself stays
-        // literal: a caller that bypasses `config::read` and hands it a
-        // raw dotted extension still gets this behavior, not a silent
-        // second normalization pass.
+        // Normalizing a leading dot is config.rs's job; this layer compares literally.
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("Dotted Config");
         touch(&series_path.join("ep01.mkv"));
@@ -509,9 +415,7 @@ mod tests {
 
     #[test]
     fn directories_are_never_filtered_by_extension() {
-        // A subdirectory literally named like a video file must still be
-        // recursed into as a directory, not treated as (or excluded like) a
-        // file — the allowlist only ever applies to files.
+        // A directory named like a video file is still recursed into.
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("Odd Names");
         touch(&series_path.join("ep01.mkv").join("nested.mkv"));
@@ -562,10 +466,7 @@ mod tests {
 
     #[test]
     fn an_unexcluded_series_with_the_same_directory_structure_is_unaffected() {
-        // Proves exclusions don't leak across series (or roots): a second
-        // series with an identically-named "Specials" subdirectory, given
-        // an exclusion list that only names the *other* series' Specials
-        // folder, must keep its own Specials content intact.
+        // Excluding one series' `Specials` must not affect another series' `Specials`.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let excluded_series = root.join("One Piece");
@@ -593,16 +494,10 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: symlink interaction with exclusion filtering ---
-
     #[cfg(unix)]
     #[test]
     fn a_symlink_inside_an_excluded_directory_pointing_out_is_never_reached() {
-        // The excluded directory is skipped at collection time — `walk`
-        // never even calls `read_dir` on it — so an internal symlink
-        // that points back out to non-excluded content elsewhere can't
-        // leak that content in via this direction: the symlink itself is
-        // never discovered, let alone followed.
+        // The excluded directory is never read, so its outbound symlink is never found.
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -626,11 +521,6 @@ mod tests {
         );
     }
 
-    // --- Correction pass: this used to be an `#[ignore]`d bug
-    // reproduction (gap-audit). Now fixed — un-ignored and asserting the
-    // correct behavior is the proof. See CLAUDE.md's "Exclusion
-    // enforcement checks the resolved ... path" for the fix reasoning. ---
-
     #[cfg(unix)]
     #[test]
     fn a_symlink_alias_pointing_into_excluded_content_is_also_excluded() {
@@ -650,9 +540,7 @@ mod tests {
         let episodes =
             ordered_episodes_excluding(&series_path, &default_extensions(), &excluded).unwrap();
 
-        // The alias resolves (via canonicalize) to the exact same real
-        // file the exclusion targets, so it's excluded too, even though
-        // its own path in the tree is outside "Specials".
+        // The alias resolves to the excluded file, so it is dropped too.
         assert_eq!(
             relative_order(&series_path, &episodes),
             vec!["Season 1/ep01.mkv"]
@@ -709,13 +597,10 @@ mod tests {
         std_fs::create_dir_all(&nested).unwrap();
         touch(&series_path.join("ep01.mkv"));
 
-        // `nested/back` symlinks back to the series root itself — a cycle
-        // a naive recursive walk would follow forever once symlinks are
-        // followed at all.
+        // `nested/back` points back at the series root.
         symlink(&series_path, nested.join("back")).unwrap();
 
         let episodes = walk_with_timeout(&series_path);
-        // The cycle must not cause ep01.mkv to be listed more than once.
         assert_eq!(relative_order(&series_path, &episodes), vec!["ep01.mkv"]);
     }
 
@@ -771,8 +656,7 @@ mod tests {
     fn ordered_episodes_lists_season_dirs_before_loose_files_at_the_same_level() {
         let dir = tempdir().unwrap();
         let series_path = dir.path().join("Show");
-        // "Aaa" sorts before "Season" alphabetically, so a merged or
-        // files-first walk would put it first.
+        // "Aaa" sorts before "Season", so a files-first walk would list it first.
         touch(&series_path.join("Aaa OVA.mkv"));
         touch(&series_path.join("Season 1").join("ep01.mkv"));
         touch(&series_path.join("Season 1").join("ep02.mkv"));

@@ -1,28 +1,4 @@
-//! The dedicated end-to-end CLI test suite (`docs/design.md` §12's Phase 9
-//! "exercise the whole CLI surface end-to-end" line item, `PROGRESS.md`'s
-//! distribution checklist).
-//!
-//! Every other integration test file under `tests/` proves one specific
-//! phase's own flagship claim in isolation. This file is different on
-//! purpose: each test here is a realistic, multi-command *user session* —
-//! `add` a real-shaped library, fabricate the mpv/`tsuzuki.lua` activity a
-//! real evening of watching would leave behind, then walk the same
-//! sequence of commands a real person actually types (`list`, `start`,
-//! `pause`, `doctor`, ...) — checking that the commands agree with each
-//! other about what happened, across real process invocations, the way an
-//! actual user's shell history would. All of it against the real compiled
-//! binary (`env!("CARGO_BIN_EXE_tsuzuki")`) and a real temp `$HOME`, never
-//! an in-process function call — same standing rule as every other file in
-//! this directory.
-//!
-//! No real mpv install or real MAL account is used or required — mpv's own
-//! `watch_later`/companion-script log files are fabricated by hand, exactly
-//! shaped the way real mpv/`tsuzuki.lua` activity would leave them (proven
-//! formats, cross-checked against `src/mpv.rs`/`src/script_log.rs`), and
-//! `[mpv] command_override` is pointed at `true` wherever a command would
-//! otherwise try to spawn a real mpv. `tests/mal_login_integration.rs`/
-//! `tests/mal_sync_integration.rs` already own the real-network-required
-//! paths (both `#[ignore]`d) — nothing here makes a network call.
+//! Multi-command user sessions against the real binary, with hand-made mpv files and no network.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,8 +28,7 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Runs `tsuzuki <args>`, asserting success, and returns stdout — the
-/// common case for every command used purely to advance a scenario.
+/// Runs `tsuzuki <args>`, asserts success, and returns stdout.
 fn run_ok(home: &Path, args: &[&str]) -> String {
     let output = run(home, args);
     assert!(
@@ -87,10 +62,7 @@ fn add_root(home: &Path, root: &Path) {
     run_ok(home, &["add", root.to_str().unwrap()]);
 }
 
-/// Points `[mpv] command_override` at `true` — a real, always-present,
-/// instantly-exiting program — so a command that launches mpv (`resume`/
-/// `start`) never depends on a real mpv install being on this machine.
-/// Mirrors `tests/state_persistence.rs`'s own established trick.
+/// Points `[mpv] command_override` at `true` so `resume`/`start` never spawn a real mpv.
 fn bypass_real_mpv(home: &Path) {
     let path = config_path(home);
     let patched = fs::read_to_string(&path)
@@ -99,15 +71,8 @@ fn bypass_real_mpv(home: &Path) {
     fs::write(&path, patched).unwrap();
 }
 
-/// Fabricates one real mpv `watch_later` entry for `source_file`, exactly
-/// the shape `src/mpv.rs::parse_entry_file` expects (`# <path>` then
-/// `start=<seconds>`), in the first OS-default candidate directory
-/// (`~/.local/state/mpv/watch_later`, matching every other integration
-/// test's precedent — never the config override, so no `config.toml`
-/// change is needed just to exercise this path). `entry_name` only needs
-/// to be unique within the directory — mpv itself names these by an MD5
-/// hash of the source path, but nothing in Tsuzuki's parser cares what the
-/// filename actually is.
+/// Fabricates one mpv `watch_later` entry (`# <path>` then `start=<seconds>`) in the first OS-default candidate directory.
+/// `entry_name` only needs to be unique within the directory.
 fn write_watch_later(home: &Path, entry_name: &str, source_file: &Path, position_seconds: f64) {
     let dir = home.join(".local/state/mpv/watch_later");
     fs::create_dir_all(&dir).unwrap();
@@ -118,9 +83,7 @@ fn write_watch_later(home: &Path, entry_name: &str, source_file: &Path, position
     .unwrap();
 }
 
-/// Fabricates one `tsuzuki.lua` companion-script log entry, exactly the
-/// shape `src/script_log.rs` expects, at the real native XDG path
-/// (`~/.local/share/tsuzuki/mpv-log`, `XDG_DATA_HOME` unset).
+/// Fabricates one `tsuzuki.lua` log entry at `~/.local/share/tsuzuki/mpv-log`.
 fn write_script_log(
     home: &Path,
     entry_name: &str,
@@ -147,14 +110,8 @@ fn write_script_log(
     .unwrap();
 }
 
-/// Rewrites the single existing `state.toml` record's `updated_at` field
-/// to `seconds_ago` in the past — the only way to exercise `auto_pause_days`
-/// idleness from outside the crate (this test binary can't reach
-/// `state::now_unix()`'s callers directly, and there's no CLI surface for
-/// backdating a record — genuine idleness only ever comes from real time
-/// passing). A plain text find-and-replace, exactly like `bypass_real_mpv`'s
-/// own `command_override` patch above; only valid for a single-record
-/// `state.toml`, which is all this suite ever needs it for.
+/// Rewrites the single `state.toml` record's `updated_at` to `seconds_ago` in the past.
+/// Only valid for a single-record `state.toml`.
 fn backdate_only_updated_at(home: &Path, seconds_ago: u64) {
     let path = state_path(home);
     let contents = fs::read_to_string(&path).unwrap();
@@ -173,19 +130,12 @@ fn backdate_only_updated_at(home: &Path, seconds_ago: u64) {
     fs::write(&path, patched).unwrap();
 }
 
-/// mtime resolution on some filesystems is coarse enough that two writes
-/// within the same instant can tie — every freshest-file-wins scenario in
-/// this suite needs a genuinely later mtime, not just a later wall-clock
-/// call, so tests that depend on ordering pause briefly between writes.
+/// Coarse filesystem mtime can tie two writes, so ordering-dependent tests pause between them.
 fn ensure_next_write_is_strictly_fresher() {
     sleep(Duration::from_millis(1100));
 }
 
-// ---------------------------------------------------------------------
-// 1. First-time onboarding: add -> nothing in progress yet -> non-TTY
-//    `start` lists real choices -> an explicit `start <series>` opens
-//    real episode 1.
-// ---------------------------------------------------------------------
+// First-time onboarding: add, non-TTY `start` lists choices, explicit `start <series>` plays episode 1.
 
 #[test]
 fn first_time_onboarding_add_list_and_start_a_series() {
@@ -200,8 +150,7 @@ fn first_time_onboarding_add_list_and_start_a_series() {
     add_root(home, &anime_root);
     bypass_real_mpv(home);
 
-    // Nothing has been watched yet: `list` shows both series, both
-    // "Never started" — no `state.toml` record exists for either.
+    // Nothing watched yet: both series show "Never started" and no record exists.
     let list = run_ok(home, &["list"]);
     assert!(list.contains("Never started:"), "got: {list}");
     assert!(
@@ -221,11 +170,7 @@ fn first_time_onboarding_add_list_and_start_a_series() {
     let status = run_ok(home, &["status"]);
     assert!(status.contains("Nothing in progress."), "got: {status}");
 
-    // Bare `start`, run non-interactively (this test's subprocess has no
-    // real TTY on stdin) — must list real choices with a 1-based index
-    // and exit non-zero, never hang waiting for arrow-key input
-    // (CLAUDE.md's "Series selection: interactive by default, explicit
-    // when scripted").
+    // Non-interactive bare `start` lists 1-based choices and exits non-zero instead of hanging.
     let start_listing = run(home, &["start"]);
     assert!(
         !start_listing.status.success(),
@@ -249,8 +194,7 @@ fn first_time_onboarding_add_list_and_start_a_series() {
         "must show 1-based indexes so a script can act on the listing, got: {start_stdout}"
     );
 
-    // An explicit series argument always bypasses the picker and actually
-    // plays episode 1 at position 0.
+    // An explicit series argument bypasses the picker and plays episode 1 at position 0.
     let started = run_ok(home, &["start", "Monster"]);
     assert!(
         started.contains("Starting \"Monster\" — episode 1 (00:00)"),
@@ -268,11 +212,7 @@ fn first_time_onboarding_add_list_and_start_a_series() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 2. Natural sort is the sole ordering authority (season folders decide
-//    position; Anitomy only annotates the displayed episode number) +
-//    a full binge chain resolved in single invocations, including
-//    completion when the last episode finishes.
+// Natural sort alone orders episodes; Anitomy only annotates the displayed number. Includes a full binge to completion.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -282,14 +222,8 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
 
     let anime_root = home.join("Anime");
     let series_dir = anime_root.join("Test Show");
-    // Anitomy-parseable filenames (confirmed pattern, see src/anitomy.rs's
-    // own unit tests) whose *parsed episode numbers* deliberately
-    // contradict natural-sort position: if Anitomy's number ever
-    // (wrongly) decided order, "Season 2"'s file (Anitomy episode 5)
-    // would sort before "Season 1"'s (Anitomy episode 3). The directory
-    // names, not the filenames, are what natural sort actually orders on
-    // here — Anitomy is never even given a directory name as input
-    // (CLAUDE.md's "Anitomy must be called with a bare filename").
+    // Parsed episode numbers contradict natural-sort position: Season 2's file parses as 5, Season 1's as 3.
+    // Ordering must follow the directory names.
     let season1_file = series_dir
         .join("Season 1")
         .join("[Group] Test Show - 03 [1080p].mkv");
@@ -301,27 +235,18 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
 
     add_root(home, &anime_root);
 
-    // A real (>= resume_seconds) bookmark on the Season 1 file — natural
-    // sort must have placed it first for this to become the tracked
-    // episode 1 position, regardless of its Anitomy-parsed number.
+    // A bookmark on the Season 1 file, which natural sort places first.
     write_watch_later(home, "entry-1", &season1_file, 560.0);
 
     let list1 = run_ok(home, &["list"]);
     assert!(list1.contains("In progress:"), "got: {list1}");
-    // Position is real progress on the *first natural-sort file*, but the
-    // displayed episode number is Anitomy's parsed "03" — proving
-    // Anitomy annotated identity without moving which file is "first".
+    // Position is on the first natural-sort file while the displayed number is Anitomy's "03".
     assert!(
         list1.contains("Test Show — ep. 3"),
         "natural sort must place Season 1 first; Anitomy must only annotate its number, got: {list1}"
     );
 
-    // The Season 1 episode now completes (the companion script's own
-    // unconditional `eof` signal — no duration probing needed). This is
-    // the *current* tracked episode completing, so reconcile must advance
-    // the cursor straight to the next natural-sort episode, at position 0,
-    // in a single invocation (CLAUDE.md's "When the CURRENT tracked
-    // episode itself completes: advance to the next one").
+    // The `eof` signal completes the current episode, so the cursor advances to the next at position 0.
     ensure_next_write_is_strictly_fresher();
     write_script_log(
         home,
@@ -343,9 +268,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
         "the completed episode must no longer be the tracked position, got: {list2}"
     );
 
-    // Season 2's episode is the *last* file in the whole series. Its own
-    // completion must transition the series straight to Completed — no
-    // next episode exists to advance to.
+    // The last file completing moves the series to Completed; there is no next episode.
     ensure_next_write_is_strictly_fresher();
     write_script_log(
         home,
@@ -373,8 +296,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
         "a finished series must persist as completed, not dropped:\n{state_contents}"
     );
 
-    // `start`'s display word for a completed series is "Rewatch?", never
-    // "Start".
+    // A completed series shows "Rewatch?", never "Start".
     let start_listing = run(home, &["start"]);
     let start_stdout = stdout_of(&start_listing);
     assert!(
@@ -383,11 +305,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     );
 }
 
-// ---------------------------------------------------------------------
-// 3. Exclusion workflow: bare `exclude` surfaces a real Anitomy-suggested
-//    OVA candidate, confirming it removes it from the natural-sort tree
-//    (never a post-filter), and re-confirming is idempotent.
-// ---------------------------------------------------------------------
+// Bare `exclude` suggests an OVA candidate; excluding it removes it from the ordered tree, and repeating is idempotent.
 
 #[test]
 fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
@@ -398,15 +316,13 @@ fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
     let series_dir = anime_root.join("One Piece");
     touch(&series_dir.join("[Group] One Piece - 01 [1080p].mkv"));
     touch(&series_dir.join("[Group] One Piece - 02 [1080p].mkv"));
-    // Confirmed-by-direct-testing OVA pattern (src/exclude.rs's own unit
-    // tests use this exact filename shape).
+    // OVA filename pattern that Anitomy flags.
     let ova_file = series_dir.join("[Group] One Piece - OVA 1 [1080p].mkv");
     touch(&ova_file);
 
     add_root(home, &anime_root);
 
-    // Before excluding anything, the OVA file counts toward the series'
-    // file count.
+    // Before excluding, the OVA counts toward the file count.
     let list_before = run_ok(home, &["list"]);
     assert!(
         list_before.contains("One Piece") && list_before.contains("(3 files)"),
@@ -431,22 +347,21 @@ fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
     let excluded = run_ok(home, &["exclude", relative_path]);
     assert!(excluded.contains("excluded"), "got: {excluded}");
 
-    // Re-running bare `exclude` no longer suggests it.
+    // Bare `exclude` no longer suggests it.
     let suggested_after = run_ok(home, &["exclude"]);
     assert!(
         !suggested_after.contains("OVA"),
         "an already-excluded candidate must not be suggested again, got: {suggested_after}"
     );
 
-    // Exclusions run before ordering, never as a post-filter: the file
-    // count drops to 2.
+    // Exclusion applies before ordering, so the file count drops to 2.
     let list_after = run_ok(home, &["list"]);
     assert!(
         list_after.contains("One Piece") && list_after.contains("(2 files)"),
         "got: {list_after}"
     );
 
-    // Re-excluding the same path is idempotent — exit 0, no-op.
+    // Re-excluding the same path exits 0 as a no-op.
     let reexcluded = run(home, &["exclude", relative_path]);
     assert!(reexcluded.status.success());
     assert!(
@@ -456,11 +371,7 @@ fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 4. Pause/drop lifecycle end to end: real progress -> pause -> list
-//    grouping -> drop -> invalid-transition error leaves state
-//    untouched -> `start`'s "Rewatch?" word.
-// ---------------------------------------------------------------------
+// Pause/drop lifecycle: pause, list grouping, drop, an invalid transition leaves state untouched, "Rewatch?".
 
 #[test]
 fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
@@ -482,11 +393,11 @@ fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
     assert!(list_paused.contains("Paused:"), "got: {list_paused}");
     assert!(!list_paused.contains("In progress:"), "got: {list_paused}");
 
-    // Idempotent re-pause.
+    // Re-pausing is idempotent.
     let pause2 = run_ok(home, &["pause", "Monster"]);
     assert!(pause2.contains("already paused"), "got: {pause2}");
 
-    // Paused -> Dropped is an allowed transition.
+    // Paused -> Dropped is legal.
     let drop1 = run_ok(home, &["drop", "Monster"]);
     assert!(drop1.contains("\"Monster\" — dropped"), "got: {drop1}");
 
@@ -496,8 +407,7 @@ fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
         "a dropped series keeps its episode number"
     );
 
-    // Dropped -> Paused does not exist (CLAUDE.md's allowed-transitions
-    // table) — must be a real error, non-zero exit, state left untouched.
+    // Dropped -> Paused is illegal: non-zero exit, state untouched.
     let invalid_pause = run(home, &["pause", "Monster"]);
     assert!(
         !invalid_pause.status.success(),
@@ -514,24 +424,19 @@ fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
         "the rejected transition must not have mutated state, got: {list_still_dropped}"
     );
 
-    // `start`'s dropped display word.
+    // `start` shows the dropped display word.
     let start_listing = stdout_of(&run(home, &["start"]));
     assert!(
         start_listing.contains("Monster — Rewatch?"),
         "got: {start_listing}"
     );
 
-    // Idempotent re-drop.
+    // Re-dropping is idempotent.
     let drop2 = run_ok(home, &["drop", "Monster"]);
     assert!(drop2.contains("already dropped"), "got: {drop2}");
 }
 
-// ---------------------------------------------------------------------
-// 5. Composable roots: the same series name under two different tracked
-//    roots is genuinely ambiguous without `--root`, and the ambiguity
-//    error must be scriptable (prints the exact re-invocation), never an
-//    interactive prompt — and must never mutate either series.
-// ---------------------------------------------------------------------
+// The same series name under two roots is ambiguous without `--root`; the error prints the exact re-invocation and mutates nothing.
 
 #[test]
 fn multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguity() {
@@ -567,7 +472,7 @@ fn multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguit
         "must print the exact re-invocation for root B, got: {stderr}"
     );
 
-    // Neither series was touched by the rejected ambiguous call.
+    // The rejected ambiguous call touched neither series.
     let list_untouched = run_ok(home, &["list"]);
     assert_eq!(
         list_untouched.matches("In progress:").count(),
@@ -575,7 +480,7 @@ fn multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguit
         "both Overlap records must still be in_progress, got: {list_untouched}"
     );
 
-    // Disambiguating with --root pauses only that one.
+    // `--root` pauses only the named one.
     let paused = run_ok(
         home,
         &["pause", "Overlap", "--root", root_a.to_str().unwrap()],
@@ -587,11 +492,7 @@ fn multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguit
     assert!(list_after.contains("Paused:"), "got: {list_after}");
 }
 
-// ---------------------------------------------------------------------
-// 6. `doctor` detects a real orphaned record (series folder deleted out
-//    from under a still-valid root) and `--fix --forget-orphans` clears
-//    exactly it, permanently.
-// ---------------------------------------------------------------------
+// `doctor` detects an orphaned record and `--fix --forget-orphans` clears exactly it.
 
 #[test]
 fn doctor_detects_and_forgets_a_real_orphaned_record() {
@@ -602,8 +503,7 @@ fn doctor_detects_and_forgets_a_real_orphaned_record() {
     let gone_series_dir = anime_root.join("GoneShow");
     let file = gone_series_dir.join("ep01.mkv");
     touch(&file);
-    // A second, untouched series so the root itself stays non-empty and
-    // obviously still valid after the first is deleted.
+    // A second series keeps the root non-empty.
     touch(&anime_root.join("StillHere").join("ep01.mkv"));
 
     add_root(home, &anime_root);
@@ -617,9 +517,7 @@ fn doctor_detects_and_forgets_a_real_orphaned_record() {
                 .contains("GoneShow")
     );
 
-    // The series folder disappears (moved, deleted, renamed — all
-    // indistinguishable, per CLAUDE.md's "A moved/renamed series folder
-    // is indistinguishable from deletion, on purpose").
+    // The series folder disappears; moved, renamed and deleted look the same.
     fs::remove_dir_all(&gone_series_dir).unwrap();
 
     let doctor1 = run(home, &["doctor"]);
@@ -629,17 +527,13 @@ fn doctor_detects_and_forgets_a_real_orphaned_record() {
         "doctor must name the specific orphaned series, got: {doctor1_stdout}"
     );
 
-    // Never auto-removed by a plain `doctor` — requires --fix
-    // --forget-orphans, and must still be present until then.
+    // A plain `doctor` never removes it; only `--fix --forget-orphans` does.
     let state_before_fix = fs::read_to_string(state_path(home)).unwrap();
     assert!(state_before_fix.contains("GoneShow"));
 
     // Not `run_ok`: on a real dev machine with a real mpv install, other
-    // doctor checks (e.g. mpv.conf's own `write-filename-in-watch-later-
-    // config` setting) can legitimately FAIL and drive the overall exit
-    // code independently of the orphan fix — the same real-machine
-    // dependency `tests/doctor_integration.rs` already documents. Only
-    // the orphan-forgetting behavior itself is under test here.
+    // Not `run_ok`: other doctor checks (e.g. mpv.conf) can fail on a dev machine with mpv installed.
+    // Only the orphan removal is under test.
     let fixed = stdout_of(&run(home, &["doctor", "--fix", "--forget-orphans"]));
     assert!(
         fixed.contains("removed") && fixed.contains("GoneShow"),
@@ -660,17 +554,14 @@ fn doctor_detects_and_forgets_a_real_orphaned_record() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 7. `config` show/edit round trip, including a real broken-TOML edit.
-// ---------------------------------------------------------------------
+// `config` show/edit round trip, including a broken-TOML edit.
 
 #[test]
 fn config_show_and_edit_round_trip_including_a_broken_edit() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
-    // Any command that touches config.toml is enough to create it with
-    // real, filled-in defaults.
+    // Any config-touching command creates config.toml with defaults.
     run_ok(home, &["list"]);
 
     let shown = run_ok(home, &["config"]);
@@ -681,9 +572,7 @@ fn config_show_and_edit_round_trip_including_a_broken_edit() {
     assert!(shown.contains("resume_seconds = 120"), "got: {shown}");
     assert!(shown.contains("→ tsuzuki config edit"), "got: {shown}");
 
-    // A real, non-interactive "$EDITOR" that bumps resume_seconds — a
-    // plain shell script, never an actual interactive editor (matching
-    // tests/config_integration.rs's own established approach).
+    // A non-interactive "$EDITOR" script that bumps resume_seconds.
     let good_editor = home.join("good-editor.sh");
     fs::write(
         &good_editor,
@@ -717,8 +606,7 @@ fn config_show_and_edit_round_trip_including_a_broken_edit() {
         "got: {shown_after}"
     );
 
-    // A real broken-TOML edit is surfaced immediately, non-zero exit, not
-    // silently left for the next unrelated command to trip over.
+    // A broken-TOML edit is reported immediately with a non-zero exit.
     let bad_editor = home.join("bad-editor.sh");
     fs::write(
         &bad_editor,
@@ -750,12 +638,7 @@ fn config_show_and_edit_round_trip_including_a_broken_edit() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 8. The companion script wins on real freshness (not "script always
-//    wins"), and — since mpv never deletes a script-log entry — a
-//    second, unrelated invocation with nothing new must not manufacture
-//    fresh activity out of the same still-sitting-there entry.
-// ---------------------------------------------------------------------
+// The script log wins only when fresher, and an unchanged log entry isn't re-read as fresh activity.
 
 #[test]
 fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity() {
@@ -767,11 +650,10 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
     touch(&file);
     add_root(home, &anime_root);
 
-    // An older, real watch_later bookmark...
+    // An older watch_later bookmark...
     write_watch_later(home, "wl-entry", &file, 300.0);
     ensure_next_write_is_strictly_fresher();
-    // ...then a genuinely fresher script-log reading for the very same
-    // file, at a distinguishably different real position.
+    // ...then a fresher script-log reading for the same file at a different position.
     write_script_log(
         home,
         "script-entry",
@@ -790,9 +672,7 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
     );
     assert!(!state1.contains("300.0"), "got:\n{state1}");
 
-    // Second, unrelated invocation: nothing on disk changed. The
-    // script-log entry is still sitting there (mpv/the script never
-    // delete it) — it must not be re-read as fresh activity.
+    // Nothing changed on disk; the lingering script-log entry must not count as fresh activity.
     let list2 = run_ok(home, &["list"]);
     assert!(list2.contains("In progress:"), "got: {list2}");
     let state2 = fs::read_to_string(state_path(home)).unwrap();
@@ -802,11 +682,7 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
     );
 }
 
-// ---------------------------------------------------------------------
-// 9. A sub-resume_seconds reading is invisible to state.toml, even when
-//    it arrives *after* — and with a fresher mtime than — a real saved
-//    position. mpv has no concept of Tsuzuki's threshold.
-// ---------------------------------------------------------------------
+// A sub-`resume_seconds` reading never reaches state.toml, even when fresher than a saved position.
 
 #[test]
 fn a_noise_level_reading_never_overwrites_a_real_saved_position() {
@@ -823,9 +699,7 @@ fn a_noise_level_reading_never_overwrites_a_real_saved_position() {
     let state1 = fs::read_to_string(state_path(home)).unwrap();
     assert!(state1.contains("560"), "got:\n{state1}");
 
-    // The user briefly reopened the same file and quit almost
-    // immediately (45s < the default 120s resume_seconds) — mpv's own
-    // watch_later file now genuinely says 45s, with a real, later mtime.
+    // A 45s reading (below the default 120s) with a later mtime.
     ensure_next_write_is_strictly_fresher();
     write_watch_later(home, "entry", &file, 45.0);
 
@@ -839,10 +713,7 @@ fn a_noise_level_reading_never_overwrites_a_real_saved_position() {
     assert!(!state2.contains("45.0"), "got:\n{state2}");
 }
 
-// ---------------------------------------------------------------------
-// 10. Forward-scan is strictly forward: a real bookmark on an *earlier*
-//     episode must never reactivate or move a Paused series.
-// ---------------------------------------------------------------------
+// Forward scan only: a bookmark on an earlier episode never reactivates or moves a Paused series.
 
 #[test]
 fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
@@ -857,15 +728,14 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
     touch(&ep2);
     add_root(home, &anime_root);
 
-    // Real progress on episode 2, then paused there.
+    // Progress on episode 2, then paused.
     write_watch_later(home, "entry-2", &ep2, 500.0);
     run_ok(home, &["list"]);
     run_ok(home, &["pause", "Monster"]);
     let state_paused = fs::read_to_string(state_path(home)).unwrap();
     assert!(state_paused.contains("ep02.mkv"), "got:\n{state_paused}");
 
-    // A nostalgic rewatch peek at episode 1 — a real (>= resume_seconds)
-    // bookmark, with a fresher mtime than anything recorded so far.
+    // A bookmark on episode 1 with a fresher mtime than anything recorded.
     ensure_next_write_is_strictly_fresher();
     write_watch_later(home, "entry-1", &ep1, 200.0);
 
@@ -881,11 +751,7 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 11. Symlinks are followed everywhere: a symlinked series folder is
-//     tracked exactly like a real one, and a watch_later entry reached
-//     only through the symlinked path still attributes correctly.
-// ---------------------------------------------------------------------
+// Symlinks are followed: a symlinked series folder is tracked like a real one, and a watch_later entry via the symlink path attributes correctly.
 
 #[test]
 #[cfg(unix)]
@@ -898,10 +764,7 @@ fn a_symlinked_series_folder_is_tracked_exactly_like_a_real_one() {
     let anime_root = home.join("Anime");
     touch(&anime_root.join("RealShow").join("ep01.mkv"));
 
-    // The actual storage location lives entirely outside the tracked
-    // root; only a symlink named "LinkedShow" under the root points at
-    // it, exactly the "series folder is itself a symlink" case CLAUDE.md
-    // calls out.
+    // The real storage is outside the tracked root; "LinkedShow" under the root is a symlink to it.
     let real_storage = home.join("ActualStorage").join("LinkedShowReal");
     let linked_file = real_storage.join("ep01.mkv");
     touch(&linked_file);
@@ -917,8 +780,7 @@ fn a_symlinked_series_folder_is_tracked_exactly_like_a_real_one() {
         "a symlinked series folder must be tracked exactly like a real one, got: {list_before}"
     );
 
-    // mpv reports the path it was actually opened through — the
-    // symlinked path under the tracked root, not the real storage path.
+    // mpv reports the symlinked path it was opened through.
     let symlinked_path = anime_root.join("LinkedShow").join("ep01.mkv");
     write_watch_later(home, "entry", &symlinked_path, 400.0);
 
@@ -929,11 +791,7 @@ fn a_symlinked_series_folder_is_tracked_exactly_like_a_real_one() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 12. Bare `resume`, non-interactively, with more than one series
-//     genuinely in progress: must list real choices and exit non-zero —
-//     never hang, never guess which one to play.
-// ---------------------------------------------------------------------
+// Non-interactive bare `resume` with several series in progress lists choices and exits non-zero.
 
 #[test]
 fn non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs() {
@@ -964,15 +822,12 @@ fn non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs() 
         "got: {stdout}"
     );
 
-    // Nothing was mutated by the failed, non-acting listing.
+    // The listing mutated nothing.
     let state_untouched = fs::read_to_string(state_path(home)).unwrap();
     assert!(state_untouched.contains("Monster") && state_untouched.contains("Naruto"));
 }
 
-// ---------------------------------------------------------------------
-// 13. `sync` with real tracked progress but no MAL login fails cleanly —
-//     no network access is attempted, no crash, a real actionable error.
-// ---------------------------------------------------------------------
+// `sync` with progress but no MAL login fails cleanly without touching the network.
 
 #[test]
 fn sync_without_a_prior_login_fails_cleanly_with_no_network_access() {
@@ -1004,10 +859,7 @@ fn sync_without_a_prior_login_fails_cleanly_with_no_network_access() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 14. A paused series is excluded before MAL authentication or network
-//     access, preserving its local state as an explicit sync opt-out.
-// ---------------------------------------------------------------------
+// A paused series is excluded from sync before any MAL auth or network access.
 
 #[test]
 fn paused_series_are_not_synced_and_need_no_mal_login() {
@@ -1033,11 +885,7 @@ fn paused_series_are_not_synced_and_need_no_mal_login() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 14b. A manually dropped series is abandoned, not finished: sync excludes
-//      it before MAL access, however far in it was dropped. A series that
-//      really finished is the only one sync will act on.
-// ---------------------------------------------------------------------
+// A dropped series is excluded from sync; only a finished series is acted on.
 
 #[test]
 fn dropped_series_are_not_synced_but_completed_series_are() {
@@ -1052,7 +900,7 @@ fn dropped_series_are_not_synced_but_completed_series_are() {
     touch(&finished);
     add_root(home, &anime_root);
 
-    // Two minutes into ep1 of a two-episode series, then a manual drop.
+    // Two minutes into ep1 of two, then a manual drop.
     write_watch_later(home, "entry", &abandoned, 120.0);
     run_ok(home, &["list"]);
     run_ok(home, &["drop", "Abandoned"]);
@@ -1066,8 +914,7 @@ fn dropped_series_are_not_synced_but_completed_series_are() {
         "sync must leave a dropped record byte-for-byte unchanged"
     );
 
-    // A one-episode series watched to its end becomes a sync target: with
-    // no MAL login the run now reaches authentication and fails there.
+    // A one-episode series watched to its end is a sync target and fails at authentication.
     write_script_log(
         home,
         "log-finished",
@@ -1128,10 +975,7 @@ fn dropped_at_every_depth_is_never_synced() {
     }
 }
 
-// ---------------------------------------------------------------------
-// 14c. `pause`/`drop` never act on a finished series: Completed is reached
-//      only by watching the final episode.
-// ---------------------------------------------------------------------
+// `pause`/`drop` reject a finished series.
 
 #[test]
 fn pause_and_drop_reject_a_completed_series_and_leave_state_unchanged() {
@@ -1160,10 +1004,7 @@ fn pause_and_drop_reject_a_completed_series_and_leave_state_unchanged() {
     assert_eq!(fs::read_to_string(state_path(home)).unwrap(), before);
 }
 
-// ---------------------------------------------------------------------
-// 15. A deleted series folder leaves its state record inert: sync neither
-//     lists it nor requires MAL access, and doctor remains the only cleanup.
-// ---------------------------------------------------------------------
+// A deleted series folder leaves its record inert: sync ignores it and only `doctor` cleans it up.
 
 #[test]
 fn orphaned_series_are_not_synced_and_their_state_is_preserved() {
@@ -1191,12 +1032,7 @@ fn orphaned_series_are_not_synced_and_their_state_is_preserved() {
     );
 }
 
-// ---------------------------------------------------------------------
-// 16. `auto_pause_days`: off by default (a genuinely idle series stays
-//     in_progress forever), and — once explicitly opted in — a real,
-//     end-to-end auto-pause of a genuinely idle series, never a drop,
-//     never touching its saved position.
-// ---------------------------------------------------------------------
+// `auto_pause_days` is off by default; opted in, an idle series auto-pauses (never drops) and keeps its position.
 
 #[test]
 fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opted_in() {
@@ -1211,12 +1047,8 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
     write_watch_later(home, "entry", &file, 300.0);
     run_ok(home, &["list"]); // persists a real in_progress record
 
-    // Backdating alone, with the documented default (0 = never auto-pause)
-    // still in effect, must never pause anything — no matter how old.
-    // Merely re-running `list` never bumps `updated_at` on its own (the
-    // watch_later entry is unchanged, so reconcile finds no genuine
-    // change) — direct backdating is the only way to simulate real
-    // elapsed time here.
+    // Backdating with the default (0 = never) pauses nothing. Re-running `list` doesn't bump `updated_at`, so
+    // backdating is the only way to simulate elapsed time.
     backdate_only_updated_at(home, 365 * 86_400);
     let list_default = run_ok(home, &["list"]);
     assert!(
@@ -1224,16 +1056,14 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
         "auto_pause_days defaults to 0 (never auto-pause); got: {list_default}"
     );
 
-    // Opt in to a real 1-day threshold.
+    // Opt in to a 1-day threshold.
     let cfg = config_path(home);
     let patched = fs::read_to_string(&cfg)
         .unwrap()
         .replace("auto_pause_days = 0", "auto_pause_days = 1");
     fs::write(&cfg, patched).unwrap();
 
-    // Genuine fresh activity (a distinguishably different real position)
-    // refreshes `updated_at` to now — a 1-day-old bar hasn't been cleared
-    // yet, so this must stay in_progress.
+    // Fresh activity refreshes `updated_at`, so the series stays in_progress.
     ensure_next_write_is_strictly_fresher();
     write_watch_later(home, "entry", &file, 600.0);
     let list_still_fresh = run_ok(home, &["list"]);
@@ -1242,8 +1072,7 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
         "got: {list_still_fresh}"
     );
 
-    // Genuinely idle for 2 days against the 1-day threshold, no further
-    // activity accompanying it.
+    // Idle for 2 days against the 1-day threshold, with no new activity.
     backdate_only_updated_at(home, 2 * 86_400);
 
     let list_idle = run_ok(home, &["list"]);
@@ -1252,21 +1081,15 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
         "a series idle past auto_pause_days must be auto-paused, got: {list_idle}"
     );
 
-    // design.md §8: "never auto-dropped" — the saved position/episode must
-    // survive the transition untouched, exactly like a manual pause.
+    // The saved position and episode survive, as with a manual pause.
     let state_after = fs::read_to_string(state_path(home)).unwrap();
     assert!(state_after.contains("600"), "got:\n{state_after}");
     assert!(state_after.contains("ep01.mkv"), "got:\n{state_after}");
 }
 
-// ---------------------------------------------------------------------
-// 16. `add`, `exclude`, `pause` and `drop` take several arguments: each is
-//     handled independently, a failing one never blocks the rest, and the
-//     exit code is non-zero only if something failed.
-// ---------------------------------------------------------------------
+// Multi-argument `add`/`exclude`/`pause`/`drop`: each is handled independently; exit is non-zero only if one failed.
 
-/// Tracks `Anime/{names}` with one episode each and persists an
-/// `in_progress` record per series through the real `list` reconcile.
+/// Tracks `Anime/{names}` with one episode each and persists an `in_progress` record per series via `list`.
 fn start_series(home: &Path, names: &[&str]) -> PathBuf {
     let anime_root = home.join("Anime");
     for (i, name) in names.iter().enumerate() {
@@ -1530,13 +1353,9 @@ fn exclude_without_paths_still_lists_candidates_and_never_mutates_config() {
     assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
 }
 
-// ---------------------------------------------------------------------
-// 14. Several tracked routes: `list`, `start` and `resume` name each
-//     series' route; one route keeps the plain output.
-// ---------------------------------------------------------------------
+// With several tracked roots, `list`, `start` and `resume` name each series' root; a single root keeps plain output.
 
-/// Two tracked roots, `Anime` (added first) and `Shows`, returned as their
-/// stored strings.
+/// Two tracked roots, `Anime` (added first) and `Shows`, as their stored strings.
 fn two_roots_with_series(home: &Path, anime: &[&str], shows: &[&str]) -> (String, String) {
     let anime_root = home.join("Anime");
     let shows_root = home.join("Shows");
@@ -1624,12 +1443,9 @@ fn non_tty_resume_with_two_routes_groups_in_progress_series_under_route_headers(
     );
 }
 
-// ---------------------------------------------------------------------
-// `start`/`resume` scoped to one root by folder name (or `--root`)
-// ---------------------------------------------------------------------
+// `start`/`resume` scoped to one root by folder name or `--root`.
 
-/// Adds one root per `(folder, series)` pair under `home`, in order, each
-/// series holding one episode; returns the stored root strings in order.
+/// Adds one root per `(folder, series)` pair under `home`, each series holding one episode; returns the stored roots in order.
 fn library(home: &Path, roots: &[(&str, &[&str])]) -> Vec<String> {
     roots
         .iter()
@@ -1645,8 +1461,7 @@ fn library(home: &Path, roots: &[(&str, &[&str])]) -> Vec<String> {
         .collect()
 }
 
-/// Marks `<root>/<series>/ep01.mkv` in progress at `position` seconds and
-/// persists it through a real `list` run.
+/// Marks `<root>/<series>/ep01.mkv` in progress at `position` seconds via a `list` run.
 fn watch(home: &Path, entry: &str, root: &str, series: &str, position: f64) {
     write_watch_later(
         home,

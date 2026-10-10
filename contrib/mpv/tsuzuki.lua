@@ -1,26 +1,15 @@
--- tsuzuki.lua: optional mpv companion script for Tsuzuki.
--- Installing this is never required -- Tsuzuki works from mpv's own
--- watch_later files without it. When present, it gives Tsuzuki a direct,
--- unambiguous signal per file (duration, last position, and *why*
--- playback ended -- genuinely reached the end vs. skipped away vs. quit)
--- instead of inferring those from watch_later state after the fact.
---
--- Purely passive: writes one small text file per played source path to
--- its own log directory, atomically (temp file + rename), and never reads
--- anything back or opens a socket. mpv loads this identically for every
--- invocation regardless of what launched it (Tsuzuki, a terminal, a file
--- manager) -- the same launcher-independence Tsuzuki's tracking already
--- relies on for watch_later itself.
+-- Optional mpv companion for Tsuzuki; watch_later alone is enough without it.
+-- Logs duration, last position and why playback ended (eof, stop, quit, ...).
+-- Passive: one file per played path, written atomically (temp file + rename).
+-- Nothing is read back and no socket is opened.
 
 local last_time_pos = nil
 local current_duration = nil
 local current_path = nil
 local log_dir_created = false
 
--- djb2, pure integer arithmetic only (+, *, %) -- deliberately avoids
--- Lua 5.3+-only bitwise operators and the 5.1/5.2 bit/bit32 libraries,
--- since mpv ships with different Lua versions (often LuaJIT) depending on
--- build; this needs to work identically on all of them.
+-- djb2 with plain integer arithmetic; bitwise operators and bit libraries
+-- differ across the Lua versions mpv builds ship with.
 local function hash_path(str)
     local hash = 5381
     for i = 1, #str do

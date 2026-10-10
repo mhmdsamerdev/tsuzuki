@@ -1,47 +1,8 @@
-//! MyAnimeList linking and the two-way episode-progress merge (design.md
-//! §7, Phase 8b). Builds directly on Phase 8a's `mal.rs` — the authenticated
-//! HTTP client (`MalHttpClient::get`/`patch_form`) and `ensure_access_token`
-//! — without touching any OAuth/PKCE/token-refresh internals; this module
-//! only ever calls into that existing interface.
+//! MyAnimeList linking and the two-way episode-progress merge.
 //!
-//! ## Where a series → MAL-id link is stored, and why
-//!
-//! In `state.toml`, as `state::MalLink` (a new `[[mal_links]]` array-of-
-//! tables, keyed by the same `(root, name)` composite key `SeriesRecord`
-//! already uses) — not in `config.toml`. The two files' actual distinction
-//! (CLAUDE.md §3: "config is meant to be hand-edited and versioned in
-//! dotfiles repos; state is not") is about *authorship*, not portability: a
-//! MAL link is always Tsuzuki-derived/written, either by exact-match
-//! auto-linking during `sync` or by the explicit `sync link` command
-//! recording its own result — never something a user directly hand-types
-//! into a TOML file the way a tracked root or an exclusion is. It belongs
-//! in the same category, and the same file, as `SeriesRecord` itself, and
-//! gets the same atomic-write guarantee for free by reusing `state::write`
-//! rather than needing a third persisted file with its own write path.
-//!
-//! ## The non-destructive invariant (CLAUDE.md §2)
-//!
-//! "Local best-known episode number" for the merge comparison
-//! ([`local_effective_episode`]) is **not** the raw, `reconcile.rs`-owned
-//! `episode_number` alone, for two separate reasons:
-//!
-//! - `episode_number` is a cursor (the episode currently being watched, or
-//!   just-advanced-to at position 0), not a watched count — MAL's field
-//!   means "episodes already watched," so the number fed into the merge is
-//!   `episode_number - 1` in the ordinary case (see
-//!   [`local_effective_episode`]'s own doc comment for the one narrow
-//!   exception, a `Dropped` record left sitting on a just-completed finale).
-//! - `reconcile.rs` unconditionally overwrites `episode_number` from local
-//!   file position on every reconcile pass, so a MAL-driven pull has to be
-//!   remembered somewhere `reconcile.rs` never touches
-//!   (`SeriesRecord::mal_episode_awareness`) — and that remembered number
-//!   has to keep counting as "local" in every future comparison, or a merge
-//!   could re-read a stale, lower local number and silently push it back
-//!   down over a higher number MAL (or a previous pull) already established.
-//!
-//! [`decide_merge`] itself is a pure three-way comparison with no special
-//! cases — the safety comes entirely from never feeding it a number that
-//! regresses what's already been confirmed on either side.
+//! Series → MAL-id links live in `state.toml` (`state::MalLink`), since
+//! Tsuzuki writes them itself. The local side of the merge is
+//! [`local_effective_episode`], never the raw `episode_number`.
 
 use std::fmt;
 use std::path::Path;
@@ -60,20 +21,12 @@ use crate::state::{MalLink, SeriesRecord, State, Status, now_unix};
 
 pub const API_BASE: &str = "https://api.myanimelist.net/v2";
 
-/// A light, deliberate pause between consecutive MAL API calls within one
-/// `sync` run — MAL doesn't publish a hard documented rate limit, but this
-/// project doesn't fire requests at it in an unthrottled burst across a
-/// large tracked library either. Not a `config.toml` field: this is an
-/// internal politeness delay, not a user-facing tunable in the design doc's
-/// sense (contrast `resume_seconds`/`completion_remaining_seconds`, which
-/// change observable behavior) — tests pass `Duration::ZERO` directly to
-/// every function that takes a delay parameter instead.
+/// Pause between consecutive MAL API calls within one `sync` run. Not a
+/// config field; tests pass `Duration::ZERO`.
 pub const API_CALL_DELAY: Duration = Duration::from_millis(300);
 
-/// Sleeps `delay` before every call after the first in one loop — call once
-/// per HTTP request, threading the same `is_first` through one logical
-/// sequence of calls (one per pagination loop, one per the per-series sync
-/// loop). Never sleeps before the very first call in a run.
+/// Sleeps `delay` before every call except the first of a call sequence;
+/// `is_first` is threaded through the sequence.
 fn throttle(is_first: &mut bool, delay: Duration) {
     if *is_first {
         *is_first = false;
@@ -84,11 +37,8 @@ fn throttle(is_first: &mut bool, delay: Duration) {
 
 // --- Title normalization, exact-match linking, similarity ranking ---
 
-/// Normalizes a title for comparison (design.md §7: "Normalize both sides
-/// (case, brackets, whitespace)"): strips any parenthesized/bracketed
-/// content entirely (annotations like a year or source tag that wouldn't be
-/// worded identically on both a local folder name and MAL's title fields),
-/// lowercases, and collapses whitespace.
+/// Strips bracketed content, lowercases, and collapses whitespace so local
+/// folder names and MAL titles compare equal.
 pub fn normalize_title(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut depth: i32 = 0;
@@ -123,9 +73,8 @@ pub struct AnimeListEntry {
     pub status: MalListStatus,
 }
 
-/// MAL's documented anime-list statuses. `Unknown` keeps a future API value
-/// from breaking the whole sync run; Tsuzuki simply leaves an unrecognized
-/// status untouched.
+/// MAL's anime-list statuses. `Unknown` absorbs unrecognized API values,
+/// which sync leaves untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MalListStatus {
@@ -163,9 +112,8 @@ impl MalListStatus {
     }
 }
 
-/// Every known title for one entry — main title, English, Japanese (when
-/// present), and every synonym. This is the full candidate set design.md
-/// §7 means by "any of an entry's known titles."
+/// Every known title of an entry: main, English, Japanese (when present),
+/// and synonyms.
 fn candidate_titles(entry: &AnimeListEntry) -> Vec<&str> {
     let mut titles = vec![entry.titles.main.as_str()];
     if !entry.titles.en.is_empty() {
@@ -178,8 +126,8 @@ fn candidate_titles(entry: &AnimeListEntry) -> Vec<&str> {
     titles
 }
 
-/// An **exact** match (post-normalization) between `local_name` and any
-/// known title of any entry — never fuzzy, never picks a "closest" result.
+/// The entry with a title equal to `local_name` after normalization. Never
+/// fuzzy.
 pub fn find_exact_match<'a>(
     local_name: &str,
     entries: &'a [AnimeListEntry],
@@ -192,10 +140,7 @@ pub fn find_exact_match<'a>(
     })
 }
 
-/// Levenshtein edit distance, character-based — small and hand-written
-/// rather than a new dependency, since this only ever ranks what's
-/// *displayed* to the user (design.md §7: "similarity ranks what's
-/// displayed, never decides a match") and never feeds a linking decision.
+/// Character-based Levenshtein distance. Only ranks displayed candidates.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -231,12 +176,8 @@ pub struct Candidate {
     pub similarity: f64,
 }
 
-/// The `top_n` closest entries by title similarity — display-only (design.md
-/// §7: "show the closest candidates by title... user picks one" — per this
-/// project's own list-only, non-interactive precedent for exactly this
-/// shape of ambiguity (CLAUDE.md's "Anitomy-candidate confirmation stays
-/// list-only, not interactive"), "picks one" here means re-invoking
-/// `sync link` with an explicit `--mal-id`, not an interactive prompt).
+/// The `top_n` entries closest to `local_name` by title similarity.
+/// Display-only; never decides a link.
 pub fn rank_candidates(
     local_name: &str,
     entries: &[AnimeListEntry],
@@ -261,17 +202,9 @@ pub fn rank_candidates(
     scored
 }
 
-/// The single best-matching candidate for a "did you mean...?" suggestion —
-/// but only when it's actually good enough to be worth showing.
-/// `fuzzy_match_threshold` (`[mal] fuzzy_match_threshold` in config.toml,
-/// CLAUDE.md's "sync output only ever suggests a confident fuzzy match")
-/// is the bar: below it, `rank_candidates`' own top result is still just
-/// "the least-bad of whatever's on the list" — often a completely unrelated
-/// series — and surfacing it as a suggestion is noise, not help. This never
-/// changes what counts as a *match*; `find_exact_match` alone still decides
-/// that. It only decides what's worth *displaying* as a manual-link hint,
-/// same list-only, never-auto-links precedent `rank_candidates` itself
-/// already documents.
+/// The closest candidate, only if its similarity reaches
+/// `fuzzy_match_threshold`. A display-only suggestion; `find_exact_match`
+/// alone decides links.
 pub fn best_candidate(
     local_name: &str,
     entries: &[AnimeListEntry],
@@ -382,16 +315,12 @@ fn to_anime_list_entry(entry: AnimeListEntryJson) -> AnimeListEntry {
     }
 }
 
-/// A hard cap on pages followed via `paging.next`, purely defensive against
-/// a pathological/looping response — 200 pages at `limit=1000` is 200,000
-/// entries, far beyond any real MAL list.
+/// Page cap against a looping `paging.next` chain.
 const MAX_LIST_PAGES: usize = 200;
 
-/// Fetches the authenticated user's full anime list (design.md §7's
-/// "fetch the user's MAL list"), following `paging.next` until exhausted.
-/// `fields=alternative_titles,num_episodes,list_status` so every entry
-/// already carries what linking, progress merging, and status transitions
-/// need — a freshly-linked series never needs a second lookup this same run.
+/// Fetches the user's full anime list, following `paging.next`. The requested
+/// fields cover linking, merging and status transitions, so a freshly linked
+/// series needs no second lookup.
 pub fn fetch_anime_list(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -443,20 +372,16 @@ fn require_success(resp: &HttpResponse) -> Result<(), SyncApiError> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimeStatus {
-    /// Whether the anime is genuinely on the authenticated user's list —
-    /// `my_list_status` present in the response. `false` means a valid MAL
-    /// anime ID that simply isn't on this user's list at all.
+    /// Whether `my_list_status` was present, i.e. the anime is on the user's
+    /// list.
     pub on_list: bool,
     pub num_episodes_watched: u32,
     pub num_episodes: u32,
     pub status: MalListStatus,
 }
 
-/// A single anime's current list status by ID — used both to validate a
-/// manual `sync link --mal-id` (does it actually appear on the user's list)
-/// and, for an already-linked series, to learn MAL's current
-/// watched count, total episode count, and list status without re-fetching
-/// or re-scanning the entire list.
+/// One anime's list status by ID. Validates `sync link --mal-id` and reads
+/// MAL's current progress for a linked series.
 pub fn fetch_anime_status(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -486,23 +411,12 @@ pub fn fetch_anime_status(
     })
 }
 
-/// Updates MAL through `PATCH /v2/anime/{id}/my_list_status`. **The episode
-/// request-body field is
-/// `num_watched_episodes`** — MAL's API is asymmetric here: the *response*
-/// (`fetch_anime_status`/the list fetch) reports `num_episodes_watched`,
-/// but the *update* endpoint's own request-body field is
-/// `num_watched_episodes` (words swapped), confirmed independently against
-/// Taiga's own real request-building code and the unofficial MAL API
-/// specification (which explicitly notes the two field names differ). This
-/// asymmetry is easy to get wrong silently — using the response field name
-/// here wouldn't error, MAL would just ignore the unrecognized field and
-/// the episode count would silently never update. Combining an
-/// episode push and a status transition avoids two writes—and avoids a
-/// partially-applied result if the second request were to fail. MAL's
-/// published writable schema omits `start_date` and `finish_date`, but a
-/// live authenticated PATCH/read-back probe confirmed both fields are
-/// accepted and persisted; they are included only with the corresponding
-/// forward status transition.
+/// Updates MAL via `PATCH /v2/anime/{id}/my_list_status`.
+///
+/// The request field is `num_watched_episodes`, while responses report
+/// `num_episodes_watched`; MAL silently ignores the wrong name. Episode count,
+/// status and dates go in one request so a failure can't apply half. Dates are
+/// sent only with a forward status transition.
 fn update_mal_entry(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -537,7 +451,7 @@ fn update_mal_entry(
     Ok(())
 }
 
-// --- Merge decision (CLAUDE.md §2: never write a smaller number) ---
+// --- Merge decision ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeAction {
@@ -550,9 +464,7 @@ pub enum MergeAction {
     NoOp,
 }
 
-/// The entire two-way merge rule (design.md §7): take the higher number, in
-/// either direction, never overwrite down. Pure and total — every input
-/// pair resolves to exactly one of three outcomes, no partial states.
+/// Takes the higher number in either direction; never overwrites down.
 pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
     match local.cmp(&mal) {
         std::cmp::Ordering::Greater => MergeAction::Push(local),
@@ -561,10 +473,9 @@ pub fn decide_merge(local: u32, mal: u32) -> MergeAction {
     }
 }
 
-/// The only automatic MAL status transitions. Tsuzuki never changes an
-/// explicit `on_hold`/`dropped` status and never moves a status backward.
-/// A completed count is based on MAL's declared total when available, or
-/// Tsuzuki's existing confirmed-finale signal.
+/// The automatic forward status transition, if any. Never changes
+/// `on_hold`/`dropped` or moves a status backward. Finished means MAL's total
+/// is reached or the local series is `Completed`.
 fn desired_status(
     current: MalListStatus,
     watched: u32,
@@ -584,10 +495,8 @@ fn desired_status(
     }
 }
 
-/// Date fields that belong to a forward MAL status transition. MAL accepts
-/// calendar dates rather than timestamps, so both values use the local date
-/// captured once at the beginning of this sync run. A title completed in a
-/// single run crosses both boundaries and receives both dates.
+/// Start/finish dates for a forward status transition, using the local date
+/// captured once per run. A series completed in one run gets both.
 fn transition_dates(
     current: MalListStatus,
     next: Option<MalListStatus>,
@@ -603,25 +512,13 @@ fn transition_dates(
     }
 }
 
-/// The local side of a merge comparison — see this module's own doc comment
-/// for why this folds in `mal_episode_awareness`, not just the raw,
-/// `reconcile.rs`-owned `episode_number` alone.
+/// Watched-episode count on the local side of the merge, including
+/// `mal_episode_awareness`.
 ///
-/// **`episode_number` is a cursor, not a watched count.** It names the
-/// episode a record is currently sitting on — the one being watched (a real
-/// mid-episode position), or the one just advanced to at position 0 after
-/// the previous episode completed (CLAUDE.md's "When the CURRENT tracked
-/// episode itself completes") — not an episode confirmed finished. MAL's own
-/// field means "episodes already watched," so pushing the raw cursor number
-/// overstates progress by exactly one: the cursor's own episode hasn't been
-/// counted as watched yet. The fix is the episode immediately before it,
-/// `episode_number.saturating_sub(1)`.
-///
-/// **One exception:** `apply_completion_advance` (`reconcile.rs`) has no
-/// next episode to advance a completed series to, so it leaves the cursor
-/// sitting on the finale it just confirmed complete and marks the record
-/// `Completed` — the only case where the cursor's own episode genuinely
-/// *is* the watched count, not one short of it.
+/// `episode_number` is a cursor: the episode being watched or just advanced
+/// to, not yet finished. MAL counts watched episodes, so the count is
+/// `episode_number - 1`. A `Completed` record's cursor stays on the finished
+/// finale, so there it is the count itself.
 pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     let cursor = record.episode_number.unwrap_or(0);
     let watched = if record.status == Status::Completed {
@@ -632,22 +529,13 @@ pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     watched.max(record.mal_episode_awareness.unwrap_or(0))
 }
 
-/// Advances Tsuzuki's local playback cursor to the first locally available
-/// episode after `watched_episodes`.
+/// Moves the local cursor to the first on-disk episode after
+/// `watched_episodes`, at position zero.
 ///
-/// MAL reports a watched count, while Tsuzuki stores the episode to resume.
-/// A successful sync therefore has a local consequence when MAL is ahead:
-/// if MAL says episode 9 is watched, the local cursor should land on episode
-/// 10 at position zero instead of continuing to resume an older episode.
-///
-/// The ordered file list remains authoritative. Anitomy only identifies the
-/// first entry whose episode number is greater than MAL's watched count; it
-/// never reorders the list. The cursor moves only when that entry is later
-/// than the currently stored file, so sync can never regress local progress.
-/// Paused records stay paused, and dropped and completed records remain
-/// deliberate dead ends. If the next episode is not on disk yet, the record is left alone;
-/// the retained `mal_episode_awareness` lets a later sync try again after new
-/// files arrive.
+/// The ordered file list is authoritative; anitomy only finds the first entry
+/// numbered above the watched count. The cursor never moves backward. Dropped
+/// and completed records are left alone, and so is a record whose next episode
+/// isn't on disk yet (`mal_episode_awareness` lets a later sync retry).
 fn advance_local_cursor(
     config: &Config,
     state: &mut State,
@@ -711,14 +599,11 @@ fn advance_local_cursor(
     true
 }
 
-/// Applies the local-cursor side of every successful sync result.
+/// Advances the local cursor for every merged outcome and returns
+/// `(root, name, watched)` for each cursor that moved.
 ///
-/// `NoOp` is intentionally included: releases before v0.1.1 could persist
-/// the higher MAL awareness without advancing the cursor, so the next sync
-/// must repair that stale state even though the episode-count merge itself
-/// now has nothing left to change. Returns each cursor it actually advanced
-/// with the agreed watched count, so the command layer can report that real
-/// local change while keeping fully unchanged no-ops silent.
+/// `NoOp` and `RemoteStatus` are included so state left by an older release
+/// (awareness raised, cursor not advanced) is repaired.
 pub fn apply_synced_progress(
     config: &Config,
     state: &mut State,
@@ -751,10 +636,8 @@ pub fn apply_synced_progress(
     advanced
 }
 
-/// Runs the decision and, only for `Push`, the actual PATCH — a merge that
-/// resolves to `Pull`/`NoOp` never calls the network a second time (the
-/// `mal` number was already learned via whichever GET the caller used to
-/// resolve it).
+/// Decides the merge and sends one PATCH covering any episode push and status
+/// change. `Pull` and `NoOp` send no episode count.
 fn merge_and_maybe_update(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -789,15 +672,9 @@ fn merge_and_maybe_update(
     Ok(merge_action)
 }
 
-/// Applies a resolved merge action to `state` — updates
-/// `mal_episode_awareness` to the now-agreed-upon number and bumps
-/// `updated_at`, but **only** for `Push`/`Pull` (design.md's "equal →
-/// no-op" means no-op all the way down to storage: a genuine no-op never
-/// touches `state.toml` at all, matching this project's existing "never
-/// touch saved state on a no-op" precedent everywhere else). Cursor
-/// alignment is a separate post-merge step: [`advance_local_cursor`] may
-/// move to the first unwatched local episode at position zero, but this
-/// function never invents a playback position for a watched episode.
+/// Records the agreed episode count in `mal_episode_awareness` for
+/// `Push`/`Pull`. Other actions leave state untouched. Cursor movement is
+/// [`advance_local_cursor`]'s job.
 fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
     let new_awareness = match action {
         MergeAction::Push(n) | MergeAction::Pull(n) => n,
@@ -830,17 +707,9 @@ impl fmt::Display for ManualLinkError {
     }
 }
 
-/// Judgment call (flagged per this phase's own instructions, not silently
-/// resolved): **yes, verify the given id against the user's real MAL list
-/// before persisting it.** Matches this project's existing precedent for
-/// explicit user input (CLAUDE.md's "`tsuzuki add` validation and
-/// idempotency": `add` validates a path exists at add-time rather than
-/// deferring to `doctor`) — a manual link is exactly this shape of input,
-/// and a typo'd id would otherwise persist silently and only surface much
-/// later as a confusing per-series merge failure (or worse, a real PATCH
-/// against a wrong, unrelated anime). One extra GET at link time (rare —
-/// this is a manual override path, not the daily reflex command) buys a
-/// link the merge step can trust unconditionally forever after.
+/// Links `name` to `mal_id` after checking the id is on the user's MAL list,
+/// so a mistyped id is rejected here instead of failing later or patching an
+/// unrelated anime.
 pub fn manual_link(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -875,15 +744,12 @@ fn upsert_link(state: &mut State, root: &str, name: &str, mal_id: u32) {
 pub enum OutcomeKind {
     /// Linked (just now, or already) and merged.
     Merged { mal_id: u32, action: MergeAction },
-    /// Not yet linked, and no exact title match was found. `suggestion` is
-    /// `Some` only when the best candidate cleared `fuzzy_match_threshold`
-    /// — see [`best_candidate`]. Never more than one: a list of weak
-    /// candidates is noise, not a useful "did you mean" prompt.
+    /// Not yet linked, and no exact title match was found. `suggestion` is set
+    /// only when the best candidate cleared `fuzzy_match_threshold`.
     NoExactMatch { suggestion: Option<Candidate> },
     /// Not yet linked, and the user's MAL list is completely empty.
     EmptyList,
-    /// Any failure — network, API rejection, parse error — for this series
-    /// specifically. Never aborts the rest of the run.
+    /// Any failure for this series; the rest of the run continues.
     Failed(String),
 }
 
@@ -894,13 +760,9 @@ pub struct SeriesOutcome {
     pub kind: OutcomeKind,
 }
 
-/// Returns the state records eligible for a MAL progress merge.
-///
-/// Pausing or dropping is an explicit request to preserve a series' local
-/// progress without MAL changing it (and without that stale local cursor
-/// changing MAL). An orphaned record is inert everywhere outside `doctor`,
-/// so its series directory must also exist at sync time. Completed records
-/// stay eligible so the finished series reaches MAL.
+/// Records eligible for a MAL merge: not paused or dropped, root still
+/// tracked, and series directory present. Completed records are included so
+/// they reach MAL.
 pub fn eligible_targets(
     state: &State,
     config: &Config,
@@ -920,18 +782,13 @@ pub fn eligible_targets(
         .collect()
 }
 
-/// Runs `sync` across every `(root, name)` in `targets` — design.md §7 +
-/// this phase's own instructions: attempt linking first if not already
-/// linked, then merge if linked; one series failing never aborts the rest.
-/// `targets` is expected to come from [`eligible_targets`]: a never-started
-/// series has no record, while paused, dropped and orphaned records are deliberately
-/// excluded before this network-facing layer runs.
+/// Links (if needed) and merges each `(root, name)` in `targets`; one series
+/// failing doesn't abort the rest. `targets` should come from
+/// [`eligible_targets`].
 ///
-/// The bulk list (needed only for not-yet-linked series) is fetched **at
-/// most once** per run, shared across every series that needs it — not
-/// once per series. If that one fetch fails, every not-yet-linked series in
-/// this run fails with that same underlying reason, but already-linked
-/// series are entirely unaffected (they never touch the bulk list at all).
+/// The bulk list is fetched at most once per run, and only if some target is
+/// unlinked. If that fetch fails, every unlinked series fails with its error;
+/// linked series are unaffected.
 pub fn run_sync(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -952,8 +809,7 @@ pub fn run_sync(
     )
 }
 
-/// The testable core of [`run_sync`]. Production captures the local calendar
-/// date once so every transition in one command uses the same value.
+/// [`run_sync`] with the date injected for tests.
 fn run_sync_on_date(
     client: &dyn MalHttpClient,
     bearer_token: &str,
@@ -977,7 +833,7 @@ fn run_sync_on_date(
     };
 
     let mut outcomes = Vec::with_capacity(targets.len());
-    let mut is_first_call = list.is_none(); // the list fetch (if any) already used the first slot
+    let mut is_first_call = list.is_none(); // the list fetch, if any, used the first slot
 
     for (root, name) in targets {
         let local = state
@@ -1004,9 +860,8 @@ fn run_sync_on_date(
                         Some(entry) => {
                             let id = entry.id;
                             upsert_link(state, root, name, id);
-                            // A freshly-linked entry already carries
-                            // num_episodes_watched from the same list
-                            // fetch — merge immediately, no extra GET.
+                            // The list entry already carries the watched
+                            // count; no extra GET.
                             let remote = AnimeStatus {
                                 on_list: true,
                                 num_episodes_watched: entry.num_episodes_watched,
@@ -1069,9 +924,7 @@ fn run_sync_on_date(
             },
         };
 
-        // Already linked (from a prior run, or a manual `sync link`) —
-        // learn MAL's current count via a single per-anime lookup, never
-        // the bulk list.
+        // Already linked: read MAL's current progress for this one anime.
         throttle(&mut is_first_call, delay);
         let result = fetch_anime_status(client, bearer_token, mal_id).and_then(|status| {
             merge_and_maybe_update(
@@ -1112,9 +965,8 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    /// A representative `fuzzy_match_threshold`, used everywhere `run_sync`
-    /// is exercised end-to-end in this module's tests unless a test is
-    /// specifically about the threshold boundary itself.
+    /// `fuzzy_match_threshold` for end-to-end `run_sync` tests that aren't about
+    /// the threshold boundary.
     const TEST_FUZZY_MATCH_THRESHOLD: f64 = 0.8;
 
     // --- Title normalization ---
@@ -1231,11 +1083,7 @@ mod tests {
 
     #[test]
     fn rank_candidates_never_auto_selects_only_displays() {
-        // rank_candidates has no way to "decide" anything — it's a plain
-        // Vec, the caller (run_sync) never reads a ranked list as a link
-        // decision anywhere in this module. This test just pins the
-        // contract: the top-ranked candidate is not automatically equal to
-        // an exact match outcome.
+        // A top-ranked candidate is not an exact match.
         let entries = vec![entry(1, "One Piece Special", "", "", &[])];
         assert_eq!(find_exact_match("One Piece", &entries), None);
         let ranked = rank_candidates("One Piece", &entries, 5);
@@ -1266,7 +1114,7 @@ mod tests {
         assert!(best_candidate("abcd", &entries, 0.8).is_some());
     }
 
-    // --- Merge decision table (CLAUDE.md §2's core invariant) ---
+    // --- Merge decision table ---
 
     #[test]
     fn merge_local_greater_than_mal_pushes_local() {
@@ -1383,8 +1231,7 @@ mod tests {
 
     #[test]
     fn local_effective_uses_episode_number_minus_one_when_no_prior_mal_awareness() {
-        // base_record is InProgress, cursor = episode 9 — that episode
-        // itself is still being watched, so only 8 count as watched.
+        // base_record's cursor is episode 9, still being watched: 8 watched.
         let record = base_record();
         assert_eq!(local_effective_episode(&record), 8);
     }
@@ -1409,9 +1256,8 @@ mod tests {
 
     #[test]
     fn local_effective_uses_cursor_as_is_when_completed_on_the_finale() {
-        // The apply_completion_advance terminal case: no next episode, so
-        // reconcile leaves the cursor sitting on the finale it just
-        // confirmed complete. That finale genuinely was watched in full.
+        // No next episode to advance to, so the cursor stays on the finished
+        // finale and counts as watched.
         let mut record = base_record();
         record.status = Status::Completed;
         record.position_seconds = 1380.0;
@@ -1468,8 +1314,7 @@ mod tests {
             format!("{}/Shokei Shoujo no Virgin Road - S01E07.mkv", record.name);
         record.position_seconds = 600.0;
         record.episode_number = Some(7);
-        // This reproduces an already-synced state written by v0.1.0: MAL
-        // awareness moved to 9, but the local cursor incorrectly stayed 7.
+        // Awareness is 9 but the cursor stayed on 7, as an older release left it.
         record.mal_episode_awareness = Some(9);
         let mut state = State {
             series: vec![record],
@@ -1590,19 +1435,11 @@ mod tests {
         );
     }
 
-    // --- THE non-destructive invariant test (verification item 5) ---
+    // --- Non-destructive invariant ---
     //
-    // Fabricates exactly the case a naive implementation gets wrong: a
-    // series was already pulled up to episode 20 via a prior MAL sync
-    // (mal_episode_awareness = 20), but the raw local anitomy-derived
-    // episode_number still reads only 15 (e.g. reconcile hasn't observed
-    // any newer local playback since). A naive implementation comparing
-    // raw episode_number (15) against MAL's current count would read
-    // "MAL ahead" or "local behind" incorrectly and could push 15 back to
-    // MAL, silently overwriting the real, higher, already-confirmed 20.
-    // This must never happen — decide_merge always sees the *effective*
-    // local number, so the fake would-push-15 case can't arise, and the
-    // FakeClient below would panic if a PATCH were ever attempted.
+    // A stale raw episode_number (15) below established awareness (20) must
+    // never be pushed over MAL's higher count; the merge sees the effective
+    // number.
 
     #[test]
     fn never_pushes_a_smaller_number_when_a_stale_local_read_is_lower_than_established_awareness() {
@@ -1612,12 +1449,8 @@ mod tests {
             r.mal_episode_awareness = Some(20); // already-established higher number
             r
         });
-        // The naive bug this guards against: comparing raw episode_number
-        // (15) directly against MAL's number would look like "local < MAL"
-        // for a MAL count anywhere in 16..=19, incorrectly triggering a
-        // *pull* that discards the already-known 20. Using the effective
-        // number instead correctly reads "local ahead" and would push 20,
-        // never a smaller number, for a MAL count in that same range.
+        // Comparing the raw 15 would wrongly pull for MAL counts in 16..=19;
+        // the effective 20 pushes 20 instead.
         assert_eq!(effective_local, 20);
         assert_eq!(decide_merge(effective_local, 18), MergeAction::Push(20));
         assert_eq!(decide_merge(effective_local, 20), MergeAction::NoOp);
@@ -1626,11 +1459,8 @@ mod tests {
 
     #[test]
     fn run_sync_never_patches_a_smaller_number_than_mal_already_has() {
-        // End-to-end version of the same invariant, through run_sync
-        // itself: a linked series whose stale local number (15) is below
-        // MAL's real current count (18) must PULL, never push — the fake
-        // client panics if patch_form is ever called with anything below
-        // 18, proving the push path is genuinely never taken here.
+        // End-to-end: stale local 15 below MAL's 18 pulls; the fake panics on
+        // any PATCH below 18.
         let client = FakeClient::new();
         client.push_status_response(
             200,
@@ -1845,7 +1675,7 @@ mod tests {
         );
     }
 
-    // --- Manual link (`sync link`), including the validate-before-persist judgment call ---
+    // --- Manual link (`sync link`) ---
 
     #[test]
     fn manual_link_persists_when_the_id_is_on_the_users_list() {
@@ -1866,8 +1696,7 @@ mod tests {
 
     #[test]
     fn manual_link_rejects_and_does_not_persist_an_id_not_on_the_list() {
-        // MAL returns the anime, but with no my_list_status at all — a
-        // real, valid MAL id that simply isn't on this user's list.
+        // A valid MAL id with no my_list_status: not on this user's list.
         let client = FakeClient::new();
         client.push_status_response(200, r#"{"id":999,"title":"Some Anime"}"#);
 
@@ -1915,11 +1744,8 @@ mod tests {
     #[test]
     fn run_sync_reports_no_exact_match_with_no_suggestion_when_nothing_clears_the_threshold() {
         let client = FakeClient::new();
-        // "One Piece" vs "One Piece Special" — related-looking, but the
-        // similarity a naive reader might expect is well under a reasonable
-        // confidence bar (~0.53 here). This is exactly the noisy-suggestion
-        // shape this project's own dogfooding flagged: a weak candidate is
-        // worse than no candidate at all, so it must not surface.
+        // "One Piece" vs "One Piece Special" scores ~0.53, under the
+        // threshold, so no suggestion is shown.
         client.push_list_response(
             200,
             r#"{"data":[{"node":{"id":5,"title":"One Piece Special","alternative_titles":{"en":"","ja":"","synonyms":[]},"my_list_status":{"num_episodes_watched":0}}}]}"#,
@@ -1951,8 +1777,7 @@ mod tests {
     #[test]
     fn run_sync_reports_no_exact_match_with_a_confident_suggestion() {
         let client = FakeClient::new();
-        // "One Piece" vs "One Piece!" — a single extra character, similarity
-        // 0.9, comfortably above TEST_FUZZY_MATCH_THRESHOLD (0.8).
+        // "One Piece" vs "One Piece!" scores 0.9, above the 0.8 threshold.
         client.push_list_response(
             200,
             r#"{"data":[{"node":{"id":5,"title":"One Piece!","alternative_titles":{"en":"","ja":"","synonyms":[]},"my_list_status":{"num_episodes_watched":0}}}]}"#,
@@ -1982,8 +1807,7 @@ mod tests {
             }
             other => panic!("expected NoExactMatch, got {other:?}"),
         }
-        // Never auto-linked — a suggestion is display-only, `sync link`
-        // is still required to actually confirm it.
+        // A suggestion never auto-links; `sync link` is still required.
         assert!(state.find_mal_link("~/Anime", "One Piece").is_none());
     }
 
@@ -2046,19 +1870,17 @@ mod tests {
             state.find_mal_link("~/Anime", "One Piece").unwrap().mal_id,
             7
         );
-        // Only the list fetch happened — no extra per-anime GET for a
-        // series linked this same run.
+        // Only the list fetch; no per-anime GET for a series linked this run.
         assert_eq!(client.get_calls.borrow().len(), 1);
         assert_eq!(client.patch_calls.borrow().len(), 1);
     }
 
-    // --- Partial-failure continuation (verification item: one bad entry doesn't abort the rest) ---
+    // --- Partial-failure continuation ---
 
     #[test]
     fn one_series_failing_does_not_abort_or_corrupt_the_rest_of_the_run() {
         let client = FakeClient::new();
-        // Both already linked. The first anime-status lookup (id 1) fails
-        // outright; the second (id 2) succeeds.
+        // Both linked. The status lookup for id 1 fails; id 2 succeeds.
         client.push_status_response(500, "boom");
         client.push_status_response(
             200,
@@ -2114,11 +1936,10 @@ mod tests {
             }
         );
 
-        // The failing series' local state must be completely untouched —
-        // no partial/corrupt write from the aborted attempt.
+        // The failing series' state is untouched.
         let failing = state.find("~/Anime", "Failing Show").unwrap();
         assert_eq!(failing.mal_episode_awareness, None);
-        // The working series must have genuinely persisted its result.
+        // The working series persisted its result.
         let working = state.find("~/Anime", "Working Show").unwrap();
         assert_eq!(working.mal_episode_awareness, Some(50));
     }
@@ -2420,12 +2241,9 @@ mod tests {
 
     // --- Fakeable HTTP client for this module's own tests ---
 
-    /// A small, queue-based fake: each `push_*_response` call queues one
-    /// response for the *next* matching call. Also records every call made,
-    /// so tests can assert on call counts (e.g. "no second lookup for a
-    /// freshly-linked series") and on exactly what a PATCH would have sent
-    /// (the non-destructive-invariant tests rely on this never containing a
-    /// smaller number than expected).
+    /// Queue-based fake: each `push_*_response` queues one response for the
+    /// next matching call. Records every call so tests can assert call counts
+    /// and PATCH bodies.
     struct FakeClient {
         get_responses: RefCell<Vec<(u16, String)>>,
         get_calls: RefCell<Vec<String>>,
@@ -2615,7 +2433,7 @@ mod tests {
 
     #[test]
     fn sync_completes_the_mal_entry_for_a_completed_record_at_every_position() {
-        // Positive control for the grid above: the guard must not be vacuous.
+        // Positive control: the grid above isn't vacuous.
         for position in IRRELEVANT_POSITIONS {
             let client = FakeClient::new();
             client.push_status_response(

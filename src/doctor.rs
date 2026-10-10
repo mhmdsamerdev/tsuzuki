@@ -1,24 +1,9 @@
-//! `tsuzuki doctor [--fix] [--forget-orphans]` — proactive environment
-//! health checks (CLAUDE.md's Phase 7 decisions, design.md §9's `doctor`
-//! row).
+//! `tsuzuki doctor [--fix] [--forget-orphans]`: environment health checks.
 //!
-//! Every check here is a pure function taking already-resolved inputs
-//! (booleans, paths, file contents) rather than reaching into real system
-//! state itself — the one exception is the tiny amount of real detection
-//! glue (`dirs::config_dir()`, the real `flatpak` subprocess call) that
-//! `main.rs`'s `doctor_command` performs and passes in. This mirrors
-//! `launch.rs`'s own injectable-closure convention and is what makes every
-//! check here testable against a fabricated environment without ever
-//! touching the real system's mpv.conf or scripts directory.
-//!
-//! MAL auth status (1i, Phase 8a) is checked via [`check_mal_auth`] — the one
-//! check in this module that doesn't take a plain fabricated value directly,
-//! since the real work (reading `mal_token.toml`, refreshing an expiring
-//! token) has to happen somewhere; `crate::mal::token_status` does that and
-//! hands back a [`crate::mal::TokenStatus`], which this module's own
-//! `check_mal_auth` maps to a `CheckResult` exactly like every other check
-//! here — pure, and testable against a fabricated `TokenStatus` with no real
-//! file or network access.
+//! Every check is a pure function over already-resolved inputs (booleans,
+//! paths, file contents); the real detection (`dirs::config_dir()`, the
+//! `flatpak` subprocess, MAL token refresh) happens in the caller, so checks
+//! are testable against a fabricated environment.
 
 use std::collections::HashSet;
 use std::fs;
@@ -31,16 +16,11 @@ use crate::roots;
 use crate::series;
 use crate::state::State;
 
-/// The bundled companion script, embedded at compile time — so `--fix` can
-/// install it even from a distributed binary with no `contrib/` directory on
-/// disk (CLAUDE.md's distribution goals, §10). This is the single source of
-/// truth both for installing a missing script and for detecting whether an
-/// already-installed one has drifted from it.
+/// The companion script embedded at compile time, so `--fix` can install it
+/// from a distributed binary and detect drift against it.
 pub const BUNDLED_SCRIPT: &str = include_str!("../contrib/mpv/tsuzuki.lua");
 
-/// A doctor check's severity — CLAUDE.md's "each check reports OK / WARN /
-/// FAIL. WARN is informational... doesn't affect exit code. FAIL is
-/// actionable."
+/// A check's severity. `Warn` is informational; `Fail` is actionable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Ok,
@@ -48,15 +28,9 @@ pub enum Level {
     Fail,
 }
 
-/// One scannable report line: a symbol, a short conceptual label, and a
-/// short human-readable result — deliberately not a place for implementation
-/// detail (raw filesystem paths, candidate-directory counts, expiration
-/// seconds, parsing/matching reasoning). That level of detail is reserved
-/// for a future `--verbose` mode; today's report is meant to be read in a
-/// few seconds, not studied. `action`, when present, is the one concrete
-/// next step — printed indented on its own line — that resolves this check;
-/// a check with nothing actionable to say (most WARNs from best-effort
-/// checks, most OKs) leaves it `None` rather than restating the message.
+/// One report line: a short label and result, with an optional `action`
+/// (the single next step that resolves the check). No implementation detail
+/// such as paths or counts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckResult {
     pub label: String,
@@ -91,16 +65,13 @@ impl CheckResult {
         }
     }
 
-    /// Attaches the one concrete next step that resolves this check —
-    /// rendered on its own indented line under the check itself.
+    /// Attaches the one next step that resolves this check.
     pub fn with_action(mut self, action: impl Into<String>) -> Self {
         self.action = Some(action.into());
         self
     }
 
-    /// `✓ label — message`, plus an indented `→ action` line when there's a
-    /// concrete next step. One glance per check, never a multi-line
-    /// explanation of a normal state.
+    /// `✓ label — message`, plus an indented `→ action` line when set.
     pub fn render(&self) -> String {
         let symbol = match self.level {
             Level::Ok => "✓",
@@ -114,16 +85,9 @@ impl CheckResult {
     }
 }
 
-/// Folds several same-category checks (typically one per mpv install, or
-/// one per candidate directory) into a single display row — CLAUDE.md's
-/// "doctor groups related checks conceptually rather than one row per
-/// internal artifact." The worst level wins (`Fail` > `Warn` > `Ok`); on a
-/// tie, the first offending check's own message/action is used, since
-/// that's the one concrete thing worth telling the user about right now —
-/// a future `--verbose` mode is the place to enumerate every constituent
-/// check individually. An all-`Ok` group collapses to `ok_message` — a
-/// single, install-agnostic phrase — rather than repeating whichever
-/// per-install message happened to be first.
+/// Folds same-category checks into one row. The worst level wins
+/// (`Fail` > `Warn` > `Ok`) using the first offender's message and action; an
+/// all-`Ok` group uses `ok_message`.
 pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResult]) -> CheckResult {
     let label = label.into();
     if let Some(worst) = results.iter().find(|r| r.level == Level::Fail) {
@@ -147,25 +111,16 @@ pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResul
 
 // --- 1a. mpv availability ---
 
-/// Whether native mpv and/or Flatpak `io.mpv.Mpv` were each independently
-/// detected — computed once by the caller (`launch::native_mpv_on_path()`,
-/// `launch::flatpak_mpv_installed(home)`) and passed to every check that
-/// needs it, so this module never repeats real detection work.
+/// Which mpv installs were detected, computed once by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MpvPresence {
     pub native: bool,
     pub flatpak: bool,
 }
 
-/// Reports mpv availability. When `command_override` is set, detection is
-/// bypassed entirely (matching `launch::resolve_mpv_command`'s own
-/// priority) — but unlike that function, doctor actually validates the
-/// override resolves to a real, existing program (`override_resolves`,
-/// computed by the caller) rather than trusting it blindly, since an
-/// unresolvable override would otherwise silently break every future
-/// `resume`/`start` launch with no proactive warning. With no override,
-/// both native and Flatpak present is a WARN (ambiguous, but not broken —
-/// `resolve_mpv_command` always picks native), neither present is a FAIL.
+/// Reports mpv availability. A `command_override` bypasses detection but must
+/// resolve (`override_resolves`). Native and Flatpak both present warns
+/// (native wins); neither present fails.
 pub fn check_mpv_availability(
     command_override: &str,
     presence: MpvPresence,
@@ -190,11 +145,8 @@ pub fn check_mpv_availability(
     }
 }
 
-/// Whether `command_override`'s first whitespace-separated token resolves to
-/// a real, executable program — a path containing `/` is checked directly,
-/// otherwise it's looked up on `$PATH` (mirrors `launch::resolve_mpv_command`
-/// splitting the override the same way, then `launch.rs`'s own
-/// `is_executable_file`/`program_on_path` checks).
+/// Whether the override's first whitespace-separated token is an executable
+/// path (if it contains `/`) or a program on `$PATH`.
 pub fn command_override_resolves(command_override: &str) -> bool {
     let Some(program) = command_override.split_whitespace().next() else {
         return false;
@@ -208,21 +160,15 @@ pub fn command_override_resolves(command_override: &str) -> bool {
 
 // --- 1b. write-filename-in-watch-later-config=yes ---
 
-/// One mpv install's own config directory (contains `mpv.conf` and
-/// `scripts/`) — native resolves via the real `dirs::config_dir()` (exactly
-/// like Tsuzuki's own config resolution, just mpv's subdirectory instead of
-/// `tsuzuki`'s); Flatpak resolves via `home`, mirroring the exact same
-/// `XDG_CONFIG_HOME` sandbox remap `script_log.rs` already verified for
-/// `XDG_DATA_HOME`.
+/// One mpv install's config directory (holds `mpv.conf` and `scripts/`).
+/// Flatpak's lives under `home`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpvInstall {
     pub label: &'static str,
     pub config_dir: PathBuf,
 }
 
-/// Every mpv install actually detected (per `presence`) — an install method
-/// with no mpv found at all isn't worth checking its config file or scripts
-/// directory for, since there's nothing there to be wrong yet.
+/// The installs detected per `presence`; undetected ones have nothing to check.
 pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<MpvInstall> {
     let mut installs = Vec::new();
     if presence.native
@@ -244,13 +190,9 @@ pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<
     installs
 }
 
-/// Parses `write-filename-in-watch-later-config`'s final effective value out
-/// of an mpv.conf's contents — `None` covers both "the key never appears"
-/// and "only appears in a comment," since neither is distinguishable from
-/// the other in the message doctor prints (both need the same fix: add the
-/// line for real). Later directives override earlier ones, matching mpv's
-/// own config-file parsing order — an mpv.conf that sets it, then later
-/// unsets it, ends up unset.
+/// The effective value of `write-filename-in-watch-later-config` in an
+/// mpv.conf. `None` means never set (a comment doesn't count). Later lines
+/// override earlier ones, as in mpv.
 fn write_filename_flag_state(contents: &str) -> Option<bool> {
     let mut state = None;
     for raw_line in contents.lines() {
@@ -269,10 +211,8 @@ fn write_filename_flag_state(contents: &str) -> Option<bool> {
     state
 }
 
-/// Checks one install's `mpv.conf` for the required flag. Never writes to
-/// the file, regardless of the result — doctor doesn't own this file
-/// (CLAUDE.md: "diagnostic only... doctor does not edit a file it doesn't
-/// own").
+/// Checks one install's `mpv.conf` for the required flag. Never writes the
+/// file; doctor doesn't own it.
 pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
     let path = install.config_dir.join("mpv.conf");
     let label = format!("mpv config ({})", install.label);
@@ -291,11 +231,7 @@ pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
             .with_action(enable_action);
         }
         Err(_) => {
-            // A real, distinct problem from "missing" — e.g. permission
-            // denied on the file or one of its parent directories. Mirrors
-            // check_mpv_log_dirs's own missing-vs-unreadable distinction;
-            // conflating the two here would send a user chasing "create the
-            // file" for what's actually a permissions problem.
+            // Unreadable (e.g. permissions) needs a different fix than missing.
             return CheckResult::fail(label, format!("{} mpv.conf is unreadable", install.label))
                 .with_action(format!("check permissions on {}", path.display()));
         }
@@ -313,15 +249,8 @@ pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
 
 // --- 1c. watch_later reachability ---
 
-/// Reachability of mpv's `watch_later` state — reuses `mpv::scan_watch_later`
-/// directly rather than re-implementing candidate resolution: its
-/// `ScanResult::warning` already carries exactly the "configured override
-/// doesn't resolve" signal doctor needs (CLAUDE.md's "An absent OS-default
-/// candidate directory stays silent — an explicit `watch_later_dir` override
-/// that doesn't resolve must be surfaced"). In OS-default mode, an absent
-/// candidate directory is normal (nothing has ever been quit mid-playback
-/// yet) and never fails this check — only a configured override that
-/// doesn't resolve does.
+/// Fails only when a configured `watch_later_dir` doesn't resolve; an absent
+/// OS-default directory is normal.
 pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
     let scan = mpv::scan_watch_later(config, home);
     if let Some(mpv::ScanWarning::WatchLaterDirNotFound(p)) = &scan.warning {
@@ -338,15 +267,9 @@ pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
 
 // --- 1d. Flatpak filesystem-permission gap ---
 
-/// Best-effort check of whether sandboxed Flatpak mpv likely has filesystem
-/// access to the user's tracked roots. Never FAILs — sandbox permissions are
-/// a security decision the user makes deliberately (CLAUDE.md), and this
-/// check's own confidence is inherently limited (a plain substring scan over
-/// `flatpak info --show-permissions` output, not a real path-by-path
-/// verification), so WARN is the ceiling regardless of what's found. Every
-/// input here is already resolved by the caller — no subprocess is spawned
-/// in this module, keeping the check itself pure and fabricated-environment
-/// testable; `main.rs` is the one place that actually runs `flatpak`.
+/// Best-effort check that Flatpak mpv can reach the tracked roots, from a
+/// substring scan of `flatpak info --show-permissions`. Never fails: sandbox
+/// permissions are the user's call and the scan is not authoritative.
 pub fn check_flatpak_permissions(
     flatpak_present: bool,
     flatpak_cli_present: bool,
@@ -389,16 +312,12 @@ pub fn check_flatpak_permissions(
 
 pub struct ScriptCheckOutcome {
     pub result: CheckResult,
-    /// `Some(scripts_dir)` when installing/updating would fix this —
-    /// `--fix` copies `BUNDLED_SCRIPT` there.
+    /// The scripts directory `--fix` should install into, if any.
     pub needs_fix: Option<PathBuf>,
 }
 
-/// Checks one install's `scripts/tsuzuki.lua` against the bundled copy — a
-/// direct byte-for-byte comparison, not a hash: the file is tiny (a handful
-/// of KB), so a real comparison costs nothing extra and carries zero
-/// collision risk, unlike a hash's only advantage (comparing digests instead
-/// of content) which doesn't matter at this size.
+/// Compares one install's `scripts/tsuzuki.lua` byte-for-byte with the
+/// bundled copy.
 pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
     let script_path = scripts_dir.join("tsuzuki.lua");
     let full_label = format!("companion script ({label})");
@@ -421,10 +340,7 @@ pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome 
     }
 }
 
-/// Installs/updates `tsuzuki.lua` in `scripts_dir`, atomically (temp file in
-/// the same directory, then rename over it) — the same discipline
-/// `state.rs`'s own atomic write uses, applied here since this is the one
-/// file-writing path `--fix` has.
+/// Installs or updates `tsuzuki.lua` atomically (temp file, then rename).
 pub fn install_script(scripts_dir: &Path) -> io::Result<()> {
     fs::create_dir_all(scripts_dir)?;
     let target = scripts_dir.join("tsuzuki.lua");
@@ -436,11 +352,8 @@ pub fn install_script(scripts_dir: &Path) -> io::Result<()> {
 
 // --- 1f. mpv-log directory reachability ---
 
-/// Checks every candidate script-log directory
-/// (`script_log::mpv_log_dirs`'s own list). A missing directory is `Ok` —
-/// indistinguishable from (and just as normal as) "the script was only just
-/// installed and mpv hasn't quit a file yet" — but an existing, unreadable
-/// one (permissions) is a real, actionable problem.
+/// Checks every candidate script-log directory. A missing one is `Ok` (mpv
+/// hasn't logged yet); an existing but unreadable one fails.
 pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
     dirs.iter()
         .map(|d| {
@@ -459,11 +372,8 @@ pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
 
 // --- 1g. tracked-root validity ---
 
-/// One tracked root's own current validity — callers need the plain `bool`
-/// to decide which roots are safe to run per-series orphan detection under
-/// (1h must skip an unreachable root entirely, never treat its absence as
-/// proof any series under it is gone); [`summarize_tracked_roots`] folds
-/// every root's validity into the single displayed "library" row.
+/// One tracked root's reachability. Orphan detection (1h) must skip invalid
+/// roots rather than read their absence as missing series.
 pub struct RootCheck {
     pub root: String,
     pub valid: bool,
@@ -484,12 +394,8 @@ pub fn check_tracked_roots(config: &Config, home: Option<&Path>) -> Vec<RootChec
         .collect()
 }
 
-/// Folds every tracked root's own reachability into one "library" row —
-/// unlike [`combine`], every unreachable root is named (each is
-/// independently actionable, not just the first one found), not just the
-/// worst offender. A fresh install with no tracked roots at all is `Ok`,
-/// not an empty/absent row — "nothing tracked yet" is itself a legitimate,
-/// nameable state.
+/// Folds root reachability into one "library" row, naming every unreachable
+/// root. No tracked roots is `Ok`.
 pub fn summarize_tracked_roots(checks: &[RootCheck]) -> CheckResult {
     if checks.is_empty() {
         return CheckResult::ok("library", "no tracked roots yet")
@@ -520,18 +426,12 @@ pub struct Orphan {
     pub name: String,
 }
 
-/// The exact command decision 2 hands back for clearing confirmed orphans —
-/// kept as one named constant so the report, the doctor-without-`--fix`
-/// hint, and CLAUDE.md's own reference to it can never drift apart.
+/// The command that clears confirmed orphans, shared by the report and hints.
 pub const FORGET_ORPHANS_COMMAND: &str = "tsuzuki doctor --fix --forget-orphans";
 
-/// Finds every `state.toml` record whose series folder is gone from under
-/// its own root — but only for roots `valid_roots` actually lists as
-/// currently reachable (per [`check_tracked_roots`]). A root that's
-/// unreachable itself (unmounted drive, permission denied) is skipped
-/// entirely for this check, never treated as "every series under it is
-/// gone" — that would be a false-positive orphan flood the moment a drive
-/// is simply unplugged, not a real per-series problem.
+/// Finds `state.toml` records whose series folder is gone from its root,
+/// only under roots in `valid_roots`. An unreachable root (e.g. unplugged
+/// drive) is skipped, never read as all its series being gone.
 pub fn find_orphans(
     config: &Config,
     state: &State,
@@ -578,12 +478,8 @@ pub fn orphan_check_result(orphans: &[Orphan]) -> CheckResult {
     .with_action(FORGET_ORPHANS_COMMAND)
 }
 
-/// Permanently removes every record in `orphans` from `state.series` — the
-/// plain internal function `--fix --forget-orphans` calls; there is no
-/// public command surface beyond `doctor` itself for this (CLAUDE.md's "no
-/// standalone cleanup command"). Caller is responsible for printing what's
-/// about to be deleted *before* calling this, and for persisting `state`
-/// afterward.
+/// Removes every record in `orphans` from `state.series`. The caller prints
+/// what is deleted first and persists `state` afterward.
 pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
     state
         .series
@@ -592,29 +488,12 @@ pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
 
 // --- 1i. MAL auth status ---
 
-/// Maps an already-resolved [`crate::mal::TokenStatus`] to a `CheckResult`.
-/// No `--fix` action exists for this check (same diagnostic-only precedent
-/// as 1d's Flatpak-permission check) — `sync login` is the one, explicit
-/// remedy, never something `--fix` performs on the user's behalf (that would
-/// mean silently opening a browser and blocking on OAuth mid-`doctor`-run).
+/// Maps a resolved [`crate::mal::TokenStatus`] to a `CheckResult`. No
+/// `--fix`: `sync login` opens a browser, so the user runs it.
 ///
-/// Severity, justified against this module's existing precedents:
-/// - **Never configured / never logged in → WARN, not FAIL.** MAL sync is
-///   optional (design.md §7's own opening line) — an unconfigured or
-///   not-yet-linked account is an expected, unbroken initial state, the same
-///   category as "Flatpak mpv not detected" (1d) or "no mpv install
-///   detected" (1b/1e), both WARN, not "no native mpv on PATH" (1a, FAIL,
-///   since mpv itself is *not* optional to this tool).
-/// - **A rejected refresh → FAIL.** This is a confirmed, actionable break —
-///   the stored `refresh_token` is dead and every future MAL call will fail
-///   until the user re-runs `sync login` — the same severity `mpv.conf`'s
-///   missing flag (1b) gets for an equally concrete, fixable problem.
-/// - **A network error while verifying → WARN, not FAIL.** Mirrors 1d's own
-///   reasoning exactly: an unreachable API right now (offline, transient DNS
-///   failure) isn't evidence the *token* itself is broken, so escalating to
-///   FAIL on pure connectivity noise would make `doctor` exit non-zero every
-///   time this machine happens to be offline — a false positive, not a real
-///   auth problem.
+/// - Not configured or not logged in warns: MAL sync is optional.
+/// - A rejected refresh fails: the stored token is dead.
+/// - A network error warns: offline says nothing about the token.
 pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
     use crate::mal::TokenStatus;
     match status {
@@ -867,12 +746,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn check_mpv_conf_permission_denied_is_distinguished_from_missing() {
-        // Dogfood-found gap: an unreadable-but-present mpv.conf (permission
-        // denied on the file itself) was originally conflated with "does
-        // not exist," which would send a user chasing "create the file"
-        // for what's actually a permissions problem — the same
-        // missing-vs-unreadable distinction check_mpv_log_dirs already
-        // makes correctly, just missing here.
+        // Unreadable must not be reported as missing.
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
@@ -888,8 +762,7 @@ mod tests {
         };
         let r = check_mpv_conf(&install);
 
-        // Restore permissions before any assertion can fail the test, so
-        // tempdir cleanup can still remove it either way.
+        // Restore permissions so tempdir cleanup works even if an assertion fails.
         std_fs::set_permissions(&conf_path, std_fs::Permissions::from_mode(0o644)).unwrap();
 
         assert_eq!(r.level, Level::Fail);
@@ -938,7 +811,7 @@ mod tests {
         };
         let r = check_mpv_conf(&install);
         assert_eq!(r.level, Level::Fail);
-        // The file itself must be untouched — doctor never writes to it.
+        // doctor never writes to mpv.conf.
         let contents = std_fs::read_to_string(dir.path().join("mpv").join("mpv.conf")).unwrap();
         assert_eq!(
             contents,
@@ -1016,9 +889,7 @@ mod tests {
 
     #[test]
     fn flatpak_permissions_never_fails_regardless_of_input() {
-        // Diagnostic-only, best-effort — CLAUDE.md's "sandbox permissions
-        // are a security decision the user makes" means this check must
-        // never escalate to FAIL under any input.
+        // Never escalates to FAIL.
         for output in [
             None,
             Some(""),
@@ -1282,9 +1153,7 @@ mod tests {
 
     #[test]
     fn a_record_under_an_unreachable_root_is_never_flagged_as_an_orphan() {
-        // The unmounted-drive case: the root itself doesn't currently
-        // resolve, so per-series orphan detection must be skipped entirely
-        // under it — never treated as "every series under it is gone."
+        // An unreachable root is skipped, not read as all its series gone.
         let dir = tempdir().unwrap();
         let root = dir.path().join("UnmountedAnime"); // deliberately never created
 
@@ -1296,8 +1165,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        // Caller passes an EMPTY valid_roots list, since check_tracked_roots
-        // would have marked this root invalid.
+        // An invalid root is excluded from valid_roots.
         let orphans = find_orphans(&config, &state, &[], None);
         assert!(
             orphans.is_empty(),
@@ -1435,8 +1303,7 @@ mod tests {
 
     #[test]
     fn mal_auth_network_error_is_warn_not_fail() {
-        // Connectivity noise must never fail the whole doctor run — same
-        // "best-effort, never escalates past WARN" precedent as 1d.
+        // Connectivity noise must not fail the run.
         let r = check_mal_auth(&TokenStatus::NetworkError("connection refused".to_string()));
         assert_eq!(r.level, Level::Warn);
     }

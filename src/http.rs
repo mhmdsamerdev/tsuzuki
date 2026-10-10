@@ -1,21 +1,9 @@
-//! Shared `ureq`-backed HTTP plumbing — the one place any network caller in
-//! this crate builds an `Agent` and interprets its result. Originally lived
-//! only in `mal.rs`; extracted once `update.rs`'s GitHub release check
-//! became a second real caller, so the native-tls gotcha below only has to
-//! be gotten right in one place.
+//! Shared `ureq` HTTP plumbing: the one place that builds an `Agent` and
+//! interprets its result.
 //!
-//! **Must use an explicit `Agent` with `.tls_connector(...)` set, never the
-//! bare `ureq::get(...)`/`ureq::post(...)` shortcut functions.** Found the
-//! hard way, against the real MAL API: `ureq`'s `native-tls` feature is
-//! never picked up automatically by those shortcuts — per `ureq`'s own
-//! source (`lib.rs`'s `default_tls_config`), only the `tls` (rustls)
-//! feature wires a default TLS backend into them. With `default-features =
-//! false` and only `native-tls` enabled (`Cargo.toml`, chosen to use the
-//! pkg-config+openssl `shell.nix` already provisions), the shortcuts had
-//! *no* TLS backend at all — every request failed with "Unknown Scheme:
-//! cannot make HTTPS request because no TLS backend is configured". A
-//! future third caller must go through [`build_agent`], never the bare
-//! shortcuts, or this bug resurfaces.
+//! Always go through [`build_agent`], never the bare `ureq::get`/`ureq::post`
+//! shortcuts. With only `native-tls` enabled, the shortcuts have no TLS
+//! backend and every HTTPS request fails.
 
 use std::fmt;
 
@@ -33,12 +21,8 @@ impl fmt::Display for HttpError {
     }
 }
 
-/// Builds a fresh `Agent` with the explicit native-tls connector every real
-/// network call in this crate needs (see the module doc comment). Building
-/// the connector fresh per call (rather than caching it) is deliberate
-/// simplicity, not an oversight — every caller of this crate is an
-/// on-demand, low-frequency path (a login, a refresh, an update check), so
-/// the tiny one-time TLS-connector setup cost is a complete non-issue.
+/// Builds a fresh `Agent` with an explicit native-tls connector. Not cached:
+/// callers are rare, on-demand paths, so the setup cost is irrelevant.
 pub fn build_agent() -> Result<ureq::Agent, HttpError> {
     let connector = native_tls::TlsConnector::new()
         .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
@@ -47,10 +31,8 @@ pub fn build_agent() -> Result<ureq::Agent, HttpError> {
         .build())
 }
 
-/// Maps a `ureq` call result to `HttpResponse`/`HttpError` — a non-2xx
-/// status is still `Ok(HttpResponse { status, .. })` (the caller decides
-/// what a given status means; this layer only distinguishes "got a real
-/// HTTP response" from "never reached the server at all").
+/// Maps a `ureq` result to `HttpResponse`/`HttpError`. A non-2xx status is
+/// still `Ok`; only a failure to get any HTTP response is an `Err`.
 pub fn map_ureq_result(
     result: Result<ureq::Response, ureq::Error>,
 ) -> Result<HttpResponse, HttpError> {

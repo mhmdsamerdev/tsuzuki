@@ -23,29 +23,15 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mkv", "i
 tempfile = "3.27.0"
 toml = "1.1.4"
 tsuzuki-anitomy = { path = "vendor/anitomy", version = "0.1.0" }
-# Blocking-only HTTP client for the MAL API (CLAUDE.md §5: "MAL calls must
-# stay lazy/on-demand" — no tokio, no async runtime pulled in for one
-# on-demand code path). native-tls backend so it actually uses the
-# pkg-config+openssl shell.nix already provisions for this, rather than
-# pulling in rustls as a second, unused TLS stack.
+# Blocking HTTP client, so no async runtime. native-tls avoids a second TLS stack.
 ureq = { version = "2.10", default-features = false, features = ["native-tls", "gzip"] }
-# A direct (not just transitive) dependency: ureq's `native-tls` feature is
-# never auto-wired by its own shortcut functions (`ureq::post`, etc.) — only
-# `AgentBuilder::tls_connector(...)` picks it up, which means constructing a
-# `native_tls::TlsConnector` directly, in `mal.rs`. See `UreqClient`'s doc
-# comment for the real, dogfooded failure this fixes.
+# Direct dependency: `mal.rs` builds the `native_tls::TlsConnector` itself.
 native-tls = "0.2"
 webbrowser = "1.0"
-# Forces the openssl-sys dependency native-tls pulls in on Linux to build
-# and statically link its own vendored OpenSSL, rather than linking
-# against whatever libssl happens to be on the build/install machine.
-# Without this, a prebuilt release binary would only run on a system with
-# a compatible system OpenSSL already installed — the opposite of a
-# `curl | sh` install just working. Cargo unifies this feature across the
-# whole dependency graph, so declaring it here is enough.
+# Statically links a vendored OpenSSL so prebuilt binaries don't need the host's libssl.
 openssl = { version = "0.10", features = ["vendored"] }
 
-# The profile that 'dist' will build with
+# Profile used by cargo-dist builds
 [profile.dist]
 inherits = "release"
 lto = "thin"

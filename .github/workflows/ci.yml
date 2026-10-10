@@ -21,22 +21,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `--workspace` so vendor/anitomy still has to compile (CLAUDE.md:
-      # "cargo build --workspace still checks the whole thing compiles;
-      # only the -D warnings clippy gate is scoped down").
+      # Workspace-wide so vendor/anitomy must compile too.
       - name: Build
         run: cargo build --workspace
 
-      # Workspace-wide by default, so vendor/anitomy's own regression
-      # tests run too. The 4 real-MAL-API tests are #[ignore]d and are
-      # not run here — no secrets are available or needed.
+      # Includes vendor/anitomy's tests. Live-network tests are ignored.
       - name: Test
         run: cargo test --workspace
 
       - name: Format check
         run: cargo fmt -p tsuzuki --check
 
-      # Scoped to -p tsuzuki --no-deps: vendor/anitomy is read-only,
-      # third-party code and never held to this project's own lint bar.
+      # Skips vendor/anitomy: read-only third-party code.
       - name: Clippy
         run: cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings

@@ -1,14 +1,6 @@
-//! Reading mpv's `watch_later` files (CLAUDE.md's "mpv `watch_later`
-//! reading, not IPC or launching mpv", design.md §4).
-//!
-//! Tsuzuki never launches mpv or holds an IPC socket — it only reads mpv's
-//! own `watch_later` entries after the fact, from a fixed list of candidate
-//! locations (or a user-configured override), merges duplicates
-//! freshest-file-wins, filters to tracked roots, and classifies each
-//! position against the resume/completion thresholds. No caller yet (Phase
-//! 5 wires this into `resume`/`status`/`current`/...) —
-//! `#[allow(dead_code)]`, matching `series.rs`/`anitomy.rs`'s established
-//! not-yet-wired convention.
+//! Reads mpv's `watch_later` entries: scans the candidate directories,
+//! merges duplicates freshest-file-wins, filters to tracked roots, and
+//! classifies positions against the resume/completion thresholds.
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,19 +12,16 @@ use crate::duration::DurationOutcome;
 use crate::roots::{expand_tilde, normalize};
 use crate::series;
 
-/// One candidate `watch_later` directory location, tagged with the OS it
-/// applies to (matched against `std::env::consts::OS`) — a data table, not
-/// scattered `if cfg!(target_os)` checks, so macOS/Windows entries can be
-/// added later (once their real paths are verified — design.md §4 marks
-/// them unverified) without restructuring this lookup.
+/// One candidate `watch_later` directory, tagged with the OS it applies to
+/// (matched against `std::env::consts::OS`). A data table, so other OSes can
+/// be added without restructuring the lookup.
 struct WatchLaterCandidate {
     os: &'static str,
     /// Joined onto the user's home directory.
     relative: &'static str,
 }
 
-/// design.md §4's exact candidate list. v1 is Linux-only (CLAUDE.md §5);
-/// macOS/Windows rows are deliberately not added yet.
+/// Linux candidates only; macOS/Windows paths are unverified.
 const CANDIDATES: &[WatchLaterCandidate] = &[
     WatchLaterCandidate {
         os: "linux",
@@ -57,10 +46,7 @@ const CANDIDATES: &[WatchLaterCandidate] = &[
 ];
 
 /// The OS-default candidate `watch_later` directories, joined onto `home`.
-/// Selecting by `std::env::consts::OS` keeps this one call site as the only
-/// platform check — no per-call `cfg!(target_os = ...)` branching.
-/// `pub(crate)` so `doctor.rs` can report per-candidate reachability without
-/// duplicating this table.
+/// `pub(crate)` so `doctor.rs` can report per-candidate reachability.
 pub(crate) fn candidate_watch_later_dirs(home: &Path) -> Vec<PathBuf> {
     CANDIDATES
         .iter()
@@ -69,11 +55,9 @@ pub(crate) fn candidate_watch_later_dirs(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Resolves the directories to scan: `watch_later_dir_override` (if
-/// non-empty) REPLACES the OS-default candidate list entirely — only that
-/// one directory is scanned, defaults are not also merged in (CLAUDE.md's
-/// "`watch_later_dir` config override"). If `home` can't be resolved and no
-/// override is set, returns an empty list rather than guessing.
+/// Resolves the directories to scan. A non-empty `watch_later_dir_override`
+/// replaces the OS-default list entirely. With no override and no `home`,
+/// returns an empty list rather than guessing.
 #[allow(dead_code)]
 fn resolve_watch_later_dirs(watch_later_dir_override: &str, home: Option<&Path>) -> Vec<PathBuf> {
     if !watch_later_dir_override.is_empty() {
@@ -99,12 +83,10 @@ pub struct WatchLaterEntry {
     pub mtime: SystemTime,
 }
 
-/// Parses one `watch_later` entry file. Returns `None` for a `# redirect
-/// entry` (no real position — an internal mpv pointer from opening a
-/// directory/playlist, not playback state) or for any entry that doesn't
-/// fit the expected shape (missing `start=`, first line isn't a `#`
-/// comment, unparseable float, unreadable mtime) — malformed entries are
-/// skipped, never abort the caller's scan.
+/// Parses one `watch_later` entry file. Returns `None` for a redirect entry
+/// (no real position) and for malformed entries (missing `start=`, first line
+/// not a `#` comment, unparseable float, unreadable mtime), so one bad entry
+/// never aborts a scan.
 fn parse_entry_file(path: &Path) -> Option<WatchLaterEntry> {
     let contents = fs::read_to_string(path).ok()?;
     let mut lines = contents.lines();
@@ -133,10 +115,7 @@ fn parse_entry_file(path: &Path) -> Option<WatchLaterEntry> {
     })
 }
 
-/// Keeps only entries whose `source_path` falls under one of `tracked_roots`
-/// (reusing `roots::normalize`, the same tilde-expand-then-canonicalize
-/// comparison `add`/`exclude` already use — not a second comparison
-/// helper).
+/// Keeps only entries whose `source_path` falls under one of `tracked_roots`.
 fn filter_to_tracked_roots(
     entries: Vec<WatchLaterEntry>,
     tracked_roots: &[String],
@@ -148,21 +127,10 @@ fn filter_to_tracked_roots(
         .collect()
 }
 
-/// True if `source_path` resolves under any tracked root. Checks a cheap
-/// whole-root prefix match first (the common case); only falls back to
-/// canonicalizing the root's own depth-1 children individually when that
-/// fails. The fallback is required, not an edge-case nicety: a depth-1
-/// series folder can itself be a symlink pointing entirely outside the
-/// root's own real location (CLAUDE.md's "Symlinks are followed
-/// everywhere... a symlinked series folder behaves exactly like a real
-/// one") — `fs::canonicalize`-ing the *whole* entry path resolves straight
-/// through such a symlink to wherever it actually points, so a plain
-/// root-vs-source prefix comparison can never match, and every
-/// `watch_later` entry for that series would be silently invisible to
-/// Tsuzuki forever. Confirmed as a real, reported bug, not a hypothetical:
-/// a real-world tracked root with one symlinked series folder never
-/// reconciled at all, while an ordinary (non-symlinked) sibling series
-/// under the same root worked correctly.
+/// True if `source_path` resolves under any tracked root. Tries a whole-root
+/// prefix match first, then falls back to each depth-1 series folder
+/// individually: a symlinked series folder canonicalizes to a path outside
+/// the root, so the prefix match alone would never see its entries.
 pub(crate) fn is_under_a_tracked_root(
     source_path: &Path,
     tracked_roots: &[String],
@@ -191,12 +159,9 @@ pub(crate) fn is_under_a_tracked_root(
     })
 }
 
-/// Merges entries by `source_path`, per-path freshest-file-wins: when the
-/// same source path has an entry in more than one candidate directory, only
-/// the one whose entry file has the newer mtime survives. Deliberately
-/// per-path, not per-directory — a single fresh entry in an otherwise-stale
-/// directory must not cause every other genuinely-valid entry in that
-/// directory to be dropped.
+/// Merges entries by `source_path`, keeping the one with the newest mtime per
+/// path. Per-path, not per-directory: a fresh entry in one directory must not
+/// drop the other entries there.
 fn merge_freshest_wins(entries: Vec<WatchLaterEntry>, home: Option<&Path>) -> Vec<WatchLaterEntry> {
     let mut by_path: HashMap<PathBuf, WatchLaterEntry> = HashMap::new();
     for entry in entries {
@@ -211,34 +176,19 @@ fn merge_freshest_wins(entries: Vec<WatchLaterEntry>, home: Option<&Path>) -> Ve
     by_path.into_values().collect()
 }
 
-/// A non-fatal issue surfaced by [`scan_watch_later`] alongside its
-/// entries. Never printed by this module — it has no command-facing
-/// output of its own yet (same as everything else in this phase); the
-/// warning is returned as data for a future phase to actually display.
-/// See CLAUDE.md's "An absent OS-default candidate directory stays
-/// silent — an explicit `watch_later_dir` override that doesn't resolve
-/// must be surfaced, not silent."
+/// A non-fatal issue surfaced by [`scan_watch_later`] alongside its entries,
+/// returned as data for the caller to display.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanWarning {
     /// The configured `watch_later_dir` override does not exist on disk.
-    /// Carries the value exactly as stored in `config.toml` (e.g.
-    /// `~/mywatch`), not the expanded/resolved form — consistent with
-    /// `AddError::NotFound`'s and the rest of the codebase's convention
-    /// of showing the user the path they actually typed, not a form they
-    /// may not recognize.
-    ///
-    /// Deliberately never produced for an absent OS-default candidate
-    /// directory (e.g. no Flatpak mpv installed) — that case is normal
-    /// and expected, and must stay exactly as silent as it is today.
+    /// Carries the value as typed in `config.toml`, not the expanded form.
+    /// Never produced for an absent OS-default directory, which is normal.
     WatchLaterDirNotFound(PathBuf),
 }
 
-/// The result of [`scan_watch_later`]: the merged, filtered entries, plus
-/// any non-fatal warning about the scan itself. `warning` is `None` in the
-/// overwhelmingly common case; it's `Some` only when an explicit
-/// `watch_later_dir` override was configured and didn't resolve to a real
-/// directory on disk.
+/// The result of [`scan_watch_later`]. `warning` is `Some` only when an
+/// explicit `watch_later_dir` override doesn't resolve to a directory.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanResult {
@@ -247,14 +197,9 @@ pub struct ScanResult {
 }
 
 /// Scans every resolved `watch_later` directory, parses entries, filters to
-/// tracked roots, and merges duplicates freshest-file-wins (design.md §4
-/// steps 1-4, CLAUDE.md's cross-directory merge). A candidate directory
-/// that doesn't exist on disk is silently skipped, not an error — except
-/// when it's the sole result of an explicit `watch_later_dir` override,
-/// in which case [`ScanResult::warning`] carries a
-/// [`ScanWarning::WatchLaterDirNotFound`] alongside the (still empty)
-/// entries. This function itself never errors and never prints anything;
-/// the command still runs to completion either way.
+/// tracked roots, and merges duplicates freshest-file-wins. A missing
+/// directory is skipped silently, except an explicit override, which yields
+/// [`ScanWarning::WatchLaterDirNotFound`]. Never errors or prints.
 #[allow(dead_code)]
 pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> ScanResult {
     let dirs = resolve_watch_later_dirs(&config.mpv.watch_later_dir, home);
@@ -285,9 +230,7 @@ pub fn scan_watch_later(config: &Config, home: Option<&Path>) -> ScanResult {
     ScanResult { entries, warning }
 }
 
-/// `Some` only when `watch_later_dir_override` is set and its expanded
-/// form doesn't exist on disk — never for the OS-default candidate list,
-/// where an absent directory is normal and expected (CLAUDE.md).
+/// `Some` only when the override is set and its expanded form doesn't exist.
 fn override_not_found_warning(
     watch_later_dir_override: &str,
     home: Option<&Path>,
@@ -305,15 +248,14 @@ fn override_not_found_warning(
     }
 }
 
-/// The single most-recently-modified entry (by its entry file's own mtime)
-/// among `entries` — design.md §4 step 5, "what you were watching."
+/// The entry with the newest mtime among `entries`.
 #[allow(dead_code)]
 pub fn most_recent_entry(entries: &[WatchLaterEntry]) -> Option<&WatchLaterEntry> {
     entries.iter().max_by_key(|e| e.mtime)
 }
 
-/// What a saved position (and, if known, the file's total duration) means
-/// for playback, per CLAUDE.md's fixed resume/completion thresholds.
+/// What a saved position (and, if known, the file's duration) means for
+/// playback.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PlaybackAction {
@@ -325,11 +267,9 @@ pub enum PlaybackAction {
     Completed,
 }
 
-/// The result of classifying one entry's position against the configured
-/// thresholds. `duration` is always carried through — including the
-/// `DurationError` reason when unknown — rather than being dropped once
-/// `action` is decided, so a caller (`doctor`, or a future diagnostic) can
-/// still inspect why a completion check was skipped.
+/// The result of classifying one entry's position. `duration` is carried
+/// through, including the `DurationError` reason when unknown, so callers can
+/// see why the completion check was skipped.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
@@ -337,15 +277,10 @@ pub struct Classification {
     pub duration: DurationOutcome,
 }
 
-/// Classifies a saved `position_seconds` against `resume_seconds` and
-/// `completion_remaining_seconds` (CLAUDE.md's "Threshold classification").
-/// Position is checked against `resume_seconds` first: a position below the
-/// resume threshold is always `StartFromZero`, even in the edge case of a
-/// very short file where the remaining time would also independently
-/// qualify as `Completed` — see this phase's report for why this ordering
-/// was chosen. When `duration` is `Unknown`, the completion check is
-/// skipped for this entry only; the position-based classification still
-/// applies.
+/// Classifies `position_seconds` against the thresholds. The `resume_seconds`
+/// check comes first, so a short file never classifies as `Completed` from a
+/// position below it. With an unknown `duration` the completion check is
+/// skipped.
 #[allow(dead_code)]
 pub fn classify(
     position_seconds: f64,
@@ -421,12 +356,7 @@ mod tests {
 
     #[test]
     fn a_redirect_entry_with_a_trailing_start_line_is_still_discarded() {
-        // Gap-audit: the redirect check happens unconditionally on the
-        // first line, before any `start=` scanning — so even a
-        // hand-edited (or future-mpv-version) redirect entry that also
-        // carries a `start=` line must still be discarded as a redirect,
-        // not mistaken for a real entry just because a position happens
-        // to be present.
+        // The redirect check runs on the first line before any `start=` scan.
         let dir = tempdir().unwrap();
         let entry_path = dir.path().join("redirect-with-start.mkv");
         write_entry(&entry_path, "# redirect entry\nstart=123.0\n");
@@ -538,19 +468,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_entry_under_a_symlinked_series_folder_survives_filtering() {
-        // Regression test for a real, reported bug: a depth-1 series
-        // folder that's itself a symlink pointing entirely outside the
-        // root's own real location (a normal, expected library shape per
-        // CLAUDE.md's "Symlinks are followed everywhere") was silently
-        // dropped by this filter. `normalize` canonicalizes the *whole*
-        // entry path, resolving straight through the symlink to
-        // `real_storage`'s location — a plain prefix comparison against
-        // the root's own (non-symlink-descended) canonical form can never
-        // match that, so every watch_later entry for that series was
-        // invisible, permanently. Uses real files/symlinks, not fabricated
-        // paths, since `normalize`'s canonicalize-with-fallback silently
-        // no-ops on paths that don't exist on disk at all — this bug is
-        // only reachable with real symlink resolution.
+        // `normalize` resolves the whole entry path through the symlink, so a
+        // plain root-prefix match fails. Needs real symlinks: `normalize` is a
+        // no-op on paths that don't exist.
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -578,15 +498,12 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: real-world-shaped states (root/file missing on disk) ---
+    // --- Missing root/file on disk ---
 
     #[test]
     fn filtering_does_not_panic_when_a_tracked_root_no_longer_exists_on_disk() {
-        // A root can be removed from the filesystem after being tracked
-        // (before Phase 6's `doctor` would ever flag it) — `normalize`
-        // falls back to the tilde-expanded, uncanonicalized form when
-        // `fs::canonicalize` fails, so this must filter cleanly rather
-        // than panicking or erroring.
+        // `normalize` falls back to the uncanonicalized path when the root
+        // is gone.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime"); // deliberately never created
 
@@ -598,25 +515,18 @@ mod tests {
 
         let filtered =
             filter_to_tracked_roots(entries, &[root.to_string_lossy().into_owned()], None);
-        // Neither side canonicalizes (root doesn't exist, so its
-        // `normalize` also falls back to the literal expanded form) — the
-        // literal prefix relationship still holds, so the entry survives.
+        // Both sides fall back to literal paths, so the prefix still matches.
         assert_eq!(filtered.len(), 1);
     }
 
     #[test]
     fn filtering_does_not_panic_when_the_entrys_source_file_no_longer_exists_on_disk() {
-        // The video file a watch_later entry points at may have been
-        // deleted or moved since mpv wrote the entry. The tracked root
-        // itself still exists here (and so *does* get canonicalized by
-        // `normalize`), while the missing source file falls back to its
-        // uncanonicalized literal form — this must not panic, and in the
-        // common no-symlink case (true for a plain tempdir on this
-        // environment) the literal prefix relationship still holds.
+        // The root canonicalizes but the missing file falls back to its
+        // literal path; the prefix still matches.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         std_fs::create_dir_all(&root).unwrap();
-        // The source file is never created — it's "since deleted."
+        // The source file is never created.
 
         let entries = vec![WatchLaterEntry {
             source_path: root.join("Show").join("ep01.mkv"),
@@ -641,8 +551,7 @@ mod tests {
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
 
-        // Must not panic; a tracked root with nothing on disk simply
-        // yields no matching entries.
+        // A missing root yields no entries.
         let result = scan_watch_later(&config, Some(home.path()));
         assert!(result.entries.is_empty());
         assert_eq!(result.warning, None);
@@ -675,8 +584,7 @@ mod tests {
 
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
-        // Scan both directories directly via the lower-level pieces, since
-        // `watch_later_dir` only ever points at one directory.
+        // Scan both directories directly; `watch_later_dir` points at one.
         let mut raw = Vec::new();
         for dir in [&dir_a, &dir_b] {
             for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -694,11 +602,7 @@ mod tests {
 
     #[test]
     fn merge_is_per_path_not_per_directory() {
-        // dir_a has a stale entry for X and a fresh entry for Y (no
-        // duplicate of Y anywhere else). dir_b has a fresher duplicate of
-        // X. Both X (from dir_b) and Y (from dir_a) must survive the
-        // merge — a fresh entry in dir_b must not cause dir_a's genuinely
-        // valid, undisputed Y entry to be dropped.
+        // dir_b holds a fresher X; dir_a's undisputed Y must still survive.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         touch(&root.join("Show").join("x.mkv"));
@@ -748,23 +652,14 @@ mod tests {
         );
     }
 
-    // --- Gap-audit: merge_freshest_wins with 3+ duplicates and exact ties ---
+    // --- merge_freshest_wins with 3+ duplicates and exact ties ---
     //
-    // These call `merge_freshest_wins` directly with an explicit `Vec`
-    // input order, rather than going through a filesystem scan — the
-    // function's own fold-over-a-HashMap semantics are what's under test
-    // here (independent of `fs::read_dir`'s unspecified enumeration
-    // order across directories, which is a separate, filesystem-level
-    // non-guarantee, not something `merge_freshest_wins` controls).
+    // Called directly with explicit input order, independent of `read_dir`
+    // enumeration order.
 
     #[test]
     fn three_way_duplicate_the_freshest_wins_even_when_processed_first() {
-        // Ordering the freshest entry FIRST (not last, not in the middle)
-        // specifically rules out an implementation that accidentally
-        // tracks "last one seen for this key" instead of genuinely
-        // comparing every duplicate's mtime — that bug would silently
-        // pick the last-processed (stalest) entry here instead of the
-        // truly freshest one.
+        // The freshest entry comes first, ruling out a last-seen-wins bug.
         let now = SystemTime::now();
         let path = PathBuf::from("/Anime/Show/ep01.mkv");
         let entries = vec![
@@ -792,15 +687,7 @@ mod tests {
 
     #[test]
     fn merge_on_an_exact_mtime_tie_is_deterministic() {
-        // Two entries for the same path with an identical mtime. Given
-        // `merge_freshest_wins`'s own semantics (`existing.mtime >=
-        // entry.mtime` keeps whatever's already in the map), the first
-        // entry in input order wins a tie, deterministically — this test
-        // locks that behavior in explicitly rather than leaving it
-        // implicit. (A genuine exact-mtime tie between two *different*
-        // watch_later files for the same source is an extremely rare
-        // real-world case; either choice would be equally defensible —
-        // what matters is that the function itself isn't order-random.)
+        // `existing.mtime >= entry.mtime` keeps the first entry on a tie.
         let now = SystemTime::now();
         let path = PathBuf::from("/Anime/Show/ep01.mkv");
         let entries = vec![
@@ -889,19 +776,12 @@ mod tests {
     #[test]
     fn os_default_mode_with_every_candidate_directory_absent_yields_zero_entries_and_zero_warnings()
     {
-        // The asymmetry CLAUDE.md requires: an absent OS-default candidate
-        // is normal/expected and must stay exactly as silent as before —
-        // unlike the override case (see the test right below this one),
-        // this must produce NO warning no matter how many (or all) of the
-        // candidate directories are missing. Proven as its own explicit
-        // test rather than inferred from the override test, since the two
-        // cases must behave differently, not identically.
+        // Unlike the override case below, an absent default candidate must
+        // never warn.
         let home = tempdir().unwrap();
         let root = home.path().join("Anime");
         std_fs::create_dir_all(&root).unwrap();
-        // Nothing created under any watch_later candidate path at all —
-        // every one of the 5 Linux candidates is absent.
-        // watch_later_dir left at its default "" value (OS-default mode).
+        // None of the candidate directories exist; `watch_later_dir` is unset.
 
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
@@ -916,14 +796,8 @@ mod tests {
 
     #[test]
     fn a_watch_later_dir_override_pointing_at_a_nonexistent_path_surfaces_a_warning() {
-        // CLAUDE.md's "An absent OS-default candidate directory stays
-        // silent — an explicit watch_later_dir override that doesn't
-        // resolve must be surfaced, not silent." Unlike the OS-default
-        // case above, `watch_later_dir` is something the user explicitly
-        // typed — a mistake there must be discoverable. This still isn't
-        // an error: the scan completes and returns zero entries exactly
-        // as before, but now also carries a warning naming the configured
-        // (as-typed, unexpanded) path.
+        // An explicit override that doesn't resolve is surfaced as a warning,
+        // not an error; the scan still returns zero entries.
         let home = tempdir().unwrap();
         let root = home.path().join("Anime");
         std_fs::create_dir_all(&root).unwrap();
@@ -949,15 +823,11 @@ mod tests {
 
     #[test]
     fn the_warning_carries_the_literal_tilde_form_not_the_expanded_path() {
-        // Matches the rest of the codebase's convention (e.g.
-        // `AddError::NotFound`, roots persisted "in the form the user
-        // typed") — the warning shows the user the value they actually
-        // put in config.toml, not an expanded form they may not
-        // recognize.
+        // The warning shows the value as typed in config.toml.
         let home = tempdir().unwrap();
         let root = home.path().join("Anime");
         std_fs::create_dir_all(&root).unwrap();
-        // Deliberately never create "~/this_never_exists" under `home`.
+        // "~/this_never_exists" is never created under `home`.
 
         let mut config = Config::default();
         config.roots.paths.push(root.to_string_lossy().into_owned());
@@ -1075,7 +945,7 @@ mod tests {
 
     #[test]
     fn remaining_just_above_completion_threshold_resumes() {
-        // duration 1000, position such that remaining = 180.1 (> 180 threshold)
+        // remaining = 180.1, above the 180 threshold.
         let result = classify(819.9, DurationOutcome::Known(1000.0), 120, 180);
         assert_eq!(result.action, PlaybackAction::Resume(819.9));
     }
@@ -1095,17 +965,9 @@ mod tests {
 
     #[test]
     fn overlap_case_on_a_short_file_start_from_zero_wins_over_completed() {
-        // CLAUDE.md's "Threshold precedence when position + completion
-        // checks overlap (short files)": on a short enough file, a single
-        // saved position can satisfy both `resume_seconds` (small enough
-        // to count as noise) and `completion_remaining_seconds` (close
-        // enough to that file's own ending) simultaneously. Here:
-        // duration = 100s, position = 50s. position (50) < resume_seconds
-        // (120) -> satisfies the StartFromZero condition. remaining
-        // (100 - 50 = 50) <= completion_remaining_seconds (180) ->
-        // independently satisfies the Completed condition too. The
-        // documented, deliberate resolution is that the position check
-        // wins: StartFromZero, never Completed.
+        // duration 100, position 50: below `resume_seconds` (120) and within
+        // `completion_remaining_seconds` (180) of the end. The position check
+        // wins.
         let result = classify(50.0, DurationOutcome::Known(100.0), 120, 180);
         assert_eq!(result.action, PlaybackAction::StartFromZero);
     }

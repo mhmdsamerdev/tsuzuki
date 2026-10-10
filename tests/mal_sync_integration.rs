@@ -1,56 +1,11 @@
-//! Real, manual, end-to-end test of MAL linking + one merge direction
-//! against the actual MyAnimeList API. **`#[ignore]`d — never runs in a
-//! normal `cargo test`.** Everything else in Phase 8b (title normalization,
-//! exact-match linking, similarity ranking, the merge decision table,
-//! partial-failure continuation, the non-destructive invariant) is covered
-//! by real, network-free unit tests in `src/sync.rs`, all exercised through
-//! the injectable `MalHttpClient` trait's fake. This is the only place in
-//! the whole test suite that exercises `sync link` + `sync` against the
-//! live MAL API, and — same as Phase 8a's own real-API test — it has
-//! genuinely never been run. Run it yourself, by hand, before trusting this
-//! path against production.
+//! Manual `#[ignore]`d test of `sync link` + `sync` against the live MAL API, in a temp `$HOME` with its own login.
+//! It links a fabricated series to your MAL anime id and asserts linking and syncing succeed.
+//! Without `TSUZUKI_TEST_MAL_ANIME_ID` it skips itself.
 //!
-//! Fully isolated: uses a fresh temp `$HOME`, never touches your real
-//! `~/.local/share/tsuzuki`. It performs its own real login (same
-//! interactive browser flow as `tests/mal_login_integration.rs`) into that
-//! temp `$HOME`, so it never depends on — or risks corrupting — any
-//! already-authenticated session or real tracked-series state you have.
-//!
-//! ## How to run this for real
-//!
-//! 1. Pick a real anime that's genuinely on your own MyAnimeList list, and
-//!    note its numeric MAL id (visible in its MAL URL, e.g.
-//!    `myanimelist.net/anime/21/One_Piece` → id `21`).
-//! 2. Run:
-//!
-//!    ```sh
-//!    TSUZUKI_TEST_MAL_ANIME_ID=<that id> \
-//!      cargo test --test mal_sync_integration -- --ignored --nocapture
-//!    ```
-//!
-//! 3. The test prints an authorize URL and opens your browser — log in and
-//!    approve, same as the Phase 8a login test. It then tracks a fabricated,
-//!    deliberately-unmatchable local series folder (so exact-match
-//!    auto-linking can never accidentally succeed), links it to your given
-//!    MAL id via `tsuzuki sync link --mal-id`, and runs `tsuzuki sync`.
-//! 4. Without `TSUZUKI_TEST_MAL_ANIME_ID` set, this test skips itself with a
-//!    clear message rather than failing.
-//!
-//! **What this specifically has not yet verified, since it has never been
-//! run:** the exact real JSON shapes this session only verified against
-//! third-party documentation/source (Taiga, the unofficial MAL API spec) —
-//! particularly the single-anime endpoint's `my_list_status` presence/
-//! absence behavior and the list endpoint's pagination (`paging.next`)
-//! shape on a real account; and whether `num_watched_episodes` (the field
-//! name used in the real PATCH request body — see `sync.rs`'s
-//! `push_episode_count` doc comment) is genuinely correct against a live
-//! request, not just cross-referenced documentation.
-//!
-//! This test cannot assert a specific merge direction ahead of time — it
-//! doesn't know your real MAL episode count for the id you give it — so it
-//! asserts only that linking and syncing both complete successfully and
-//! that *some* consistent result was persisted, printing the actual outcome
-//! for you to eyeball.
+//! ```sh
+//! TSUZUKI_TEST_MAL_ANIME_ID=<id from myanimelist.net/anime/<id>/...> \
+//!   cargo test --test mal_sync_integration -- --ignored --nocapture
+//! ```
 
 use std::fs;
 use std::path::Path;
@@ -84,9 +39,7 @@ fn real_link_and_one_merge_direction_against_the_live_mal_api() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
-    // A fabricated, deliberately unmatchable series name — exact-match
-    // auto-linking must never succeed against it, so the manual `sync
-    // link --mal-id` path is what's actually under test here.
+    // An unmatchable name, so exact-match auto-linking can't succeed and `sync link --mal-id` is what's tested.
     let series_name = "Definitely Not A Real MAL Title Zzyzx 9000";
     let root = home.join("Anime");
     fs::create_dir_all(root.join(series_name)).unwrap();
@@ -118,8 +71,7 @@ fn real_link_and_one_merge_direction_against_the_live_mal_api() {
         "real login failed — see output above"
     );
 
-    // Fabricate real local progress: episode 1, a genuine watch_later-style
-    // record, so the subsequent `sync` has something real to compare.
+    // Local progress at episode 1, so `sync` has something to compare.
     let state_path = home.join(".local/share/tsuzuki/state.toml");
     fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     fs::write(

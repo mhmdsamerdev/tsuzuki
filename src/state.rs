@@ -1,16 +1,11 @@
-//! `~/.local/share/tsuzuki/state.toml` — machine-written runtime state.
+//! `state.toml`: machine-written runtime state.
 //!
-//! Single flat TOML file, always written atomically (temp file in the same
-//! directory, then renamed over the original) — see CLAUDE.md §3. No write
-//! path in this module may write in place.
+//! One flat TOML file, always written atomically; no write path here may
+//! write in place.
 //!
-//! A record is keyed by **both** its tracked root's own persisted literal
-//! form and the series' verbatim directory name — never name alone, since
-//! composable roots (CLAUDE.md §3) let the same series name exist under more
-//! than one tracked root at once with independent progress. This is why
-//! `series` is a `Vec`, not a map keyed by name: TOML has no natural
-//! composite-key map representation, and `[[series]]` array-of-tables
-//! mirrors the same shape `config.rs`'s `[[exclusions]]` already uses.
+//! Records are keyed by `(root, name)`, since the same series name can exist
+//! under several tracked roots. Hence `series` is a `Vec` (`[[series]]`), not
+//! a map keyed by name.
 
 use std::fs;
 use std::io;
@@ -22,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::roots::normalize;
 
-/// A series' status in the resume picker (design.md §8).
+/// A series' status in the resume picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -34,58 +29,32 @@ pub enum Status {
     Dropped,
 }
 
-/// One tracked series' persisted progress. `root` stores the tracked root's
-/// own persisted literal form (e.g. `~/Anime`) — the same mechanism
-/// exclusions already use (CLAUDE.md's "Exclusion persistence and
-/// disambiguation") — never a resolved absolute path, so a record stays
-/// portable across machines exactly like a tracked root or exclusion does.
-/// `name` is the series' verbatim directory name (CLAUDE.md §3).
+/// One tracked series' persisted progress. `root` is the tracked root's
+/// stored literal form (e.g. `~/Anime`), never a resolved path. `name` is the
+/// series' verbatim directory name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesRecord {
     pub root: String,
     pub name: String,
     pub status: Status,
-    /// Relative to `root` (not the series directory) — e.g.
-    /// `"One Piece/Season 2/ep01.mkv"` — same relative-to-root convention
-    /// exclusions use, for the same portability reason.
+    /// Relative to `root`, not the series directory, e.g. `One Piece/Season 2/ep01.mkv`.
     pub current_relative_path: String,
     pub position_seconds: f64,
     pub episode_number: Option<u32>,
-    /// Unix seconds. Only moves on a genuine, persisted state change — never
-    /// on a mere scan/invocation, and never on a sub-`resume_seconds`
-    /// observation (CLAUDE.md's "Cursor movement"). This is exactly the
-    /// idleness clock `reconcile::apply_idle_auto_pause` reads against
-    /// `[thresholds] auto_pause_days`.
+    /// Unix seconds. Moves only on a persisted state change, never on a scan or
+    /// a sub-`resume_seconds` observation. Idle auto-pause reads it.
     pub updated_at: u64,
-    /// Phase 8b: the highest episode number a MAL sync merge has confirmed
-    /// either side already knows about for this series — set only by
-    /// `sync.rs`'s merge step, never by `reconcile.rs`. Deliberately
-    /// **separate** from `episode_number`: `reconcile.rs` unconditionally
-    /// overwrites `episode_number` from the local file's own Anitomy/
-    /// ordinal identity on every single reconcile pass (which runs before
-    /// every state-touching command, CLAUDE.md's "every state-touching
-    /// command reconciles first") — reusing that field for a MAL-driven
-    /// number would silently lose it the very next time any command ran.
-    /// `None` means no sync merge has ever touched this series. This field
-    /// never implies a real playback position. After a successful merge,
-    /// sync may separately advance `current_relative_path` to the first
-    /// unwatched local episode at position zero; it never fabricates a
-    /// position within an episode Tsuzuki did not observe locally.
+    /// Highest episode number a MAL sync merge has confirmed either side knows.
+    /// Set only by `sync.rs`, never reconcile, which overwrites `episode_number`
+    /// on every pass. `None` means no merge has touched this series. Never
+    /// implies a playback position.
     #[serde(default)]
     pub mal_episode_awareness: Option<u32>,
 }
 
-/// One series' link to a MyAnimeList anime ID (design.md §7's linking
-/// section). Stored here in `state.toml`, not `config.toml` — Phase 8b's
-/// judgment call (see `sync.rs`'s module doc for the full reasoning): a
-/// link is Tsuzuki-derived/written identity data, populated either by
-/// exact-match auto-linking or by the explicit `sync link` command, the
-/// same category as `SeriesRecord` itself (which already lives here) —
-/// not hand-typed human configuration a user would maintain in a dotfiles
-/// repo the way tracked roots or exclusions are. Keyed by the same
-/// `(root, name)` composite key as `SeriesRecord`, for the same composable-
-/// roots reason (CLAUDE.md §3): the same series name can exist under more
-/// than one tracked root, each with its own independent MAL link.
+/// One series' link to a MyAnimeList anime ID. Lives here rather than in
+/// `config.toml` because Tsuzuki writes it (auto-link or `sync link`). Keyed by
+/// `(root, name)` like `SeriesRecord`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MalLink {
     pub root: String,
@@ -127,7 +96,7 @@ impl State {
     }
 }
 
-/// Current Unix time in whole seconds. Used for `SeriesRecord::updated_at`.
+/// Current Unix time in whole seconds.
 pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -135,14 +104,8 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Resolves a `--root` argument (as accepted by `pause`/`drop`/`resume`/
-/// `start`, same mechanism `exclude`'s `--root` already uses) to the
-/// matching tracked root's own stored literal form, by expand-then-
-/// canonicalize comparison — so `--root ~/Anime` and
-/// `--root /home/user/Anime` both resolve to whichever form `config.toml`
-/// actually has on file. `exclude.rs`'s own equivalent helper is private and
-/// off-limits to modify, so this is a small, independent reimplementation
-/// over the same public `roots::normalize` both already share.
+/// Resolves a `--root` argument to the tracked root's stored literal form,
+/// comparing normalized paths so `~/Anime` and its absolute form both match.
 pub fn resolve_root_arg(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
     let target = normalize(root_arg, home);
     config
@@ -153,7 +116,7 @@ pub fn resolve_root_arg(config: &Config, root_arg: &Path, home: Option<&Path>) -
         .cloned()
 }
 
-/// Resolves `~/.local/share/tsuzuki/state.toml` via `dirs::data_dir()`.
+/// Path of `state.toml` under the platform data dir.
 pub fn state_path() -> io::Result<PathBuf> {
     let base = dirs::data_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve data directory")
@@ -161,8 +124,7 @@ pub fn state_path() -> io::Result<PathBuf> {
     Ok(base.join("tsuzuki").join("state.toml"))
 }
 
-/// Reads state from `path`. A missing file is treated as empty state, not
-/// an error.
+/// Reads state from `path`; a missing file is empty state, not an error.
 pub fn read(path: &Path) -> io::Result<State> {
     match fs::read_to_string(path) {
         Ok(contents) => {
@@ -173,22 +135,17 @@ pub fn read(path: &Path) -> io::Result<State> {
     }
 }
 
-/// Writes `state` to `path` atomically: serialize to a temp file created in
-/// the same directory as `path`, then rename over it. A kill mid-write
-/// leaves either the old file or the new one, never a half-written one.
+/// Writes `state` to `path` atomically: a temp file in the same directory,
+/// then a rename over `path`, so a kill mid-write never leaves a partial file.
 pub fn write(path: &Path, state: &State) -> io::Result<()> {
     let contents =
         toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     atomic_write(path, contents.as_bytes(), None)
 }
 
-/// The shared temp-file-then-rename primitive behind every atomic write in
-/// this project (CLAUDE.md §3: "Any new state-writing code path must go
-/// through the same atomic-write helper; don't add a second write path that
-/// writes in place 'just this once.'"). `unix_mode`, when given, restricts
-/// the written file's permissions on Unix (e.g. `0o600` for `mal_token.toml`,
-/// which holds live credentials) — set on the temp file before the rename so
-/// the final path is never briefly world-readable.
+/// The temp-file-then-rename primitive every atomic write goes through.
+/// `unix_mode`, when given, is set on the temp file before the rename so the
+/// final path is never briefly more permissive (e.g. `0o600` for the MAL token).
 pub fn atomic_write(path: &Path, contents: &[u8], unix_mode: Option<u32>) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
@@ -277,10 +234,7 @@ mod tests {
         assert_eq!(entries[0].as_ref().unwrap().path(), path);
     }
 
-    /// Proves the write path actually swaps in a new inode via rename
-    /// rather than truncating and rewriting the existing file in place —
-    /// the property that makes a kill mid-write safe. An in-place write
-    /// would keep the same inode; rename always produces a new one.
+    /// Rename swaps in a new inode; an in-place rewrite would keep the same one.
     #[cfg(unix)]
     #[test]
     fn write_replaces_file_via_rename_not_in_place_mutation() {
@@ -358,24 +312,7 @@ mod tests {
 
     #[test]
     fn a_pre_phase_5_schema_state_toml_fails_cleanly_not_silently_or_with_a_panic() {
-        // Gap-audit sweep item: is a pre-Phase-5 state.toml reachable in
-        // practice, and if one somehow existed, what happens reading it
-        // now? In practice: no command ever called `write()` before this
-        // phase (confirmed via `git log -p -- src/main.rs` — the one write
-        // call that briefly existed in the very first scaffolding commit
-        // wrote nothing but an empty default and was removed the same day,
-        // before this phase, and no real `~/.local/share/tsuzuki/` exists
-        // on this development machine at all), so no real installation can
-        // have a genuinely old-format file. This test covers the
-        // hypothetical anyway: the old schema (`BTreeMap<String,
-        // SeriesState>` under a bare `[series."name"]` table, keyed by name
-        // alone, fields `current_path`/no `root`/no `updated_at`) is a
-        // fundamentally different TOML shape from today's `[[series]]`
-        // array-of-tables — deserialization must fail with a typed error,
-        // never panic and never silently produce a wrong/partial `State`.
-        // `main.rs`'s `reconcile_state` already turns any `Err` here into a
-        // plain command error, not a crash — no migration path exists or is
-        // needed for a format that was never actually shipped.
+        // The old by-name `[series."name"]` schema must fail to parse, never yield partial state.
         let old_format = r#"
 [series."One Piece"]
 status = "in_progress"
@@ -428,13 +365,11 @@ episode_number = 27
         assert_eq!(resolved, None);
     }
 
-    // --- Phase 8b: mal_episode_awareness / MalLink migration + lookups ---
+    // --- mal_episode_awareness / MalLink ---
 
     #[test]
     fn a_pre_phase_8b_series_record_missing_mal_episode_awareness_still_parses() {
-        // A real state.toml written by any Phase 5-8a build has no
-        // `mal_episode_awareness` key under `[[series]]` at all — must
-        // still read cleanly, defaulting to `None`, not fail to parse.
+        // Older files have no `mal_episode_awareness` key; it must default to `None`.
         let old_format = r#"
 [[series]]
 root = "~/Anime"
