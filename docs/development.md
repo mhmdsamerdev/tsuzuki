@@ -1,6 +1,6 @@
 # Developing Tsuzuki
 
-Design rules and conventions are in [`CLAUDE.md`](../CLAUDE.md). Read it before changing behavior.
+Design rules and conventions are in [`AGENTS.md`](../AGENTS.md). Read it before changing behavior.
 
 ## Setup
 
