@@ -1308,4 +1308,44 @@ mod tests {
         let r = check_mal_auth(&TokenStatus::NetworkError("connection refused".to_string()));
         assert_eq!(r.level, Level::Warn);
     }
+
+    #[test]
+    fn a_record_for_a_nested_root_as_its_parents_series_is_an_orphan() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatch = anime.join("Rewatch");
+        std_fs::create_dir_all(rewatch.join("Bleach")).unwrap();
+        std_fs::create_dir_all(anime.join("Monster")).unwrap();
+
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatch.to_string_lossy().into_owned());
+        let state = State {
+            series: vec![
+                orphan_record(&anime, "Rewatch"),
+                orphan_record(&anime, "Monster"),
+                orphan_record(&rewatch, "Bleach"),
+            ],
+            mal_links: Vec::new(),
+        };
+        let valid = [
+            anime.to_string_lossy().into_owned(),
+            rewatch.to_string_lossy().into_owned(),
+        ];
+
+        let orphans = find_orphans(&config, &state, &valid, None);
+        assert_eq!(
+            orphans,
+            vec![Orphan {
+                root: anime.to_string_lossy().into_owned(),
+                name: "Rewatch".to_string(),
+            }]
+        );
+    }
 }

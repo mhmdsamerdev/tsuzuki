@@ -49,6 +49,12 @@ pub enum ExcludeError {
     WholeSeries { relative_path: String },
     /// The path is a depth-1 directory that is itself a tracked root.
     TrackedRoot { relative_path: String },
+    /// The path lies inside a tracked root nested under the chosen root. An
+    /// exclusion only applies through the root that owns it.
+    InsideNestedRoot {
+        relative_path: String,
+        nested_root: String,
+    },
     /// The path is absolute. Checked before any `join`, which would discard
     /// the root and resolve against the filesystem root.
     NotRelative(PathBuf),
@@ -73,6 +79,14 @@ impl fmt::Display for ExcludeError {
             ExcludeError::TrackedRoot { relative_path } => write!(
                 f,
                 "cannot exclude \"{relative_path}\" — it's a tracked root. Untrack it instead."
+            ),
+            ExcludeError::InsideNestedRoot {
+                relative_path,
+                nested_root,
+            } => write!(
+                f,
+                "cannot exclude \"{relative_path}\" — it's inside the tracked root {nested_root}. \
+                 Use --root {nested_root} with the path relative to it."
             ),
             ExcludeError::NotRelative(p) => write!(
                 f,
@@ -161,6 +175,19 @@ fn exclude_with_home(
     {
         return Err(ExcludeError::TrackedRoot {
             relative_path: relative_str,
+        });
+    }
+
+    let real_resolved = normalize(&resolved, home);
+    let real_chosen = normalize(&expanded_root, home);
+    let nested_owner = config.roots.paths.iter().find(|root| {
+        let real = normalize(Path::new(root), home);
+        real != real_chosen && real.starts_with(&real_chosen) && real_resolved.starts_with(&real)
+    });
+    if let Some(nested_root) = nested_owner {
+        return Err(ExcludeError::InsideNestedRoot {
+            relative_path: relative_str,
+            nested_root: nested_root.clone(),
         });
     }
 
@@ -476,6 +503,59 @@ mod tests {
                 relative_path: "One Piece".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn excluding_a_path_inside_a_nested_root_is_rejected_pointing_to_that_root() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatch = anime.join("Rewatch");
+        touch(&anime.join("One Piece").join("ep01.mkv"));
+        touch(&rewatch.join("Bleach").join("ep01.mkv"));
+
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatch.to_string_lossy().into_owned());
+
+        let err = exclude_with_home(
+            &mut config,
+            Path::new("Rewatch/Bleach/ep01.mkv"),
+            Some(&anime),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ExcludeError::InsideNestedRoot {
+                relative_path: "Rewatch/Bleach/ep01.mkv".to_string(),
+                nested_root: rewatch.to_string_lossy().into_owned(),
+            }
+        );
+        assert!(config.exclusions.is_empty());
+
+        // Through the owning root, and for the parent's own files, it is accepted.
+        let outcome = exclude_with_home(
+            &mut config,
+            Path::new("Bleach/ep01.mkv"),
+            Some(&rewatch),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
+        let outcome = exclude_with_home(
+            &mut config,
+            Path::new("One Piece/ep01.mkv"),
+            Some(&anime),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(outcome, ExcludeOutcome::Excluded { .. }));
     }
 
     #[test]

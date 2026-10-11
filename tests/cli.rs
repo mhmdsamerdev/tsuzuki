@@ -2004,3 +2004,98 @@ fn pause_drop_and_exclude_with_a_root_nested_in_another_root_never_see_it_as_a_s
     );
     assert_eq!(snapshot(home), before);
 }
+
+/// Plays `<root>/<series>/ep01.mkv` (via `path`) at 300 s and returns `list` output.
+fn list_after_watching(home: &Path, path: &Path) -> String {
+    write_watch_later(home, "entry", path, 300.0);
+    run_ok(home, &["list"])
+}
+
+#[test]
+fn exclude_inside_a_nested_root_is_rejected_and_works_through_the_nested_root() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[("anime", &["Monster"]), ("anime/rewatch", &["Bleach"])],
+    );
+    touch(&home.join("anime/rewatch/Bleach/ep02.mkv"));
+
+    let before = snapshot(home);
+    let rejected = run(
+        home,
+        &["exclude", "rewatch/Bleach/ep01.mkv", "--root", &roots[0]],
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(stdout_of(&rejected), "");
+    assert_eq!(
+        stderr_of(&rejected),
+        format!(
+            "error: cannot exclude \"rewatch/Bleach/ep01.mkv\" — it's inside the tracked root {r}. Use --root {r} with the path relative to it.\n",
+            r = roots[1]
+        )
+    );
+    assert_eq!(snapshot(home), before);
+
+    run_ok(home, &["exclude", "Bleach/ep01.mkv", "--root", &roots[1]]);
+    bypass_real_mpv(home);
+    let start = run(home, &["start", "rewatch"]);
+    assert_eq!(
+        stdout_of(&start),
+        format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}")
+    );
+}
+
+#[test]
+fn a_root_added_child_first_before_its_parent_lists_the_same_series_per_root() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let anime = home.join("anime");
+    let rewatch = anime.join("rewatch");
+    touch(&anime.join("Monster/ep01.mkv"));
+    touch(&rewatch.join("Bleach/ep01.mkv"));
+    add_root(home, &rewatch);
+    add_root(home, &anime);
+
+    assert_eq!(
+        list_after_watching(home, &rewatch.join("Bleach/ep01.mkv")),
+        "In progress:\n  Bleach — ep. 1 (1 files)  [rewatch]\n\nNever started:\n  Monster (1 files)  [anime]\n"
+    );
+}
+
+#[test]
+fn a_root_reached_through_a_symlink_or_trailing_slash_matches_mpv_paths_of_any_spelling() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let real = home.join("real");
+    let link = home.join("link");
+    touch(&real.join("Monster/ep01.mkv"));
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let expected = "In progress:\n  Monster — ep. 1 (1 files)\n";
+
+    add_root(home, &link);
+    assert_eq!(
+        list_after_watching(home, &real.join("Monster/ep01.mkv")),
+        expected
+    );
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = other_dir.path();
+    let real = other.join("real");
+    touch(&real.join("Monster/ep01.mkv"));
+    std::os::unix::fs::symlink(&real, other.join("link")).unwrap();
+    add_root(other, &real);
+    assert_eq!(
+        list_after_watching(other, &other.join("link/Monster/ep01.mkv")),
+        expected
+    );
+
+    let slash_dir = tempfile::tempdir().unwrap();
+    let slash = slash_dir.path();
+    touch(&slash.join("a/Monster/ep01.mkv"));
+    run_ok(slash, &["add", &format!("{}/", slash.join("a").display())]);
+    assert_eq!(
+        list_after_watching(slash, &slash.join("a/Monster/ep01.mkv")),
+        expected
+    );
+}
