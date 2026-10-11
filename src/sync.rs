@@ -2515,4 +2515,65 @@ mod tests {
             vec![(rewatch.to_string_lossy().into_owned(), "Bleach".to_string())]
         );
     }
+
+    #[test]
+    fn eligible_targets_follow_the_stored_root_under_every_root_layout() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("real/Monster")).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("link")).unwrap();
+        fs::create_dir_all(home.join("anime/Monster")).unwrap();
+        fs::create_dir_all(home.join("anime/rewatch/Monster")).unwrap();
+        fs::create_dir_all(home.join("tilde/Monster")).unwrap();
+        fs::create_dir_all(home.join("target_root/Other")).unwrap();
+        std::os::unix::fs::symlink(home.join("target_root"), home.join("anime/Aliased")).unwrap();
+
+        let stored = [
+            format!("{}/", home.join("real").display()),
+            home.join("link").to_string_lossy().into_owned(),
+            home.join("anime").to_string_lossy().into_owned(),
+            home.join("anime/rewatch").to_string_lossy().into_owned(),
+            "~/tilde".to_string(),
+            home.join("target_root").to_string_lossy().into_owned(),
+        ];
+        let mut config = Config::default();
+        config.roots.paths.extend(stored.iter().cloned());
+
+        let mut records = Vec::new();
+        for (root, name) in [
+            (&stored[0], "Monster"),
+            (&stored[1], "Monster"),
+            (&stored[2], "Monster"),
+            (&stored[3], "Monster"),
+            (&stored[4], "Monster"),
+            (&stored[2], "rewatch"),
+            (&stored[2], "Aliased"),
+            (&stored[5], "Other"),
+        ] {
+            let mut record = record_with(Status::InProgress, 3, 120.0);
+            record.root.clone_from(root);
+            record.name = name.to_string();
+            records.push(record);
+        }
+        let state = State {
+            series: records,
+            mal_links: Vec::new(),
+        };
+
+        let mut got = eligible_targets(&state, &config, Some(home));
+        got.sort();
+        let mut want: Vec<(String, String)> = [
+            (&stored[0], "Monster"),
+            (&stored[1], "Monster"),
+            (&stored[2], "Monster"),
+            (&stored[3], "Monster"),
+            (&stored[4], "Monster"),
+            (&stored[5], "Other"),
+        ]
+        .iter()
+        .map(|(r, n)| ((*r).clone(), (*n).to_string()))
+        .collect();
+        want.sort();
+        assert_eq!(got, want);
+    }
 }

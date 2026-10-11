@@ -2099,3 +2099,82 @@ fn a_root_reached_through_a_symlink_or_trailing_slash_matches_mpv_paths_of_any_s
         expected
     );
 }
+
+/// Tracks `extra_root` after `add`ing each of `roots` (as typed), logs an `eof` for `played`, and returns `list`.
+fn list_after_script_eof(home: &Path, roots: &[String], played: &Path) -> String {
+    for root in roots {
+        run_ok(home, &["add", root]);
+    }
+    write_script_log(home, "log-1", played, Some(1420.0), Some(1415.0), "eof");
+    run_ok(home, &["list"])
+}
+
+#[test]
+fn script_log_eof_completes_only_the_played_series_under_every_root_layout() {
+    // Nested root: the finished file belongs to the nested root, not to a series named after it.
+    let nested_dir = tempfile::tempdir().unwrap();
+    let home = nested_dir.path();
+    touch(&home.join("anime/Monster/ep01.mkv"));
+    touch(&home.join("anime/rewatch/Bleach/ep01.mkv"));
+    let roots =
+        [home.join("anime"), home.join("anime/rewatch")].map(|r| r.to_str().unwrap().to_string());
+    assert_eq!(
+        list_after_script_eof(home, &roots, &home.join("anime/rewatch/Bleach/ep01.mkv")),
+        "Completed:\n  Bleach (1 files)  [rewatch]\n\nNever started:\n  Monster (1 files)  [anime]\n"
+    );
+
+    // Root stored as a symlink, mpv logged the real path.
+    let link_dir = tempfile::tempdir().unwrap();
+    let home = link_dir.path();
+    touch(&home.join("real/Monster/ep01.mkv"));
+    std::os::unix::fs::symlink(home.join("real"), home.join("link")).unwrap();
+    assert_eq!(
+        list_after_script_eof(
+            home,
+            &[home.join("link").to_str().unwrap().to_string()],
+            &home.join("real/Monster/ep01.mkv")
+        ),
+        "Completed:\n  Monster (1 files)\n"
+    );
+
+    // Root stored with a trailing slash.
+    let slash_dir = tempfile::tempdir().unwrap();
+    let home = slash_dir.path();
+    touch(&home.join("a/Monster/ep01.mkv"));
+    assert_eq!(
+        list_after_script_eof(
+            home,
+            &[format!("{}/", home.join("a").display())],
+            &home.join("a/Monster/ep01.mkv")
+        ),
+        "Completed:\n  Monster (1 files)\n"
+    );
+}
+
+#[test]
+fn sync_link_with_a_root_nested_in_another_root_is_rejected_before_any_network_call() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[("anime", &["Monster"]), ("anime/rewatch", &["Bleach"])],
+    );
+    let before = snapshot(home);
+
+    for args in [
+        vec!["sync", "link", "rewatch", "--mal-id", "1"],
+        vec![
+            "sync", "link", "rewatch", "--mal-id", "1", "--root", &roots[0],
+        ],
+    ] {
+        let out = run(home, &args);
+        assert!(!out.status.success(), "{args:?}");
+        assert_eq!(stdout_of(&out), "", "{args:?}");
+        assert_eq!(
+            stderr_of(&out),
+            "error: no tracked series named \"rewatch\"\n",
+            "{args:?}"
+        );
+    }
+    assert_eq!(snapshot(home), before);
+}
