@@ -5,7 +5,8 @@
 use std::path::Path;
 
 use crate::config::Config;
-use crate::roots::{expand_tilde, root_folder_name};
+use crate::roots::{expand_tilde, root_folder_name, tracked_real_paths};
+use crate::series::is_series_dir;
 use crate::state::resolve_root_arg;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,18 +36,28 @@ pub fn resolve_series_root(
             let root = resolve_root_arg(config, root_arg, home).ok_or_else(|| {
                 TargetError::RootNotFound(root_arg.to_string_lossy().into_owned())
             })?;
-            if expand_tilde(Path::new(&root), home).join(series).is_dir() {
+            let real_roots = tracked_real_paths(config, home);
+            if is_series_dir(
+                &expand_tilde(Path::new(&root), home).join(series),
+                &real_roots,
+            ) {
                 Ok(root)
             } else {
                 Err(TargetError::NotFound(series.to_string()))
             }
         }
         None => {
+            let real_roots = tracked_real_paths(config, home);
             let matches: Vec<String> = config
                 .roots
                 .paths
                 .iter()
-                .filter(|root| expand_tilde(Path::new(root), home).join(series).is_dir())
+                .filter(|root| {
+                    is_series_dir(
+                        &expand_tilde(Path::new(root), home).join(series),
+                        &real_roots,
+                    )
+                })
                 .cloned()
                 .collect();
             match matches.len() {
@@ -94,11 +105,12 @@ pub fn resolve_positional(
     arg: &str,
     home: Option<&Path>,
 ) -> Result<Resolved, PositionalError> {
+    let real_roots = tracked_real_paths(config, home);
     let series_roots: Vec<String> = config
         .roots
         .paths
         .iter()
-        .filter(|root| expand_tilde(Path::new(root), home).join(arg).is_dir())
+        .filter(|root| is_series_dir(&expand_tilde(Path::new(root), home).join(arg), &real_roots))
         .cloned()
         .collect();
     let roots: Vec<String> = config
@@ -418,6 +430,57 @@ mod tests {
         assert_eq!(
             resolve_positional(&config, "Bleach", Some(home)),
             Ok(Resolved::Series("~/re".to_string()))
+        );
+    }
+
+    #[test]
+    fn positional_nested_root_name_resolves_as_root_not_series() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let rewatch = anime.join("rewatch");
+        fs::create_dir_all(rewatch.join("Bleach")).unwrap();
+        fs::create_dir_all(anime.join("Monster")).unwrap();
+        let config = tracked_config(&[&anime, &rewatch]);
+
+        assert_eq!(
+            resolve_positional(&config, "rewatch", None),
+            Ok(Resolved::Root(s(&rewatch)))
+        );
+        assert_eq!(
+            resolve_positional(&config, "Monster", None),
+            Ok(Resolved::Series(s(&anime)))
+        );
+    }
+
+    #[test]
+    fn series_root_with_root_arg_rejects_a_nested_root_as_series() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let rewatch = anime.join("rewatch");
+        fs::create_dir_all(&rewatch).unwrap();
+        let config = tracked_config(&[&anime, &rewatch]);
+
+        assert_eq!(
+            resolve_series_root(&config, "rewatch", Some(&anime), None),
+            Err(TargetError::NotFound("rewatch".to_string()))
+        );
+    }
+
+    #[test]
+    fn series_root_without_root_arg_ignores_a_nested_root_in_its_parent() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("anime");
+        let rewatch = anime.join("rewatch");
+        fs::create_dir_all(rewatch.join("Bleach")).unwrap();
+        let config = tracked_config(&[&anime, &rewatch]);
+
+        assert_eq!(
+            resolve_series_root(&config, "rewatch", None, None),
+            Err(TargetError::NotFound("rewatch".to_string()))
+        );
+        assert_eq!(
+            resolve_series_root(&config, "Bleach", None, None),
+            Ok(s(&rewatch))
         );
     }
 }

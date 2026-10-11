@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::duration::{self, DurationOutcome};
 use crate::exclude;
 use crate::mpv::{self, PlaybackAction, ScanWarning, WatchLaterEntry};
-use crate::roots::{expand_tilde, normalize};
+use crate::roots::{expand_tilde, normalize, tracked_real_paths};
 use crate::script_log::{self, ScriptLogEntry};
 use crate::series;
 use crate::state::{SeriesRecord, State, Status, now_unix};
@@ -277,7 +277,7 @@ fn reconcile_one_series(
     let expanded_root = expand_tilde(Path::new(root), home);
     let series_path = expanded_root.join(name);
     // A moved or deleted folder leaves its record untouched.
-    if !series_path.is_dir() {
+    if !series::is_series_dir(&series_path, &tracked_real_paths(config, home)) {
         return;
     }
 

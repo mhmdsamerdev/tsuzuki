@@ -24,13 +24,18 @@ pub fn series_in_root(root: &Path, tracked_root_real_paths: &[PathBuf]) -> io::R
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
-        if is_dir_following_symlinks(&path) && !is_a_tracked_root(&path, tracked_root_real_paths) {
+        if is_series_dir(&path, tracked_root_real_paths) {
             let name = entry.file_name().to_string_lossy().into_owned();
             series.push(Series { path, name });
         }
     }
     series.sort_by(|a, b| natord::compare(&a.name, &b.name));
     Ok(series)
+}
+
+/// True for a directory (symlinks followed) that is not itself a tracked root.
+pub fn is_series_dir(path: &Path, tracked_root_real_paths: &[PathBuf]) -> bool {
+    is_dir_following_symlinks(path) && !is_a_tracked_root(path, tracked_root_real_paths)
 }
 
 fn is_a_tracked_root(path: &Path, tracked_root_real_paths: &[PathBuf]) -> bool {
@@ -717,5 +722,25 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["Show 1", "Show 2", "Show 10"]);
+    }
+
+    #[test]
+    fn is_series_dir_is_true_only_for_untracked_directories() {
+        let dir = tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        let root = dir.path().join("root");
+        let link_to_root = dir.path().join("link");
+        let file = dir.path().join("file.mkv");
+        std_fs::create_dir_all(&plain).unwrap();
+        std_fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&root, &link_to_root).unwrap();
+        std_fs::write(&file, b"").unwrap();
+        let tracked = vec![std_fs::canonicalize(&root).unwrap()];
+
+        assert!(is_series_dir(&plain, &tracked));
+        assert!(!is_series_dir(&root, &tracked));
+        assert!(!is_series_dir(&link_to_root, &tracked));
+        assert!(!is_series_dir(&file, &tracked));
+        assert!(!is_series_dir(&dir.path().join("missing"), &tracked));
     }
 }

@@ -6,6 +6,7 @@ All notable changes to Tsuzuki are documented here.
 
 - `start` and `resume` accept a root's folder name (or `--root`) to narrow the picker to that root.
 - Episodes past season 1 show their season (`S02E01`, `Season 2, Episode 1`) when the filename names one.
+- A folder that is both a root and a folder inside another root is no longer treated as a series of the other root.
 
 ## [v0.1.3]
 

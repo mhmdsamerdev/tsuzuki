@@ -15,8 +15,8 @@ use crate::anitomy;
 use crate::config::Config;
 use crate::exclude;
 use crate::mal::{HttpResponse, MalHttpClient};
-use crate::roots::{expand_tilde, normalize};
-use crate::series;
+use crate::roots::{expand_tilde, normalize, tracked_real_paths};
+use crate::series::{self, is_series_dir};
 use crate::state::{MalLink, SeriesRecord, State, Status, now_unix};
 
 pub const API_BASE: &str = "https://api.myanimelist.net/v2";
@@ -769,15 +769,17 @@ pub fn eligible_targets(
     config: &Config,
     home: Option<&Path>,
 ) -> Vec<(String, String)> {
+    let real_roots = tracked_real_paths(config, home);
     state
         .series
         .iter()
         .filter(|record| {
             !matches!(record.status, Status::Paused | Status::Dropped)
                 && config.roots.paths.contains(&record.root)
-                && expand_tilde(Path::new(&record.root), home)
-                    .join(&record.name)
-                    .is_dir()
+                && is_series_dir(
+                    &expand_tilde(Path::new(&record.root), home).join(&record.name),
+                    &real_roots,
+                )
         })
         .map(|record| (record.root.clone(), record.name.clone()))
         .collect()
@@ -2479,5 +2481,38 @@ mod tests {
             );
             assert_eq!(local_effective_episode(&state.series[0]), 0);
         }
+    }
+
+    #[test]
+    fn eligible_targets_skips_a_record_for_a_directory_that_is_itself_a_tracked_root() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatch = anime.join("Rewatch");
+        fs::create_dir_all(rewatch.join("Bleach")).unwrap();
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatch.to_string_lossy().into_owned());
+
+        let mut stale = record_with(Status::InProgress, 3, 120.0);
+        stale.root = anime.to_string_lossy().into_owned();
+        stale.name = "Rewatch".to_string();
+        let mut live = record_with(Status::InProgress, 3, 120.0);
+        live.root = rewatch.to_string_lossy().into_owned();
+        live.name = "Bleach".to_string();
+        let state = State {
+            series: vec![stale, live],
+            mal_links: Vec::new(),
+        };
+
+        assert_eq!(
+            eligible_targets(&state, &config, Some(dir.path())),
+            vec![(rewatch.to_string_lossy().into_owned(), "Bleach".to_string())]
+        );
     }
 }

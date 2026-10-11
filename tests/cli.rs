@@ -1941,3 +1941,34 @@ fn episode_without_a_detected_season_output_is_unchanged() {
         )
     );
 }
+
+#[test]
+fn start_and_resume_with_a_root_nested_in_another_root_treat_it_as_a_root_only() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[("anime", &["Monster"]), ("anime/rewatch", &["Bleach"])],
+    );
+    bypass_real_mpv(home);
+
+    for cmd in ["start", "resume"] {
+        let out = run(home, &[cmd, "rewatch"]);
+        assert!(
+            !stderr_of(&out).contains("both a series and a root"),
+            "{cmd}"
+        );
+        assert!(!stdout_of(&out).contains("rewatch/ep01.mkv"), "{cmd}");
+    }
+
+    let scoped = run(home, &["start", "rewatch"]);
+    assert_eq!(
+        stdout_of(&scoped),
+        format!("Available to start:\n\n  1. Bleach — Start (1 files)\n{START_TAIL}")
+    );
+
+    let picker = run(home, &["start"]);
+    assert!(!stdout_of(&picker).contains("rewatch —"));
+    let pause = run(home, &["pause", "rewatch", "--root", &roots[0]]);
+    assert!(!pause.status.success());
+}

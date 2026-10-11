@@ -73,6 +73,16 @@ pub(crate) fn normalize(path: &Path, home: Option<&Path>) -> PathBuf {
     fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
+/// Canonical paths of every tracked root, for telling roots from series.
+pub(crate) fn tracked_real_paths(config: &Config, home: Option<&Path>) -> Vec<PathBuf> {
+    config
+        .roots
+        .paths
+        .iter()
+        .map(|root| normalize(Path::new(root), home))
+        .collect()
+}
+
 /// A stored root's folder name: its last path component, so a trailing
 /// slash doesn't matter. `None` for roots with no final component (`/`).
 pub(crate) fn root_folder_name(root: &str) -> Option<String> {
