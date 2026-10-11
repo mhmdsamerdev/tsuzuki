@@ -1878,3 +1878,66 @@ fn resume_without_argument_and_nothing_in_progress_still_falls_through_to_start(
         format!("Available to start:\n\n  1. Monster — Start (1 files)\n{START_TAIL}")
     );
 }
+
+/// One series `name` holding the single file `file` under a fresh root, bookmarked at `position` seconds.
+fn watched_single_file(home: &Path, name: &str, file: &str, position: f64) -> PathBuf {
+    let root = home.join("Anime");
+    let path = root.join(name).join(file);
+    touch(&path);
+    add_root(home, &root);
+    bypass_real_mpv(home);
+    write_watch_later(home, "entry-1", &path, position);
+    path
+}
+
+#[test]
+fn season_two_episode_shows_season_in_status_list_and_resume() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S02E01.mkv", 224.0);
+
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — S02E01\n");
+    assert_eq!(
+        run_ok(home, &["list"]),
+        "In progress:\n  Bakuman — S02E01 (1 files)\n"
+    );
+    assert_eq!(
+        run_ok(home, &["resume", "Bakuman"]),
+        format!(
+            "✓ Resuming \"Bakuman\" — Season 2, Episode 1 (03:44)\n  → {}\n",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn season_one_episode_output_is_unchanged() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S01E01.mkv", 224.0);
+
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1\n");
+    assert_eq!(
+        run_ok(home, &["resume", "Bakuman"]),
+        format!(
+            "✓ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn episode_without_a_detected_season_output_is_unchanged() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - 01.mkv", 224.0);
+
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1\n");
+    assert_eq!(
+        run_ok(home, &["resume", "Bakuman"]),
+        format!(
+            "✓ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
+            path.display()
+        )
+    );
+}

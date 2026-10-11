@@ -1101,6 +1101,7 @@ mod tests {
             episode_number: Some(1),
             updated_at: 1,
             mal_episode_awareness: None,
+            season_number: None,
         }
     }
 

@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use crate::anitomy;
 use crate::config::Config;
 use crate::exclude;
 use crate::roots::{expand_tilde, normalize};
@@ -20,8 +21,17 @@ pub struct SeriesOverview {
     pub name: String,
     pub status: Option<Status>,
     pub episode_number: Option<u32>,
+    pub season_number: Option<u32>,
     pub position_seconds: Option<f64>,
     pub file_count: usize,
+}
+
+impl SeriesOverview {
+    /// `ep. 1`, or `S02E01` past season 1; `None` without an episode.
+    pub fn episode_label(&self) -> Option<String> {
+        self.episode_number
+            .map(|ep| anitomy::episode_label(self.season_number, ep))
+    }
 }
 
 /// Every series under every tracked root, matched against `state`.
@@ -72,6 +82,7 @@ fn overview_for(
             name: name.to_string(),
             status: Some(r.status),
             episode_number: r.episode_number,
+            season_number: r.season_number,
             position_seconds: Some(r.position_seconds),
             file_count,
         },
@@ -80,6 +91,7 @@ fn overview_for(
             name: name.to_string(),
             status: None,
             episode_number: None,
+            season_number: None,
             position_seconds: None,
             file_count,
         },
@@ -181,9 +193,9 @@ pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
 /// `"Apothecary Diaries — Start (12 files)"`.
 pub fn start_line(overview: &SeriesOverview) -> String {
     let word = start_display_word(overview.status);
-    match (overview.status, overview.episode_number) {
+    match (overview.status, overview.episode_label()) {
         (Some(Status::Paused), Some(ep)) => format!(
-            "{} — {} (ep. {ep}, {} files)",
+            "{} — {} ({ep}, {} files)",
             overview.name, word, overview.file_count
         ),
         _ => format!(
@@ -203,9 +215,43 @@ mod tests {
             name: name.to_string(),
             status,
             episode_number: None,
+            season_number: None,
             position_seconds: None,
             file_count: 1,
         }
+    }
+
+    #[test]
+    fn paused_start_line_shows_season_past_season_one() {
+        let mut o = overview("Bakuman", Some(Status::Paused));
+        o.episode_number = Some(1);
+        o.season_number = Some(2);
+        assert_eq!(start_line(&o), "Bakuman — Resume (S02E01, 1 files)");
+    }
+
+    #[test]
+    fn paused_start_line_without_season_keeps_ep_form() {
+        let mut o = overview("Bakuman", Some(Status::Paused));
+        o.episode_number = Some(9);
+        assert_eq!(start_line(&o), "Bakuman — Resume (ep. 9, 1 files)");
+    }
+
+    #[test]
+    fn overview_for_passes_the_stored_season_through() {
+        let record = SeriesRecord {
+            root: "~/Anime".to_string(),
+            name: "Bakuman".to_string(),
+            status: Status::InProgress,
+            current_relative_path: "Bakuman/S02/e.mkv".to_string(),
+            position_seconds: 5.0,
+            episode_number: Some(1),
+            updated_at: 1,
+            mal_episode_awareness: None,
+            season_number: Some(2),
+        };
+        let o = overview_for("~/Anime", "Bakuman", Some(&record), 3);
+        assert_eq!(o.season_number, Some(2));
+        assert_eq!(o.episode_label(), Some("S02E01".to_string()));
     }
 
     #[test]
@@ -346,6 +392,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -411,6 +458,7 @@ mod tests {
             episode_number: Some(2), // ordinal fallback position, not a parsed number
             updated_at: 1,
             mal_episode_awareness: None,
+            season_number: None,
         };
         let o = overview_for("~/Anime", "No Numbers", Some(&record), 3);
         assert_eq!(o.episode_number, Some(2));

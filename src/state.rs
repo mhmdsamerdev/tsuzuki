@@ -50,6 +50,10 @@ pub struct SeriesRecord {
     /// implies a playback position.
     #[serde(default)]
     pub mal_episode_awareness: Option<u32>,
+    /// Anitomy's season for the current episode, set together with
+    /// `episode_number`. `None` when the filename names no season.
+    #[serde(default)]
+    pub season_number: Option<u32>,
 }
 
 /// One series' link to a MyAnimeList anime ID. Lives here rather than in
@@ -183,6 +187,7 @@ mod tests {
                 episode_number: Some(27),
                 updated_at: 1_700_000_000,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
             mal_links: Vec::new(),
         }
@@ -281,6 +286,7 @@ mod tests {
                     episode_number: Some(5),
                     updated_at: 1,
                     mal_episode_awareness: None,
+                    season_number: None,
                 },
                 SeriesRecord {
                     root: "~/Anime/Rewatches".to_string(),
@@ -291,6 +297,7 @@ mod tests {
                     episode_number: Some(2),
                     updated_at: 2,
                     mal_episode_awareness: None,
+                    season_number: None,
                 },
             ],
 

@@ -595,6 +595,7 @@ fn advance_local_cursor(
     record.current_relative_path = next_relative;
     record.position_seconds = 0.0;
     record.episode_number = Some(identities[next_index].episode_number);
+    record.season_number = identities[next_index].season;
     record.updated_at = now_unix();
     true
 }
@@ -1226,6 +1227,7 @@ mod tests {
             episode_number: Some(9),
             updated_at: 1,
             mal_episode_awareness: None,
+            season_number: None,
         }
     }
 

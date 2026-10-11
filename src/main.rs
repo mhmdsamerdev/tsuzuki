@@ -342,6 +342,7 @@ struct PlaybackTarget {
     file: PathBuf,
     position_seconds: f64,
     episode_number: u32,
+    season: Option<u32>,
 }
 
 /// Resolves the file and position to play for a series. An `in_progress` or
@@ -387,11 +388,13 @@ fn playback_target(
         .get(index)
         .map(|id| id.episode_number)
         .unwrap_or((index + 1) as u32);
+    let season = identities.get(index).and_then(|id| id.season);
 
     Some(PlaybackTarget {
         file: ordered[index].clone(),
         position_seconds,
         episode_number,
+        season,
     })
 }
 
@@ -429,8 +432,8 @@ fn play_series(
             ) {
                 Ok(()) => {
                     println!(
-                        "✓ {verb} \"{name}\" — episode {} ({})",
-                        target.episode_number,
+                        "✓ {verb} \"{name}\" — {} ({})",
+                        anitomy::episode_phrase(target.season, target.episode_number),
                         format_timestamp(target.position_seconds),
                     );
                     println!("  → {}", target.file.display());
@@ -624,8 +627,7 @@ fn resume_command(
                 &in_progress,
                 |o| {
                     let ep = o
-                        .episode_number
-                        .map(|e| format!("ep. {e}"))
+                        .episode_label()
                         .unwrap_or_else(|| "unknown episode".to_string());
                     format!("{} ({ep})", o.name)
                 },
@@ -674,8 +676,7 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
 
     for o in &in_progress {
         let ep = o
-            .episode_number
-            .map(|e| format!("ep. {e}"))
+            .episode_label()
             .unwrap_or_else(|| "unknown episode".to_string());
         println!("{} — {ep}", o.name);
     }
@@ -729,9 +730,9 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
             .iter()
             .map(|o| {
                 let ep = o
-                    .episode_number
+                    .episode_label()
                     .filter(|_| o.status != Some(Status::Completed))
-                    .map(|e| format!(" — ep. {e}"))
+                    .map(|label| format!(" — {label}"))
                     .unwrap_or_default();
                 format!("  {}{ep} ({} files)", o.name, o.file_count)
             })
@@ -1476,6 +1477,7 @@ mod tests {
             episode_number: Some(1),
             updated_at: 1,
             mal_episode_awareness: None,
+            season_number: None,
         }
     }
 

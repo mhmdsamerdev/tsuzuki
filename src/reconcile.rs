@@ -366,6 +366,8 @@ fn reconcile_one_series(
             }
             Some(i) => i,
             None => {
+                let identities = anitomy::episode_identity(&ordered);
+                let start_identity = identities.get(start_index);
                 state.series.push(SeriesRecord {
                     root: root.to_string(),
                     name: name.to_string(),
@@ -375,11 +377,10 @@ fn reconcile_one_series(
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| name.to_string()),
                     position_seconds: 0.0,
-                    episode_number: anitomy::episode_identity(&ordered)
-                        .get(start_index)
-                        .map(|id| id.episode_number),
+                    episode_number: start_identity.map(|id| id.episode_number),
                     updated_at: now_unix(),
                     mal_episode_awareness: None,
+                    season_number: start_identity.and_then(|id| id.season),
                 });
                 state.series.len() - 1
             }
@@ -418,6 +419,7 @@ fn reconcile_one_series(
 
     let identities = anitomy::episode_identity(&ordered);
     let episode_number = identities.get(found_index).map(|id| id.episode_number);
+    let season_number = identities.get(found_index).and_then(|id| id.season);
     let now = now_unix();
 
     match existing_index {
@@ -427,6 +429,7 @@ fn reconcile_one_series(
             record.current_relative_path = new_relative;
             record.position_seconds = position;
             record.episode_number = episode_number;
+            record.season_number = season_number;
             record.updated_at = now;
         }
         None => {
@@ -439,6 +442,7 @@ fn reconcile_one_series(
                 episode_number,
                 updated_at: now,
                 mal_episode_awareness: None,
+                season_number,
             });
         }
     }
@@ -468,9 +472,11 @@ fn apply_completion_advance(
     loop {
         if cursor + 1 >= ordered.len() {
             let episode_number = identities.get(cursor).map(|id| id.episode_number);
+            let season_number = identities.get(cursor).and_then(|id| id.season);
             let record = &mut state.series[i];
             record.status = Status::Completed;
             record.episode_number = episode_number;
+            record.season_number = season_number;
             record.updated_at = now_unix();
             return;
         }
@@ -497,11 +503,13 @@ fn apply_completion_advance(
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| name.to_string());
             let episode_number = identities.get(cursor).map(|id| id.episode_number);
+            let season_number = identities.get(cursor).and_then(|id| id.season);
             let record = &mut state.series[i];
             record.status = Status::InProgress;
             record.current_relative_path = new_relative;
             record.position_seconds = 0.0;
             record.episode_number = episode_number;
+            record.season_number = season_number;
             record.updated_at = now_unix();
             return;
         }
@@ -620,6 +628,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 12345,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -684,6 +693,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -718,6 +728,7 @@ mod tests {
             episode_number: Some(5),
             updated_at: 999,
             mal_episode_awareness: None,
+            season_number: None,
         };
         let mut state = State {
             series: vec![original.clone()],
@@ -804,6 +815,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -842,6 +854,7 @@ mod tests {
                 episode_number: None,
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -879,6 +892,7 @@ mod tests {
                 episode_number: Some(2),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -915,6 +929,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 42,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -956,6 +971,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1094,6 +1110,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1134,6 +1151,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1172,6 +1190,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1222,6 +1241,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1277,6 +1297,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1740,6 +1761,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1794,6 +1816,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1848,6 +1871,7 @@ mod tests {
                 episode_number: Some(2),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1916,6 +1940,7 @@ mod tests {
                 episode_number: Some(2),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -1979,6 +2004,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -2175,6 +2201,7 @@ mod tests {
                 episode_number: Some(1),
                 updated_at: 1,
                 mal_episode_awareness: None,
+                season_number: None,
             }],
 
             mal_links: Vec::new(),
@@ -2216,6 +2243,7 @@ mod tests {
             episode_number: Some(1),
             updated_at,
             mal_episode_awareness: None,
+            season_number: None,
         }
     }
 
@@ -2388,6 +2416,7 @@ mod tests {
             episode_number: Some(1),
             updated_at: 1,
             mal_episode_awareness: None,
+            season_number: None,
         }
     }
 

@@ -16,6 +16,24 @@ pub struct EpisodeIdentity {
     /// Anitomy's episode number, or `ordinal` when Anitomy finds none or it
     /// isn't a `u32`. The fallback is routine, not an error.
     pub episode_number: u32,
+    /// Anitomy's season, only when it also found the episode number.
+    pub season: Option<u32>,
+}
+
+/// Short form for listings: `ep. 1`, or `S02E01` past season 1.
+pub fn episode_label(season: Option<u32>, episode: u32) -> String {
+    match season {
+        Some(season) if season != 1 => format!("S{season:02}E{episode:02}"),
+        _ => format!("ep. {episode}"),
+    }
+}
+
+/// Long form for resume/start: `episode 1`, or `Season 2, Episode 1` past season 1.
+pub fn episode_phrase(season: Option<u32>, episode: u32) -> String {
+    match season {
+        Some(season) if season != 1 => format!("Season {season}, Episode {episode}"),
+        _ => format!("episode {episode}"),
+    }
 }
 
 /// Labels each file with its episode number. `ordered_files` must already be
@@ -27,29 +45,78 @@ pub fn episode_identity(ordered_files: &[PathBuf]) -> Vec<EpisodeIdentity> {
         .enumerate()
         .map(|(index, path)| {
             let ordinal = index + 1;
-            let episode_number = parsed_episode_number(path).unwrap_or(ordinal as u32);
+            let (episode_number, season) = match parsed_episode(path) {
+                Some((episode, season)) => (episode, season),
+                None => (ordinal as u32, None),
+            };
             EpisodeIdentity {
                 path: path.clone(),
                 ordinal,
                 episode_number,
+                season,
             }
         })
         .collect()
 }
 
-/// Anitomy's episode number for `path`'s filename, if any. Anitomy gets the
-/// bare filename only; a path with directories loses the episode.
-fn parsed_episode_number(path: &Path) -> Option<u32> {
+/// Anitomy's episode number and season for `path`'s filename, if it found an
+/// episode. Anitomy gets the bare filename only; a path with directories loses
+/// the episode.
+fn parsed_episode(path: &Path) -> Option<(u32, Option<u32>)> {
     let filename = path.file_name()?.to_str()?;
-    tsuzuki_anitomy::parse(filename)
-        .into_iter()
-        .find(|element| element.kind() == ElementKind::Episode)
-        .and_then(|element| element.value().parse::<u32>().ok())
+    let elements = tsuzuki_anitomy::parse(filename);
+    let first = |kind| {
+        elements
+            .iter()
+            .find(|element| element.kind() == kind)
+            .and_then(|element| element.value().parse::<u32>().ok())
+    };
+    let episode = first(ElementKind::Episode)?;
+    Some((episode, first(ElementKind::Season)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn episode_label_shows_season_only_past_season_one() {
+        assert_eq!(episode_label(None, 1), "ep. 1");
+        assert_eq!(episode_label(Some(1), 1), "ep. 1");
+        assert_eq!(episode_label(Some(2), 1), "S02E01");
+        assert_eq!(episode_label(Some(10), 12), "S10E12");
+        assert_eq!(episode_label(Some(0), 3), "S00E03");
+    }
+
+    #[test]
+    fn episode_phrase_shows_season_only_past_season_one() {
+        assert_eq!(episode_phrase(None, 1), "episode 1");
+        assert_eq!(episode_phrase(Some(1), 4), "episode 4");
+        assert_eq!(episode_phrase(Some(2), 1), "Season 2, Episode 1");
+        assert_eq!(episode_phrase(Some(10), 12), "Season 10, Episode 12");
+    }
+
+    #[test]
+    fn season_is_read_from_the_filename_when_anitomy_finds_it() {
+        let files = vec![
+            PathBuf::from("[Judas] Bakuman - S02E01.mkv"),
+            PathBuf::from("[Judas] Bakuman - S01E03.mkv"),
+            PathBuf::from("[Group] Show Name - 05 [1080p].mkv"),
+        ];
+        let seasons: Vec<(u32, Option<u32>)> = episode_identity(&files)
+            .iter()
+            .map(|i| (i.episode_number, i.season))
+            .collect();
+        assert_eq!(seasons, vec![(1, Some(2)), (3, Some(1)), (5, None)]);
+    }
+
+    #[test]
+    fn season_is_none_when_the_episode_falls_back_to_ordinal() {
+        let files = vec![PathBuf::from("not-parseable-junk-file.mkv")];
+        let identities = episode_identity(&files);
+        assert_eq!(identities[0].episode_number, 1);
+        assert_eq!(identities[0].season, None);
+    }
 
     #[test]
     fn a_parseable_filename_uses_anitomys_episode_number() {
