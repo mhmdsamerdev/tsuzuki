@@ -1345,6 +1345,51 @@ mod tests {
         assert_eq!(record.name, "Monster");
     }
 
+    #[test]
+    fn a_stale_record_for_a_nested_root_as_its_parents_series_is_left_untouched() {
+        let dir = tempdir().unwrap();
+        let anime_root = dir.path().join("Anime");
+        let rewatches_root = anime_root.join("Rewatches");
+        let series_path = rewatches_root.join("Monster");
+        touch(&series_path.join("ep01.mkv"));
+
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime_root.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatches_root.to_string_lossy().into_owned());
+
+        let watch_later = dir.path().join("watch_later");
+        with_watch_later_override(&mut config, &watch_later);
+        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
+
+        let stale = SeriesRecord {
+            root: anime_root.to_string_lossy().into_owned(),
+            name: "Rewatches".to_string(),
+            status: Status::InProgress,
+            current_relative_path: "Rewatches/Monster/ep01.mkv".to_string(),
+            position_seconds: 10.0,
+            episode_number: Some(1),
+            updated_at: 5,
+            mal_episode_awareness: None,
+            season_number: None,
+        };
+        let mut state = State {
+            series: vec![stale.clone()],
+            mal_links: Vec::new(),
+        };
+        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+
+        assert_eq!(state.series.len(), 2);
+        assert_eq!(state.series[0], stale);
+        assert_eq!(state.series[1].root, rewatches_root.to_string_lossy());
+        assert_eq!(state.series[1].name, "Monster");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlinked_series_folder_reconciles_correctly() {

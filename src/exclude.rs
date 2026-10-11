@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tsuzuki_anitomy::ElementKind;
 
 use crate::config::{Config, Exclusion};
-use crate::roots::{expand_tilde, normalize};
+use crate::roots::{expand_tilde, normalize, tracked_real_paths};
 use crate::series;
 
 /// One tracked root under which the requested relative path was found to
@@ -47,6 +47,8 @@ pub enum ExcludeError {
     /// The path is a depth-1 directory, i.e. a whole series; untrack or
     /// drop it instead.
     WholeSeries { relative_path: String },
+    /// The path is a depth-1 directory that is itself a tracked root.
+    TrackedRoot { relative_path: String },
     /// The path is absolute. Checked before any `join`, which would discard
     /// the root and resolve against the filesystem root.
     NotRelative(PathBuf),
@@ -67,6 +69,10 @@ impl fmt::Display for ExcludeError {
                 f,
                 "cannot exclude \"{relative_path}\" — it's an entire series (a depth-1 \
                  directory). Don't track it, or use a future `drop`, instead of excluding it."
+            ),
+            ExcludeError::TrackedRoot { relative_path } => write!(
+                f,
+                "cannot exclude \"{relative_path}\" — it's a tracked root. Untrack it instead."
             ),
             ExcludeError::NotRelative(p) => write!(
                 f,
@@ -148,6 +154,15 @@ fn exclude_with_home(
     }
 
     let relative_str = relative_path.to_string_lossy().into_owned();
+
+    if relative_path.components().count() == 1
+        && !series::is_series_dir(&resolved, &tracked_real_paths(config, home))
+        && resolved.is_dir()
+    {
+        return Err(ExcludeError::TrackedRoot {
+            relative_path: relative_str,
+        });
+    }
 
     if is_whole_series_exclusion(relative_path, &resolved) {
         return Err(ExcludeError::WholeSeries {
@@ -420,6 +435,47 @@ mod tests {
             }
         );
         assert!(config.exclusions.is_empty());
+    }
+
+    #[test]
+    fn excluding_a_directory_that_is_a_tracked_root_is_rejected_as_a_root_not_a_series() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatch = anime.join("Rewatch");
+        touch(&anime.join("One Piece").join("ep01.mkv"));
+        touch(&rewatch.join("Bleach").join("ep01.mkv"));
+
+        let mut config = Config::default();
+        config
+            .roots
+            .paths
+            .push(anime.to_string_lossy().into_owned());
+        config
+            .roots
+            .paths
+            .push(rewatch.to_string_lossy().into_owned());
+
+        let err = exclude_with_home(&mut config, Path::new("Rewatch"), None, None).unwrap_err();
+        assert_eq!(
+            err,
+            ExcludeError::TrackedRoot {
+                relative_path: "Rewatch".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "cannot exclude \"Rewatch\" — it's a tracked root. Untrack it instead."
+        );
+        assert!(config.exclusions.is_empty());
+
+        // A plain series next to it keeps its own rejection.
+        let err = exclude_with_home(&mut config, Path::new("One Piece"), None, None).unwrap_err();
+        assert_eq!(
+            err,
+            ExcludeError::WholeSeries {
+                relative_path: "One Piece".to_string(),
+            }
+        );
     }
 
     #[test]

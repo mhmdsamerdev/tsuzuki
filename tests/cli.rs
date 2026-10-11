@@ -1972,3 +1972,35 @@ fn start_and_resume_with_a_root_nested_in_another_root_treat_it_as_a_root_only()
     let pause = run(home, &["pause", "rewatch", "--root", &roots[0]]);
     assert!(!pause.status.success());
 }
+
+#[test]
+fn pause_drop_and_exclude_with_a_root_nested_in_another_root_never_see_it_as_a_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let roots = library(
+        home,
+        &[("anime", &["Monster"]), ("anime/rewatch", &["Bleach"])],
+    );
+    let before = snapshot(home);
+
+    for cmd in ["pause", "drop"] {
+        let out = run(home, &[cmd, "rewatch"]);
+        assert!(!out.status.success(), "{cmd}");
+        assert_eq!(stdout_of(&out), "", "{cmd}");
+        assert_eq!(
+            stderr_of(&out),
+            "error: no tracked series named \"rewatch\"\n",
+            "{cmd}"
+        );
+        let scoped = run(home, &[cmd, "rewatch", "--root", &roots[0]]);
+        assert!(!scoped.status.success(), "{cmd} --root");
+    }
+
+    let exclude = run(home, &["exclude", "rewatch", "--root", &roots[0]]);
+    assert!(!exclude.status.success());
+    assert_eq!(
+        stderr_of(&exclude),
+        "error: cannot exclude \"rewatch\" — it's a tracked root. Untrack it instead.\n"
+    );
+    assert_eq!(snapshot(home), before);
+}
