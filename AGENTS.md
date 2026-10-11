@@ -34,6 +34,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - `Completed` is set only by reconcile when the final episode finishes; no command sets it, `pause`/`drop` reject it. Paused and dropped series are excluded from sync. `pause`/`drop` never zero the stored position.
 - Every state-touching command reconciles with mpv through the one shared function, then acts.
 - Episode duration comes from Symphonia content-probe (AVI header fallback), never `ffprobe`.
+- Series-ness is decided only by `series::is_series_dir`. No ad-hoc `join(..).is_dir()` for series.
 - Symlinks are followed everywhere, with cycle protection. Roots are stored as the user typed them.
 - `mal::DEFAULT_CLIENT_ID` is public on purpose (PKCE, no secret). Never redact or remove it.
 
@@ -54,6 +55,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Each non-trivial function gets a happy, an error, and an edge case. No test-count quotas.
 - Never infer a status from incidental fields (position, mtime). Tests build records through the real command or reconcile at least once, never only by hand-setting `status`.
 - Every predicate on a status or threshold is tested at each status and at 0, below, at and above the boundary, plus the excluded cases. Vary fields that must be irrelevant and assert the decision is unchanged. Status tables use an exhaustive `match` (no `_`).
+- Fixtures vary layout, not just values: for anything touching roots or series, include nested roots, a root that is also a child of another root, symlinked roots, and same-named sibling roots.
 - Unit tests stay inline (`#[cfg(test)] mod tests`). Integration tests go in `tests/`.
 
 **Isolation**
@@ -67,6 +69,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Anything that reads or writes `config.toml`, `state.toml`, `watch_later` or `mpv-log` needs at least one test that runs the real binary (`env!("CARGO_BIN_EXE_tsuzuki")`) against a temp `HOME`/XDG.
 
 **Invariants that must always have a test** (add one if missing)
+- Topology: a directory equal to a tracked root (canonical path) is never a series, at every site that decides series-ness (pickers, positional/`--root` resolution, pause/drop, sync, reconcile, exclude).
 - Ordering: directories before a level's loose files; numbered natural sort; exclusions applied before sort; symlink cycle terminates.
 - `watch_later` parsing: redirect entries skipped; malformed entries skipped without aborting; missing `write-filename-in-watch-later-config` reported.
 - Thresholds: a position below `resume_seconds` never creates or overwrites state; `classify()` position check wins over completion on short files; script `eof` is `Completed`; absence alone never moves state.
@@ -76,6 +79,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 
 **Verification**
 - Run `cargo test`, then `cargo mutants --in-diff <diff-of-change>`. Report surviving mutants and either add tests that kill them or say why each is equivalent. Don't claim "done" without that report.
+- Grep every site that decides the same concept as the change, and confirm each is tested against the Hard invariants.
 
 ## Code comments
 - Short, clear, focused; explain only the code they sit on. No diff/change notes ("added", "now", "was").
