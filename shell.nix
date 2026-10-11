@@ -20,6 +20,9 @@ pkgs.mkShell {
 
     # Mutation testing.
     pkgs.cargo-mutants
+
+    # Test runner with one summary line (`cargo nextest run`).
+    pkgs.cargo-nextest
   ];
 
   shellHook = ''

@@ -14,7 +14,8 @@ nix-shell
 
 ```
 cargo build
-cargo test
+cargo nextest run   # quiet, one summary line; shows only failures
+cargo test          # fallback; also the only runner for doctests
 cargo fmt -p tsuzuki --check
 cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings
 ```
@@ -22,8 +23,9 @@ cargo clippy -p tsuzuki --no-deps --all-targets -- -D warnings
 Clippy and fmt skip `vendor/anitomy` on purpose.
 
 ```
-cargo test <name>        # one test, by name substring
-cargo test --test cli    # end-to-end CLI suite
+cargo nextest run <name>           # one test, by name substring
+cargo nextest run --test cli       # end-to-end CLI suite
+cargo nextest run --run-ignored ignored-only   # live-network tests
 ./target/debug/tsuzuki status   # run the dev build
 ```
 
