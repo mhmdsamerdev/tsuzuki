@@ -2,12 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.4]
 
-- `start` and `resume` accept a root's folder name (or `--root`) to narrow the picker to that root.
+- `start` and `resume` accept a root's folder name to narrow the picker to that root.
 - Episodes past season 1 show their season (`S02E01`, `Season 2, Episode 1`) when the filename names one.
-- `exclude` of a nested root now says it is a tracked root, not an entire series.
-- `exclude` rejects a path inside a nested root and points to `--root <nested root>`, instead of recording an exclusion that never applied.
 - A folder that is both a root and a folder inside another root is no longer treated as a series of the other root.
 
 ## [v0.1.3]
