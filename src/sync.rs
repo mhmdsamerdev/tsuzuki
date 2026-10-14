@@ -12,7 +12,7 @@ use chrono::Local;
 use serde::Deserialize;
 
 use crate::anitomy;
-use crate::config::Config;
+use crate::config::{Config, SyncExclusion};
 use crate::exclude;
 use crate::mal::{HttpResponse, MalHttpClient};
 use crate::roots::{expand_tilde, normalize, tracked_real_paths};
@@ -761,9 +761,43 @@ pub struct SeriesOutcome {
     pub kind: OutcomeKind,
 }
 
-/// Records eligible for a MAL merge: not paused or dropped, root still
-/// tracked, and series directory present. Completed records are included so
-/// they reach MAL.
+/// Outcome of `add_sync_exclusion`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SyncExclusionOutcome {
+    Added,
+    AlreadyExcluded,
+}
+
+/// Records that `series` (or, with `None`, the whole `root`) is kept out of
+/// MAL sync. `root` is the stored form. Repeating is a no-op.
+pub fn add_sync_exclusion(
+    config: &mut Config,
+    root: &str,
+    series: Option<&str>,
+) -> SyncExclusionOutcome {
+    let entry = SyncExclusion {
+        root: root.to_string(),
+        series: series.map(str::to_string),
+    };
+    if config.sync_exclusions.contains(&entry) {
+        return SyncExclusionOutcome::AlreadyExcluded;
+    }
+    config.sync_exclusions.push(entry);
+    SyncExclusionOutcome::Added
+}
+
+/// True when `name` under `root` (stored form) is excluded directly or
+/// through its whole root.
+pub fn is_sync_excluded(config: &Config, root: &str, name: &str) -> bool {
+    config
+        .sync_exclusions
+        .iter()
+        .any(|e| e.root == root && e.series.as_deref().is_none_or(|s| s == name))
+}
+
+/// Records eligible for a MAL merge: not paused or dropped, not sync-excluded,
+/// root still tracked, and series directory present. Completed records are
+/// included so they reach MAL.
 pub fn eligible_targets(
     state: &State,
     config: &Config,
@@ -775,6 +809,7 @@ pub fn eligible_targets(
         .iter()
         .filter(|record| {
             !matches!(record.status, Status::Paused | Status::Dropped)
+                && !is_sync_excluded(config, &record.root, &record.name)
                 && config.roots.paths.contains(&record.root)
                 && is_series_dir(
                     &expand_tilde(Path::new(&record.root), home).join(&record.name),
@@ -2398,6 +2433,112 @@ mod tests {
                 "{status:?}"
             );
         }
+    }
+
+    #[test]
+    fn eligible_targets_skip_sync_excluded_series_and_roots_at_every_status() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let movies = dir.path().join("Movies");
+        for series in [
+            anime.join("Monster"),
+            anime.join("Naruto"),
+            movies.join("Monster"),
+        ] {
+            fs::create_dir_all(series).unwrap();
+        }
+        let anime_s = anime.to_string_lossy().into_owned();
+        let movies_s = movies.to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths = vec![anime_s.clone(), movies_s.clone()];
+        add_sync_exclusion(&mut config, &anime_s, Some("Monster"));
+        add_sync_exclusion(&mut config, &movies_s, None);
+
+        for status in all_statuses() {
+            let records = [
+                (&anime_s, "Monster"),
+                (&anime_s, "Naruto"),
+                (&movies_s, "Monster"),
+            ]
+            .map(|(root, name)| SeriesRecord {
+                root: root.clone(),
+                name: name.to_string(),
+                ..record_with(status, 3, 120.0)
+            });
+            let state = State {
+                series: records.to_vec(),
+                mal_links: Vec::new(),
+            };
+            let expected = match status {
+                Status::InProgress | Status::Completed => {
+                    vec![(anime_s.clone(), "Naruto".to_string())]
+                }
+                Status::Paused | Status::Dropped => Vec::new(),
+            };
+            assert_eq!(
+                eligible_targets(&state, &config, Some(dir.path())),
+                expected,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_sync_excluded_matches_by_stored_root_and_series_or_whole_root() {
+        let mut config = Config::default();
+        add_sync_exclusion(&mut config, "~/Anime", Some("Monster"));
+        add_sync_exclusion(&mut config, "~/Movies", None);
+
+        let table = [
+            ("~/Anime", "Monster", true),
+            ("~/Anime", "Naruto", false),
+            ("~/Anime/", "Monster", false),
+            ("~/Other", "Monster", false),
+            ("~/Movies", "Akira", true),
+            ("~/Movies", "Monster", true),
+            ("~/Movie", "Akira", false),
+        ];
+        for (root, name, expected) in table {
+            assert_eq!(
+                is_sync_excluded(&config, root, name),
+                expected,
+                "{root} {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_sync_exclusion_is_idempotent_and_keeps_series_and_root_entries_distinct() {
+        let mut config = Config::default();
+        assert_eq!(
+            add_sync_exclusion(&mut config, "~/Anime", Some("Monster")),
+            SyncExclusionOutcome::Added
+        );
+        assert_eq!(
+            add_sync_exclusion(&mut config, "~/Anime", Some("Monster")),
+            SyncExclusionOutcome::AlreadyExcluded
+        );
+        assert_eq!(
+            add_sync_exclusion(&mut config, "~/Anime", None),
+            SyncExclusionOutcome::Added
+        );
+        assert_eq!(
+            add_sync_exclusion(&mut config, "~/Anime", None),
+            SyncExclusionOutcome::AlreadyExcluded
+        );
+        assert_eq!(
+            config.sync_exclusions,
+            vec![
+                SyncExclusion {
+                    root: "~/Anime".to_string(),
+                    series: Some("Monster".to_string()),
+                },
+                SyncExclusion {
+                    root: "~/Anime".to_string(),
+                    series: None,
+                },
+            ]
+        );
     }
 
     fn pushed_count(body: &str) -> Option<u32> {

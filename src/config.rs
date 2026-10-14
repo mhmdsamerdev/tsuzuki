@@ -21,6 +21,8 @@ pub struct Config {
     pub mal: Mal,
     #[serde(default)]
     pub exclusions: Vec<Exclusion>,
+    #[serde(default)]
+    pub sync_exclusions: Vec<SyncExclusion>,
 }
 
 /// `120`: below this a saved position is noise, not a bookmark.
@@ -141,6 +143,16 @@ fn default_fuzzy_match_threshold() -> f64 {
 pub struct Exclusion {
     pub root: String,
     pub path: String,
+}
+
+/// One series, or a whole root, kept out of MAL sync. `root` is the tracked
+/// root as stored in `roots.paths`; `series` is a depth-1 directory name under
+/// it, or `None` for every series under the root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncExclusion {
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
 }
 
 /// Resolves `config.toml` under the XDG config dir via `dirs::config_dir()`.
@@ -299,6 +311,40 @@ mod tests {
         assert_eq!(config.mal.redirect_port, 8734);
         assert_eq!(config.mal.fuzzy_match_threshold, 0.8);
         assert!(config.exclusions.is_empty());
+        assert!(config.sync_exclusions.is_empty());
+    }
+
+    #[test]
+    fn sync_exclusions_round_trip_through_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.sync_exclusions.push(SyncExclusion {
+            root: "~/Anime".to_string(),
+            series: Some("Monster".to_string()),
+        });
+        config.sync_exclusions.push(SyncExclusion {
+            root: "~/Movies".to_string(),
+            series: None,
+        });
+
+        write(&path, &config).unwrap();
+        let reread = read(&path).unwrap();
+
+        assert_eq!(
+            reread.sync_exclusions,
+            vec![
+                SyncExclusion {
+                    root: "~/Anime".to_string(),
+                    series: Some("Monster".to_string()),
+                },
+                SyncExclusion {
+                    root: "~/Movies".to_string(),
+                    series: None,
+                },
+            ]
+        );
     }
 
     #[test]

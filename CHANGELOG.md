@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- `sync exclude <series|root>` keeps a series, or every series under a root, out of MAL sync.
+
 ## [v0.1.4]
 
 - `start` and `resume` accept a root's folder name to narrow the picker to that root.

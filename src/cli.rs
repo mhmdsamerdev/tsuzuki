@@ -138,6 +138,18 @@ pub enum SyncCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+
+    /// Keep series, or every series under a root, out of MAL sync
+    Exclude {
+        /// Series names, or tracked roots' folder names
+        #[arg(required_unless_present = "root")]
+        targets: Vec<String>,
+
+        /// Tracked root to resolve `targets` against when they exist under
+        /// several; alone, excludes the whole root
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

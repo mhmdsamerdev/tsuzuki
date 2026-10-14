@@ -2178,3 +2178,161 @@ fn sync_link_with_a_root_nested_in_another_root_is_rejected_before_any_network_c
     }
     assert_eq!(snapshot(home), before);
 }
+
+// `sync exclude` keeps a series, or every series under a root, out of sync.
+
+#[test]
+fn sync_exclude_series_and_root_leave_nothing_eligible_and_state_untouched() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let root_a = home.join("Anime");
+    let root_b = home.join("Movies");
+    let monster = root_a.join("Monster").join("ep01.mkv");
+    let naruto = root_a.join("Naruto").join("ep01.mkv");
+    let akira = root_b.join("Akira").join("ep01.mkv");
+    touch(&monster);
+    touch(&naruto);
+    touch(&akira);
+    add_root(home, &root_a);
+    add_root(home, &root_b);
+
+    write_watch_later(home, "m", &monster, 300.0);
+    write_watch_later(home, "n", &naruto, 300.0);
+    write_watch_later(home, "a", &akira, 300.0);
+    run_ok(home, &["list"]);
+
+    let out = run_ok(home, &["sync", "exclude", "Monster"]);
+    assert_eq!(out, "✓ \"Monster\" — excluded from sync\n");
+    let out = run_ok(home, &["sync", "exclude", "Monster"]);
+    assert_eq!(out, "✓ \"Monster\" — already excluded from sync\n");
+
+    // Naruto and Akira are still eligible, so sync reaches the login check.
+    let sync = run(home, &["sync"]);
+    assert!(
+        stderr_of(&sync).contains("not logged in to MyAnimeList"),
+        "got: {}",
+        stderr_of(&sync)
+    );
+
+    let out = run_ok(home, &["sync", "exclude", "Anime"]);
+    assert_eq!(out, "✓ Anime (root) — excluded from sync\n");
+    // Movies is a different root: Akira stays eligible.
+    let sync = run(home, &["sync"]);
+    assert!(
+        stderr_of(&sync).contains("not logged in to MyAnimeList"),
+        "got: {}",
+        stderr_of(&sync)
+    );
+
+    run_ok(home, &["sync", "exclude", "Movies"]);
+    let before = fs::read_to_string(state_path(home)).unwrap();
+    let out = run_ok(home, &["sync"]);
+    assert_eq!(out.trim(), "Nothing eligible to sync.");
+    assert_eq!(fs::read_to_string(state_path(home)).unwrap(), before);
+
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    let expected = format!(
+        "[[sync_exclusions]]\nroot = \"{a}\"\nseries = \"Monster\"\n\n\
+         [[sync_exclusions]]\nroot = \"{a}\"\n\n\
+         [[sync_exclusions]]\nroot = \"{b}\"\n",
+        a = root_a.display(),
+        b = root_b.display()
+    );
+    assert!(config.contains(&expected), "got: {config}");
+}
+
+#[test]
+fn sync_exclude_on_a_root_nested_in_another_root_excludes_the_root_not_a_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let outer = home.join("Anime");
+    let nested = outer.join("Specials");
+    touch(&outer.join("Monster").join("ep01.mkv"));
+    touch(&nested.join("Gintama").join("ep01.mkv"));
+    add_root(home, &outer);
+    add_root(home, &nested);
+
+    let out = run_ok(home, &["sync", "exclude", "Specials"]);
+    assert_eq!(out, "✓ Specials (root) — excluded from sync\n");
+
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    let expected = format!("[[sync_exclusions]]\nroot = \"{}\"\n", nested.display());
+    assert!(config.contains(&expected), "got: {config}");
+    assert!(!config.contains("series ="), "got: {config}");
+}
+
+#[test]
+fn sync_exclude_errors_leave_config_untouched_and_do_not_block_other_targets() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let root_a = home.join("Anime");
+    let root_b = home.join("More").join("Anime");
+    touch(&root_a.join("Overlap").join("ep01.mkv"));
+    touch(&root_b.join("Overlap").join("ep01.mkv"));
+    touch(&root_a.join("Monster").join("ep01.mkv"));
+    add_root(home, &root_a);
+    add_root(home, &root_b);
+    let before = fs::read_to_string(config_path(home)).unwrap();
+
+    let ambiguous = run(home, &["sync", "exclude", "Overlap"]);
+    assert!(!ambiguous.status.success());
+    assert!(stderr_of(&ambiguous).contains("is ambiguous"));
+    assert!(stderr_of(&ambiguous).contains("tsuzuki sync exclude \"Overlap\" --root"));
+
+    let shared_root_name = run(home, &["sync", "exclude", "Anime"]);
+    assert!(!shared_root_name.status.success());
+    assert!(stderr_of(&shared_root_name).contains("2 tracked roots share that folder name"));
+
+    let unknown = run(home, &["sync", "exclude", "Nope"]);
+    assert!(!unknown.status.success());
+    assert_eq!(
+        stderr_of(&unknown),
+        "error: no tracked series or root named \"Nope\"\n"
+    );
+
+    let bad_root = run(home, &["sync", "exclude", "--root", "/nowhere"]);
+    assert!(!bad_root.status.success());
+    assert_eq!(
+        stderr_of(&bad_root),
+        "error: not a tracked root: /nowhere\n"
+    );
+
+    assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
+
+    // One bad target fails the run but the good one is still recorded.
+    let mixed = run(home, &["sync", "exclude", "Nope", "Monster"]);
+    assert!(!mixed.status.success());
+    assert_eq!(stdout_of(&mixed), "✓ \"Monster\" — excluded from sync\n");
+
+    // `--root` picks one of the two same-named series.
+    let out = run_ok(
+        home,
+        &[
+            "sync",
+            "exclude",
+            "Overlap",
+            "--root",
+            root_b.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out, "✓ \"Overlap\" — excluded from sync\n");
+    // Bare `--root` excludes the whole root.
+    let out = run_ok(
+        home,
+        &["sync", "exclude", "--root", root_a.to_str().unwrap()],
+    );
+    assert_eq!(out, "✓ Anime (root) — excluded from sync\n");
+
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    let expected = format!(
+        "[[sync_exclusions]]\nroot = \"{a}\"\nseries = \"Monster\"\n\n\
+         [[sync_exclusions]]\nroot = \"{b}\"\nseries = \"Overlap\"\n\n\
+         [[sync_exclusions]]\nroot = \"{a}\"\n",
+        a = root_a.display(),
+        b = root_b.display()
+    );
+    assert!(config.contains(&expected), "got: {config}");
+}

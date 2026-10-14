@@ -111,7 +111,9 @@ tsuzuki sync
 
 Paused and dropped series are skipped, so pausing can temporarily keep a local
 watch or rewatch separate from MAL. Records whose series folders are no longer
-available are skipped too.
+available are skipped too. `tsuzuki sync exclude <series|root>` skips a series,
+or every series under a root; undo it by deleting its `[[sync_exclusions]]`
+entry in `config.toml`.
 
 Entirely optional. Everything above works with no account, no internet
 connection, and no setup beyond pointing Tsuzuki at your files.

@@ -109,6 +109,9 @@ fn dispatch(
                 mal_id,
                 root,
             }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
+            Some(SyncCommand::Exclude { targets, root }) => {
+                sync_exclude_command(&targets, root.as_deref(), config, config_path, home)
+            }
         },
         Command::Config { action } => match action {
             None => config_show_command(config, config_path),
@@ -210,6 +213,87 @@ fn exclude_command(
                 fail(&e.to_string());
                 failed = true;
             }
+        }
+    }
+    if changed && let Err(e) = config::write(config_path, config) {
+        return fail(&format!(
+            "could not write config at {}: {e}",
+            config_path.display()
+        ));
+    }
+    for (subject, result) in &lines {
+        confirm(subject, result);
+    }
+    exit_code(failed)
+}
+
+/// `tsuzuki sync exclude [target]... [--root <root>]`: keeps each series, or
+/// each named root's series, out of MAL sync. A bare `--root` excludes that
+/// root; with targets, `--root` picks the root a series name lives under. A
+/// failing target doesn't stop the rest; config is written once, and the lines
+/// are printed only after that write succeeds.
+fn sync_exclude_command(
+    targets: &[String],
+    root_arg: Option<&Path>,
+    config: &mut Config,
+    config_path: &Path,
+    home: Option<&Path>,
+) -> ExitCode {
+    const COMMAND: &str = "sync exclude";
+    let mut lines = Vec::new();
+    let mut changed = false;
+    let mut failed = false;
+    let mut record = |config: &mut Config, subject: String, root: &str, series: Option<&str>| {
+        let result = match sync::add_sync_exclusion(config, root, series) {
+            sync::SyncExclusionOutcome::Added => {
+                changed = true;
+                "excluded from sync"
+            }
+            sync::SyncExclusionOutcome::AlreadyExcluded => "already excluded from sync",
+        };
+        lines.push((subject, result));
+    };
+    if targets.is_empty() {
+        match root_arg.map(|r| state::resolve_root_arg(config, r, home)) {
+            Some(Some(root)) => record(
+                config,
+                format!("{} (root)", scope_label(&root)),
+                &root,
+                None,
+            ),
+            Some(None) => {
+                print_target_error(
+                    &target::TargetError::RootNotFound(
+                        root_arg.unwrap().to_string_lossy().into_owned(),
+                    ),
+                    COMMAND,
+                );
+                failed = true;
+            }
+            None => {}
+        }
+    }
+    for name in targets {
+        let resolved = match root_arg {
+            Some(_) => target::resolve_series_root(config, name, root_arg, home)
+                .map(target::Resolved::Series)
+                .map_err(|e| print_target_error(&e, COMMAND)),
+            None => target::resolve_positional(config, name, home)
+                .map_err(|e| print_positional_error(&e, COMMAND)),
+        };
+        match resolved {
+            Ok(target::Resolved::Series(root)) => {
+                record(config, format!("\"{name}\""), &root, Some(name));
+            }
+            Ok(target::Resolved::Root(root)) => {
+                record(
+                    config,
+                    format!("{} (root)", scope_label(&root)),
+                    &root,
+                    None,
+                );
+            }
+            Err(_) => failed = true,
         }
     }
     if changed && let Err(e) = config::write(config_path, config) {
