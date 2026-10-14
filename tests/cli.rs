@@ -2336,3 +2336,170 @@ fn sync_exclude_errors_leave_config_untouched_and_do_not_block_other_targets() {
     );
     assert!(config.contains(&expected), "got: {config}");
 }
+
+#[test]
+fn sync_exclude_through_a_symlinked_root_is_stored_as_typed_and_matches_its_records() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let real = home.join("real");
+    let link = home.join("Shows");
+    let file = real.join("Monster").join("ep01.mkv");
+    touch(&file);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    add_root(home, &link);
+
+    let via_link = link.join("Monster").join("ep01.mkv");
+    write_watch_later(home, "m", &via_link, 300.0);
+    run_ok(home, &["list"]);
+
+    // `--root` given as the real path still records the root as stored (the link).
+    let out = run_ok(
+        home,
+        &[
+            "sync",
+            "exclude",
+            "Monster",
+            "--root",
+            real.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out, "✓ \"Monster\" — excluded from sync\n");
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    let expected = format!(
+        "[[sync_exclusions]]\nroot = \"{}\"\nseries = \"Monster\"\n",
+        link.display()
+    );
+    assert!(config.contains(&expected), "got: {config}");
+
+    let out = run_ok(home, &["sync"]);
+    assert_eq!(out.trim(), "Nothing eligible to sync.");
+}
+
+#[test]
+fn sync_exclude_never_changes_local_tracking() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let root = home.join("Anime");
+    let file = root.join("Monster").join("ep01.mkv");
+    touch(&file);
+    add_root(home, &root);
+    write_watch_later(home, "m", &file, 300.0);
+    let before = run_ok(home, &["list"]);
+    let state_before = fs::read_to_string(state_path(home)).unwrap();
+
+    run_ok(home, &["sync", "exclude", "Monster"]);
+
+    assert_eq!(run_ok(home, &["list"]), before);
+    assert_eq!(fs::read_to_string(state_path(home)).unwrap(), state_before);
+}
+
+#[test]
+fn sync_exclude_series_after_its_root_records_both_entries() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let root = home.join("Anime");
+    touch(&root.join("Monster").join("ep01.mkv"));
+    add_root(home, &root);
+
+    assert_eq!(
+        run_ok(home, &["sync", "exclude", "Anime"]),
+        "✓ Anime (root) — excluded from sync\n"
+    );
+    assert_eq!(
+        run_ok(home, &["sync", "exclude", "Monster"]),
+        "✓ \"Monster\" — excluded from sync\n"
+    );
+    let config = fs::read_to_string(config_path(home)).unwrap();
+    assert_eq!(
+        config.matches("[[sync_exclusions]]").count(),
+        2,
+        "got: {config}"
+    );
+}
+
+#[test]
+fn sync_exclude_name_that_is_both_a_series_and_a_root_errors_with_sync_exclude_hints() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let root_a = home.join("Anime");
+    let root_b = home.join("Other").join("Monster");
+    touch(&root_a.join("Monster").join("ep01.mkv"));
+    touch(&root_b.join("Show").join("ep01.mkv"));
+    add_root(home, &root_a);
+    add_root(home, &root_b);
+    let before = fs::read_to_string(config_path(home)).unwrap();
+
+    let out = run(home, &["sync", "exclude", "Monster"]);
+    assert!(!out.status.success());
+    let stderr = stderr_of(&out);
+    assert!(
+        stderr.contains("\"Monster\" is both a series and a root folder name"),
+        "got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("tsuzuki sync exclude --root {}", root_b.display())),
+        "got: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "tsuzuki sync exclude \"Monster\" --root {}",
+            root_a.display()
+        )),
+        "got: {stderr}"
+    );
+    assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
+}
+
+#[test]
+fn sync_exclude_naming_a_nested_root_with_root_flag_is_not_a_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let outer = home.join("Anime");
+    let nested = outer.join("Specials");
+    touch(&outer.join("Monster").join("ep01.mkv"));
+    touch(&nested.join("Gintama").join("ep01.mkv"));
+    add_root(home, &outer);
+    add_root(home, &nested);
+    let before = fs::read_to_string(config_path(home)).unwrap();
+
+    let out = run(
+        home,
+        &[
+            "sync",
+            "exclude",
+            "Specials",
+            "--root",
+            outer.to_str().unwrap(),
+        ],
+    );
+    assert!(!out.status.success());
+    assert_eq!(
+        stderr_of(&out),
+        "error: no tracked series named \"Specials\"\n"
+    );
+    assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
+}
+
+#[test]
+fn sync_exclude_without_target_or_root_is_a_usage_error_and_leaves_config_untouched() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = home.join("Anime");
+    touch(&root.join("Monster").join("ep01.mkv"));
+    add_root(home, &root);
+    let before = fs::read_to_string(config_path(home)).unwrap();
+
+    let out = run(home, &["sync", "exclude"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("Usage"),
+        "got: {}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
+}

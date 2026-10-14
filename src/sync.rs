@@ -2541,6 +2541,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn eligible_targets_apply_sync_exclusions_by_stored_root_under_aliased_roots() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        fs::create_dir_all(home.join("real/Monster")).unwrap();
+        fs::create_dir_all(home.join("real/Naruto")).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("link")).unwrap();
+        fs::create_dir_all(home.join("anime/Monster")).unwrap();
+        fs::create_dir_all(home.join("anime/rewatch/Monster")).unwrap();
+
+        let real = home.join("real").to_string_lossy().into_owned();
+        let link = home.join("link").to_string_lossy().into_owned();
+        let anime = home.join("anime").to_string_lossy().into_owned();
+        let nested = home.join("anime/rewatch").to_string_lossy().into_owned();
+        let mut config = Config::default();
+        config.roots.paths = vec![real.clone(), link.clone(), anime.clone(), nested.clone()];
+        // One series excluded under the symlink root, the whole nested root excluded.
+        add_sync_exclusion(&mut config, &link, Some("Monster"));
+        add_sync_exclusion(&mut config, &nested, None);
+
+        let records = [
+            (&real, "Monster"),
+            (&real, "Naruto"),
+            (&link, "Monster"),
+            (&link, "Naruto"),
+            (&anime, "Monster"),
+            (&nested, "Monster"),
+        ]
+        .map(|(root, name)| SeriesRecord {
+            root: root.clone(),
+            name: name.to_string(),
+            ..record_with(Status::InProgress, 3, 120.0)
+        });
+        let state = State {
+            series: records.to_vec(),
+            mal_links: Vec::new(),
+        };
+
+        let mut got = eligible_targets(&state, &config, Some(home));
+        got.sort();
+        let mut want = vec![
+            (real.clone(), "Monster".to_string()),
+            (real, "Naruto".to_string()),
+            (link, "Naruto".to_string()),
+            (anime, "Monster".to_string()),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
     fn pushed_count(body: &str) -> Option<u32> {
         let rest = body.strip_prefix("num_watched_episodes=")?;
         rest.split('&').next()?.parse().ok()
