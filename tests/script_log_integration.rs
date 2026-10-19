@@ -20,7 +20,7 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn script_only_eof_entry_with_zero_watch_later_trace_completes_the_last_episode() {
+fn eof_entry_completes_the_last_episode_of_an_in_progress_record() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -36,7 +36,7 @@ fn script_only_eof_entry_with_zero_watch_later_trace_completes_the_last_episode(
         String::from_utf8_lossy(&add.stderr)
     );
 
-    // An existing `in_progress` record, as an earlier watch_later bookmark would have left it.
+    // An existing `in_progress` record, as an earlier mid-episode quit would have left it.
     let state_path = home.join(".local/share/tsuzuki/state.toml");
     fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     fs::write(
@@ -53,7 +53,7 @@ updated_at = 1700000000
     )
     .unwrap();
 
-    // An `eof` entry for the same file with no watch_later entry, at $XDG_DATA_HOME/tsuzuki/mpv-log.
+    // An `eof` entry for the same file, at $XDG_DATA_HOME/tsuzuki/mpv-log.
     let script_log_dir = home.join(".local/share/tsuzuki/mpv-log");
     fs::create_dir_all(&script_log_dir).unwrap();
     fs::write(

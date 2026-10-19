@@ -1,4 +1,4 @@
-//! Real-binary checks for `watch_later` skipping, the `resume_seconds` boundary, `pause`/`drop`/`exclude` errors and a corrupt `state.toml`.
+//! Real-binary checks for script-log skipping, the `resume_seconds` boundary, `pause`/`drop`/`exclude` errors and a corrupt `state.toml`.
 
 use std::fs;
 use std::path::Path;
@@ -35,28 +35,55 @@ fn library(home: &Path) -> std::path::PathBuf {
     root
 }
 
-fn watch_later_dir(home: &Path) -> std::path::PathBuf {
-    let dir = home.join(".local/state/mpv/watch_later");
+fn mpv_log_dir(home: &Path) -> std::path::PathBuf {
+    let dir = home.join(".local/share/tsuzuki/mpv-log");
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
+/// Writes a script-log entry and stamps its mtime `offset_seconds` from now.
+fn write_log_entry(home: &Path, name: &str, source: &Path, body: &str, offset_seconds: i64) {
+    let path = mpv_log_dir(home).join(name);
+    fs::write(&path, format!("# {}\n{body}", source.display())).unwrap();
+    let now = std::time::SystemTime::now();
+    let when = if offset_seconds >= 0 {
+        now + std::time::Duration::from_secs(offset_seconds as u64)
+    } else {
+        now - std::time::Duration::from_secs(offset_seconds.unsigned_abs())
+    };
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
 #[test]
-fn list_skips_redirect_and_malformed_watch_later_entries_and_still_reads_the_valid_one() {
+fn list_skips_redirect_and_malformed_script_log_entries_and_still_reads_the_valid_one() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
     let root = library(home);
-    let dir = watch_later_dir(home);
-    fs::write(dir.join("a-redirect"), "# redirect entry\n").unwrap();
-    fs::write(dir.join("b-malformed"), b"\xff\xfe not an entry\n").unwrap();
+    let ep02 = root.join("Monster/ep02.mkv");
+    write_log_entry(
+        home,
+        "a-redirect",
+        &ep02,
+        "duration=\nposition=\nreason=redirect\n",
+        0,
+    );
     fs::write(
-        dir.join("c-valid"),
-        format!(
-            "# {}\nstart=300.000000\n",
-            root.join("Monster/ep02.mkv").display()
-        ),
+        mpv_log_dir(home).join("b-malformed"),
+        b"\xff\xfe not an entry\n",
     )
     .unwrap();
+    write_log_entry(
+        home,
+        "c-valid",
+        &ep02,
+        "duration=\nposition=300.000000\nreason=quit\n",
+        0,
+    );
 
     let out = run(home, &["list"]);
 
@@ -68,18 +95,76 @@ fn list_skips_redirect_and_malformed_watch_later_entries_and_still_reads_the_val
 }
 
 #[test]
+fn list_ignores_a_leftover_mpv_watch_later_entry_and_creates_no_state() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = library(home);
+    let dir = home.join(".local/state/mpv/watch_later");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("abc"),
+        format!(
+            "# {}\nstart=300.000000\n",
+            root.join("Monster/ep02.mkv").display()
+        ),
+    )
+    .unwrap();
+
+    let out = run(home, &["list"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert!(
+        !state_file(home).exists() || !state_text(home).contains("[[series]]"),
+        "a watch_later file must not create a record"
+    );
+}
+
+#[test]
+fn list_loads_a_config_that_still_has_the_removed_watch_later_dir_key() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = library(home);
+    let config = home.join(".config/tsuzuki/config.toml");
+    let patched = fs::read_to_string(&config)
+        .unwrap()
+        .replace("[mpv]\n", "[mpv]\nwatch_later_dir = \"/nonexistent\"\n");
+    assert!(
+        patched.contains("watch_later_dir"),
+        "the [mpv] table must exist"
+    );
+    fs::write(&config, patched).unwrap();
+    write_log_entry(
+        home,
+        "e",
+        &root.join("Monster/ep02.mkv"),
+        "duration=\nposition=300.000000\nreason=quit\n",
+        0,
+    );
+
+    let out = run(home, &["list"]);
+
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out),
+        "In progress:\n  Monster — ep. 2 (2 files)\n"
+    );
+    assert_eq!(stderr_of(&out), "");
+}
+
+#[test]
 fn list_with_position_exactly_resume_seconds_records_it_and_just_below_does_not() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
     let root = library(home);
-    let dir = watch_later_dir(home);
     let ep1 = root.join("Monster/ep01.mkv");
 
-    fs::write(
-        dir.join("e"),
-        format!("# {}\nstart=119.900000\n", ep1.display()),
-    )
-    .unwrap();
+    write_log_entry(
+        home,
+        "e",
+        &ep1,
+        "duration=\nposition=119.900000\nreason=quit\n",
+        0,
+    );
     assert!(run(home, &["list"]).status.success());
     assert!(
         !state_file(home).exists()
@@ -89,11 +174,13 @@ fn list_with_position_exactly_resume_seconds_records_it_and_just_below_does_not(
         "119.9s is below the default 120s threshold and must not create a record"
     );
 
-    fs::write(
-        dir.join("e"),
-        format!("# {}\nstart=120.000000\n", ep1.display()),
-    )
-    .unwrap();
+    write_log_entry(
+        home,
+        "e",
+        &ep1,
+        "duration=\nposition=120.000000\nreason=quit\n",
+        0,
+    );
     assert!(run(home, &["list"]).status.success());
     let state = fs::read_to_string(state_file(home)).unwrap();
     assert!(
@@ -159,30 +246,6 @@ fn corrupt_state_toml_errors_without_panic_and_is_not_overwritten() {
     );
 }
 
-fn mpv_log_dir(home: &Path) -> std::path::PathBuf {
-    let dir = home.join(".local/share/tsuzuki/mpv-log");
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// Writes a script-log entry and stamps its mtime `offset_seconds` from now.
-fn write_log_entry(home: &Path, name: &str, source: &Path, body: &str, offset_seconds: i64) {
-    let path = mpv_log_dir(home).join(name);
-    fs::write(&path, format!("# {}\n{body}", source.display())).unwrap();
-    let now = std::time::SystemTime::now();
-    let when = if offset_seconds >= 0 {
-        now + std::time::Duration::from_secs(offset_seconds as u64)
-    } else {
-        now - std::time::Duration::from_secs(offset_seconds.unsigned_abs())
-    };
-    fs::File::options()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_modified(when)
-        .unwrap();
-}
-
 fn state_text(home: &Path) -> String {
     fs::read_to_string(state_file(home)).unwrap()
 }
@@ -194,11 +257,13 @@ fn dropped_series_stays_dropped_on_a_leftover_reading_and_resumes_on_a_fresh_one
     let root = library(home);
     let ep01 = root.join("Monster/ep01.mkv");
 
-    fs::write(
-        watch_later_dir(home).join("abc"),
-        format!("# {}\nstart=300\n", ep01.display()),
-    )
-    .unwrap();
+    write_log_entry(
+        home,
+        "abc",
+        &ep01,
+        "duration=\nposition=300\nreason=quit\n",
+        0,
+    );
     assert!(run(home, &["list"]).status.success());
     assert!(run(home, &["drop", "Monster"]).status.success());
     assert!(state_text(home).contains("status = \"dropped\""));
@@ -231,14 +296,16 @@ fn completed_series_rewatched_mid_episode_is_in_progress_at_that_position() {
     let ep01 = root.join("Monster/ep01.mkv");
     let ep02 = root.join("Monster/ep02.mkv");
 
-    fs::write(
-        watch_later_dir(home).join("abc"),
-        format!("# {}\nstart=300\n", ep01.display()),
-    )
-    .unwrap();
+    write_log_entry(
+        home,
+        "abc",
+        &ep01,
+        "duration=\nposition=300\nreason=quit\n",
+        0,
+    );
     assert!(run(home, &["list"]).status.success());
-    // mpv deletes a bookmark when the file is reopened.
-    fs::remove_file(watch_later_dir(home).join("abc")).unwrap();
+    // The log entry for EP01 is replaced by the finish of EP02.
+    fs::remove_file(mpv_log_dir(home).join("abc")).unwrap();
     write_log_entry(
         home,
         "last",

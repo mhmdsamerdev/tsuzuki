@@ -5,6 +5,9 @@ All notable changes to Tsuzuki are documented here.
 ## [Unreleased]
 
 - TLS now uses rustls instead of a vendored OpenSSL, so builds are much faster.
+- Breaking: mpv's `watch_later` data is no longer read. Install the mpv script with `tsuzuki doctor --fix`; without it nothing is tracked.
+- Removed the `[mpv] watch_later_dir` setting (old configs still load) and the mpv.conf check from `doctor`.
+- Dropped video-header probing; completion now comes only from the script's `eof` and recorded duration.
 - `doctor` warns when mpv entries are dated in the future.
 - Watching a dropped or completed series again now reactivates it, including finishing an episode.
 - `sync exclude <series|root>` keeps a series, or every series under a root, out of MAL sync.

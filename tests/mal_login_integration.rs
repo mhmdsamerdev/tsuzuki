@@ -40,7 +40,6 @@ paths = []
 video_extensions = ["mkv", "mp4", "avi", "webm", "mov"]
 
 [mpv]
-watch_later_dir = ""
 command_override = ""
 
 [mal]

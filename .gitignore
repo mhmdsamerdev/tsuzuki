@@ -17,7 +17,6 @@ result-*
 # accidentally creating local copies during manual testing.
 /config.toml
 /state.toml
-*.mpv_watch_later_test/
 
 # --- Editors / IDEs ---
 .vscode/

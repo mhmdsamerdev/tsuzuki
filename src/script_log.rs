@@ -1,4 +1,4 @@
-//! Reads the optional mpv companion script's log directory.
+//! Reads the mpv mpv script's log directory, tsuzuki's only view of mpv.
 //!
 //! `contrib/mpv/tsuzuki.lua` atomically writes one text file per played path
 //! to `$XDG_DATA_HOME/tsuzuki/mpv-log`, named by an 8-hex-char djb2 hash of
@@ -19,8 +19,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::mpv;
-use crate::roots::normalize;
+use crate::roots::{expand_tilde, normalize};
+use crate::series;
 
 /// A script-log directory besides the native one, tagged with the OS it
 /// applies to (`std::env::consts::OS`).
@@ -49,7 +49,7 @@ pub struct ScriptLogEntry {
     pub position: Option<f64>,
     /// One of `eof`/`stop`/`quit`/`error`/`unknown`; redirects never get an entry.
     pub reason: String,
-    /// The entry file's mtime, compared against a same-path `watch_later` entry.
+    /// The entry file's mtime: when playback of this file last ended.
     pub mtime: SystemTime,
 }
 
@@ -154,8 +154,40 @@ pub fn scan_script_log(
 
     merge_freshest_wins(raw, home)
         .into_iter()
-        .filter(|entry| mpv::is_under_a_tracked_root(&entry.source_path, tracked_roots, home))
+        .filter(|entry| is_under_a_tracked_root(&entry.source_path, tracked_roots, home))
         .collect()
+}
+
+/// True if `source_path` resolves under any tracked root. Tries a whole-root
+/// prefix match first, then falls back to each depth-1 series folder
+/// individually: a symlinked series folder canonicalizes to a path outside
+/// the root, so the prefix match alone would never see its entries.
+pub(crate) fn is_under_a_tracked_root(
+    source_path: &Path,
+    tracked_roots: &[String],
+    home: Option<&Path>,
+) -> bool {
+    let real_source = normalize(source_path, home);
+    let tracked_root_real_paths: Vec<_> = tracked_roots
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
+
+    tracked_roots.iter().any(|root| {
+        let real_root = normalize(Path::new(root), home);
+        if real_source.starts_with(&real_root) {
+            return true;
+        }
+
+        let expanded_root = expand_tilde(Path::new(root), home);
+        let Ok(children) = series::series_in_root(&expanded_root, &tracked_root_real_paths) else {
+            return false;
+        };
+        children.into_iter().any(|child| {
+            let real_child = normalize(&child.path, home);
+            real_source == real_child || real_source.starts_with(&real_child)
+        })
+    })
 }
 
 /// Keeps one entry per source path: the one whose file has the newest mtime.
@@ -317,6 +349,61 @@ mod tests {
         let tracked_roots = vec![root.to_string_lossy().into_owned()];
         let entries = scan_script_log(std::slice::from_ref(&log_dir), &tracked_roots, None);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn is_under_a_tracked_root_accepts_a_file_below_the_root_and_rejects_a_sibling_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let tracked = vec![root.to_string_lossy().into_owned()];
+        touch(&root.join("Show").join("ep01.mkv"));
+        touch(&dir.path().join("Anime2").join("Show").join("ep01.mkv"));
+
+        assert!(is_under_a_tracked_root(
+            &root.join("Show").join("ep01.mkv"),
+            &tracked,
+            None
+        ));
+        assert!(!is_under_a_tracked_root(
+            &dir.path().join("Anime2").join("Show").join("ep01.mkv"),
+            &tracked,
+            None
+        ));
+    }
+
+    #[test]
+    fn is_under_a_tracked_root_with_a_root_and_file_missing_on_disk_matches_by_prefix() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime"); // never created
+        let tracked = vec![root.to_string_lossy().into_owned()];
+
+        assert!(is_under_a_tracked_root(
+            &root.join("Show").join("ep01.mkv"),
+            &tracked,
+            None
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_under_a_tracked_root_accepts_a_file_under_a_symlinked_series_folder() {
+        // `normalize` resolves the file through the symlink to a path outside
+        // the root, so only the per-series fallback can match it.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        std_fs::create_dir_all(&root).unwrap();
+        let real_storage = dir.path().join("real_storage").join("Dungeon Meshi");
+        touch(&real_storage.join("ep01.mkv"));
+        symlink(&real_storage, root.join("Dungeon Meshi")).unwrap();
+        let tracked = vec![root.to_string_lossy().into_owned()];
+
+        assert!(is_under_a_tracked_root(
+            &root.join("Dungeon Meshi").join("ep01.mkv"),
+            &tracked,
+            None
+        ));
     }
 
     #[test]

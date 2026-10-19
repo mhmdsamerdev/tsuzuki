@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::config::Config;
-use crate::mpv;
 use crate::roots;
 use crate::series;
 use crate::state::State;
 
-/// The companion script embedded at compile time, so `--fix` can install it
+/// The mpv script embedded at compile time, so `--fix` can install it
 /// from a distributed binary and detect drift against it.
 pub const BUNDLED_SCRIPT: &str = include_str!("../contrib/mpv/tsuzuki.lua");
 
@@ -159,7 +158,7 @@ pub fn command_override_resolves(command_override: &str) -> bool {
     }
 }
 
-// --- 1b. write-filename-in-watch-later-config=yes ---
+// --- 1b. mpv installs ---
 
 /// One mpv install's config directory (holds `mpv.conf` and `scripts/`).
 /// Flatpak's lives under `home`.
@@ -191,84 +190,9 @@ pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<
     installs
 }
 
-/// The effective value of `write-filename-in-watch-later-config` in an
-/// mpv.conf. `None` means never set (a comment doesn't count). Later lines
-/// override earlier ones, as in mpv.
-fn write_filename_flag_state(contents: &str) -> Option<bool> {
-    let mut state = None;
-    for raw_line in contents.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line == "write-filename-in-watch-later-config" {
-            state = Some(true);
-        } else if line == "no-write-filename-in-watch-later-config" {
-            state = Some(false);
-        } else if let Some(rest) = line.strip_prefix("write-filename-in-watch-later-config=") {
-            state = Some(matches!(rest.trim(), "yes" | "1" | "true"));
-        }
-    }
-    state
-}
+// --- 1c. entry timestamps ---
 
-/// Checks one install's `mpv.conf` for the required flag. Never writes the
-/// file; doctor doesn't own it.
-pub fn check_mpv_conf(install: &MpvInstall) -> CheckResult {
-    let path = install.config_dir.join("mpv.conf");
-    let label = format!("mpv config ({})", install.label);
-    let enable_action = format!(
-        "add `write-filename-in-watch-later-config=yes` to {}",
-        path.display()
-    );
-
-    let contents = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return CheckResult::fail(
-                label,
-                format!("watch-later tracking not enabled ({})", install.label),
-            )
-            .with_action(enable_action);
-        }
-        Err(_) => {
-            // Unreadable (e.g. permissions) needs a different fix than missing.
-            return CheckResult::fail(label, format!("{} mpv.conf is unreadable", install.label))
-                .with_action(format!("check permissions on {}", path.display()));
-        }
-    };
-
-    match write_filename_flag_state(&contents) {
-        Some(true) => CheckResult::ok(label, "watch-later tracking enabled"),
-        _ => CheckResult::fail(
-            label,
-            format!("watch-later tracking not enabled ({})", install.label),
-        )
-        .with_action(enable_action),
-    }
-}
-
-// --- 1c. watch_later reachability ---
-
-/// Fails only when a configured `watch_later_dir` doesn't resolve; an absent
-/// OS-default directory is normal.
-pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
-    let scan = mpv::scan_watch_later(config, home);
-    if let Some(mpv::ScanWarning::WatchLaterDirNotFound(p)) = &scan.warning {
-        return CheckResult::fail("watch-later", "configured directory not found").with_action(
-            format!(
-                "check [mpv] watch_later_dir in config.toml ({})",
-                p.display()
-            ),
-        );
-    }
-
-    CheckResult::ok("watch-later", "storage available")
-}
-
-// --- 1c-bis. entry timestamps ---
-
-/// Warns when any tracked-root mpv entry (`mtimes`) is dated after `now`.
+/// Warns when any tracked-root script-log entry (`mtimes`) is dated after `now`.
 /// Report only: reconcile treats such an entry like any other, so a clock that
 /// ran ahead can make a `drop` look undone until the clock catches up.
 pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> CheckResult {
@@ -327,7 +251,7 @@ pub fn check_flatpak_permissions(
     }
 }
 
-// --- 1e. tsuzuki.lua companion script ---
+// --- 1e. tsuzuki.lua mpv script (required) ---
 
 pub struct ScriptCheckOutcome {
     pub result: CheckResult,
@@ -339,7 +263,7 @@ pub struct ScriptCheckOutcome {
 /// bundled copy.
 pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
     let script_path = scripts_dir.join("tsuzuki.lua");
-    let full_label = format!("companion script ({label})");
+    let full_label = format!("mpv script ({label})");
 
     match fs::read(&script_path) {
         Ok(bytes) if bytes == BUNDLED_SCRIPT.as_bytes() => ScriptCheckOutcome {
@@ -377,11 +301,11 @@ pub fn check_mpv_log_dirs(dirs: &[PathBuf]) -> Vec<CheckResult> {
     dirs.iter()
         .map(|d| {
             if !d.exists() {
-                CheckResult::ok("companion script", "activity log not created yet")
+                CheckResult::ok("mpv script", "activity log not created yet")
             } else {
                 match fs::read_dir(d) {
-                    Ok(_) => CheckResult::ok("companion script", "activity log reachable"),
-                    Err(_) => CheckResult::fail("companion script", "activity log unreadable")
+                    Ok(_) => CheckResult::ok("mpv script", "activity log reachable"),
+                    Err(_) => CheckResult::fail("mpv script", "activity log unreadable")
                         .with_action(format!("check permissions on {}", d.display())),
                 }
             }
@@ -701,184 +625,6 @@ mod tests {
         assert!(!command_override_resolves("/definitely/not/here/mpv"));
     }
 
-    // --- 1b: write-filename-in-watch-later-config ---
-
-    #[test]
-    fn flag_state_present_as_yes() {
-        assert_eq!(
-            write_filename_flag_state("write-filename-in-watch-later-config=yes\n"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn flag_state_absent_entirely() {
-        assert_eq!(write_filename_flag_state("volume=80\n"), None);
-    }
-
-    #[test]
-    fn flag_state_commented_out_is_treated_as_absent() {
-        assert_eq!(
-            write_filename_flag_state("# write-filename-in-watch-later-config=yes\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn flag_state_bare_flag_form_implies_yes() {
-        assert_eq!(
-            write_filename_flag_state("write-filename-in-watch-later-config\n"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn flag_state_explicit_negation() {
-        assert_eq!(
-            write_filename_flag_state("no-write-filename-in-watch-later-config\n"),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn flag_state_last_directive_wins() {
-        assert_eq!(
-            write_filename_flag_state(
-                "write-filename-in-watch-later-config=yes\nno-write-filename-in-watch-later-config\n"
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn check_mpv_conf_missing_file_fails() {
-        let dir = tempdir().unwrap();
-        let install = MpvInstall {
-            label: "native",
-            config_dir: dir.path().join("mpv"),
-        };
-        let r = check_mpv_conf(&install);
-        assert_eq!(r.level, Level::Fail);
-        assert!(r.message.contains("not enabled"));
-        assert_eq!(
-            r.action,
-            Some(format!(
-                "add `write-filename-in-watch-later-config=yes` to {}",
-                dir.path().join("mpv").join("mpv.conf").display()
-            ))
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn check_mpv_conf_permission_denied_is_distinguished_from_missing() {
-        // Unreadable must not be reported as missing.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir().unwrap();
-        let config_dir = dir.path().join("mpv");
-        std_fs::create_dir_all(&config_dir).unwrap();
-        let conf_path = config_dir.join("mpv.conf");
-        std_fs::write(&conf_path, "write-filename-in-watch-later-config=yes\n").unwrap();
-        std_fs::set_permissions(&conf_path, std_fs::Permissions::from_mode(0o000)).unwrap();
-
-        let install = MpvInstall {
-            label: "native",
-            config_dir: config_dir.clone(),
-        };
-        let r = check_mpv_conf(&install);
-
-        // Restore permissions so tempdir cleanup works even if an assertion fails.
-        std_fs::set_permissions(&conf_path, std_fs::Permissions::from_mode(0o644)).unwrap();
-
-        assert_eq!(r.level, Level::Fail);
-        assert!(
-            r.message.contains("unreadable"),
-            "expected an unreadable-specific message, got: {}",
-            r.message
-        );
-        assert!(
-            !r.message.contains("does not exist"),
-            "a present-but-unreadable file must not be reported as missing, got: {}",
-            r.message
-        );
-    }
-
-    #[test]
-    fn check_mpv_conf_present_and_set_is_ok() {
-        let dir = tempdir().unwrap();
-        let config_dir = dir.path().join("mpv");
-        std_fs::create_dir_all(&config_dir).unwrap();
-        std_fs::write(
-            config_dir.join("mpv.conf"),
-            "write-filename-in-watch-later-config=yes\n",
-        )
-        .unwrap();
-        let install = MpvInstall {
-            label: "native",
-            config_dir,
-        };
-        assert_eq!(check_mpv_conf(&install).level, Level::Ok);
-    }
-
-    #[test]
-    fn check_mpv_conf_present_but_commented_out_fails() {
-        let dir = tempdir().unwrap();
-        let config_dir = dir.path().join("mpv");
-        std_fs::create_dir_all(&config_dir).unwrap();
-        std_fs::write(
-            config_dir.join("mpv.conf"),
-            "# write-filename-in-watch-later-config=yes\nvolume=80\n",
-        )
-        .unwrap();
-        let install = MpvInstall {
-            label: "native",
-            config_dir,
-        };
-        let r = check_mpv_conf(&install);
-        assert_eq!(r.level, Level::Fail);
-        // doctor never writes to mpv.conf.
-        let contents = std_fs::read_to_string(dir.path().join("mpv").join("mpv.conf")).unwrap();
-        assert_eq!(
-            contents,
-            "# write-filename-in-watch-later-config=yes\nvolume=80\n"
-        );
-    }
-
-    // --- 1c: watch_later reachability ---
-
-    #[test]
-    fn watch_later_os_default_mode_never_fails_when_nothing_exists() {
-        let home = tempdir().unwrap();
-        let config = Config::default();
-        let r = check_watch_later(&config, Some(home.path()));
-        assert_ne!(r.level, Level::Fail);
-    }
-
-    #[test]
-    fn watch_later_override_resolving_is_ok() {
-        let home = tempdir().unwrap();
-        let override_dir = home.path().join("custom_watch_later");
-        std_fs::create_dir_all(&override_dir).unwrap();
-        let mut config = Config::default();
-        config.mpv.watch_later_dir = override_dir.to_string_lossy().into_owned();
-        let r = check_watch_later(&config, Some(home.path()));
-        assert_eq!(r.level, Level::Ok);
-    }
-
-    #[test]
-    fn watch_later_override_not_resolving_fails() {
-        let home = tempdir().unwrap();
-        let mut config = Config::default();
-        config.mpv.watch_later_dir = home
-            .path()
-            .join("never_created")
-            .to_string_lossy()
-            .into_owned();
-        let r = check_watch_later(&config, Some(home.path()));
-        assert_eq!(r.level, Level::Fail);
-    }
-
     // --- 1d: Flatpak filesystem-permission gap ---
 
     #[test]
@@ -931,7 +677,7 @@ mod tests {
         }
     }
 
-    // --- 1e: tsuzuki.lua companion script ---
+    // --- 1e: tsuzuki.lua mpv script ---
 
     #[test]
     fn tsuzuki_lua_missing_needs_fix() {

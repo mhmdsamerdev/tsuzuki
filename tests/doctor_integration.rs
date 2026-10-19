@@ -1,4 +1,4 @@
-//! Real-binary tests for `tsuzuki doctor`. The mpv.conf/tsuzuki.lua assertions depend on whether mpv is installed here.
+//! Real-binary tests for `tsuzuki doctor`. The tsuzuki.lua assertions depend on whether mpv is installed here.
 
 use std::fs;
 use std::path::Path;
@@ -34,7 +34,7 @@ fn any_mpv_install_detected() -> bool {
 }
 
 #[test]
-fn doctor_reports_unreachable_watch_later_and_an_orphaned_record_then_clears_the_orphan() {
+fn doctor_reports_an_orphaned_record_then_clears_the_orphan() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -46,14 +46,9 @@ fn doctor_reports_unreachable_watch_later_and_an_orphaned_record_then_clears_the
     assert!(add.status.success(), "add failed: {add:?}");
 
     let config_path = home.join(".config").join("tsuzuki").join("config.toml");
-    let unreachable_override = home.join("this_watch_later_dir_was_never_created");
     let patched = fs::read_to_string(&config_path)
         .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"")
-        .replace(
-            "watch_later_dir = \"\"",
-            &format!("watch_later_dir = \"{}\"", unreachable_override.display()),
-        );
+        .replace("command_override = \"\"", "command_override = \"true\"");
     fs::write(&config_path, patched).unwrap();
 
     // An orphan: "GoneSeries" is tracked under "~/Anime" but has no directory on disk.
@@ -81,9 +76,8 @@ updated_at = 1
         "a deliberately broken setup must exit non-zero, got stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("watch-later")
-            && stdout.contains(&unreachable_override.display().to_string()),
-        "must report the unreachable configured watch_later_dir, got:\n{stdout}"
+        !stdout.contains("watch-later") && !stdout.contains("mpv config"),
+        "mpv.conf and watch_later are no longer checked, got:\n{stdout}"
     );
     assert!(
         stdout.contains("✗") && stdout.contains("orphaned records"),
@@ -112,9 +106,11 @@ updated_at = 1
 
     if any_mpv_install_detected() {
         assert!(
-            stdout.contains("companion script") && stdout.contains("not installed"),
-            "a fresh scratch $HOME never has the companion script installed — if any mpv \
-             install method was detected at all, its companion-script check must FAIL, got:\n{stdout}"
+            stdout.contains("mpv script")
+                && stdout.contains("not installed")
+                && stdout.contains("tsuzuki doctor --fix"),
+            "a fresh scratch $HOME never has the mpv script installed — if any mpv \
+             install method was detected at all, its script check must FAIL with the fix command, got:\n{stdout}"
         );
     }
 

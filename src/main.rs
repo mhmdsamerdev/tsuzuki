@@ -2,12 +2,10 @@ mod anitomy;
 mod cli;
 mod config;
 mod doctor;
-mod duration;
 mod exclude;
 mod http;
 mod launch;
 mod mal;
-mod mpv;
 mod overview;
 mod pause_drop;
 mod picker;
@@ -381,13 +379,12 @@ fn confirm(subject: &str, result: &str) {
 }
 
 /// Reads `state.toml`, runs the shared `reconcile` pass, and persists the
-/// result only if it changed. Any `ScanWarning` from the `watch_later` scan
-/// is returned for the caller to print to stderr.
+/// result only if it changed.
 fn reconcile_state(
     config: &Config,
     state_path: &Path,
     home: Option<&Path>,
-) -> Result<(State, Option<mpv::ScanWarning>), ExitCode> {
+) -> Result<State, ExitCode> {
     let mut state = state::read(state_path).map_err(|e| {
         fail(&format!(
             "could not read state at {}: {e}",
@@ -396,7 +393,7 @@ fn reconcile_state(
     })?;
 
     let before = state.clone();
-    let outcome = reconcile::reconcile(config, &mut state, home);
+    reconcile::reconcile(config, &mut state, home);
 
     if state != before {
         state::write(state_path, &state).map_err(|e| {
@@ -407,18 +404,7 @@ fn reconcile_state(
         })?;
     }
 
-    Ok((state, outcome.warning))
-}
-
-fn print_scan_warning(warning: &mpv::ScanWarning) {
-    match warning {
-        mpv::ScanWarning::WatchLaterDirNotFound(p) => {
-            eprintln!(
-                "⚠ configured [mpv] watch_later_dir \"{}\" does not exist",
-                p.display()
-            );
-        }
-    }
+    Ok(state)
 }
 
 /// The resolved file, starting position, and episode number to play.
@@ -665,13 +651,10 @@ fn resume_command(
     home: Option<&Path>,
     is_tty: bool,
 ) -> ExitCode {
-    let (state, warning) = match reconcile_state(config, state_path, home) {
+    let state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let scope = match resolve_scope(
         series,
@@ -738,13 +721,10 @@ fn resume_command(
 
 /// `tsuzuki status`: every `in_progress` series.
 fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
-    let (state, warning) = match reconcile_state(config, state_path, home) {
+    let state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let overviews = overview::all_series(config, &state, home);
     let in_progress: Vec<_> = overviews
@@ -773,13 +753,10 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
 
 /// `tsuzuki list`: every tracked series, grouped by status.
 fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
-    let (state, warning) = match reconcile_state(config, state_path, home) {
+    let state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let overviews = overview::sorted_for_list(overview::all_series(config, &state, home));
     if overviews.is_empty() {
@@ -851,13 +828,10 @@ fn start_command(
     home: Option<&Path>,
     is_tty: bool,
 ) -> ExitCode {
-    let (state, warning) = match reconcile_state(config, state_path, home) {
+    let state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let scope = match resolve_scope(
         series,
@@ -981,13 +955,10 @@ fn transition_series(
     home: Option<&Path>,
     transition: &Transition,
 ) -> ExitCode {
-    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+    let mut state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let mut lines = Vec::new();
     let mut changed = false;
@@ -1129,13 +1100,10 @@ fn refreshing_client<'a>(
 /// authentication, so nothing eligible means no network work. One series
 /// failing never aborts the run.
 fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
-    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+    let mut state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let targets = sync::eligible_targets(&state, config, home);
 
@@ -1311,13 +1279,10 @@ fn sync_link_command(
     state_path: &Path,
     home: Option<&Path>,
 ) -> ExitCode {
-    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+    let mut state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     // Resolve locally first so a bad or ambiguous name fails with no network call.
     let root = match target::resolve_series_root(config, series, root_arg, home) {
@@ -1370,13 +1335,10 @@ fn doctor_command(
     println!("Tsuzuki v{}", update::current_version());
     println!();
 
-    let (mut state, warning) = match reconcile_state(config, state_path, home) {
+    let mut state = match reconcile_state(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
-    if let Some(w) = &warning {
-        print_scan_warning(w);
-    }
 
     let mut results = Vec::new();
 
@@ -1392,27 +1354,12 @@ fn doctor_command(
     ));
 
     let installs = doctor::detected_mpv_installs(presence, home);
-    if !installs.is_empty() {
-        let mpv_conf_checks: Vec<_> = installs.iter().map(doctor::check_mpv_conf).collect();
-        results.push(doctor::combine(
-            "mpv config",
-            "watch-later tracking enabled",
-            &mpv_conf_checks,
-        ));
-    }
 
-    results.push(doctor::check_watch_later(config, home));
-
-    let mut entry_mtimes: Vec<std::time::SystemTime> = mpv::scan_watch_later(config, home)
-        .entries
-        .iter()
-        .map(|e| e.mtime)
-        .collect();
-    entry_mtimes.extend(
+    let entry_mtimes: Vec<std::time::SystemTime> =
         script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)
             .iter()
-            .map(|e| e.mtime),
-    );
+            .map(|e| e.mtime)
+            .collect();
     results.push(doctor::check_entry_timestamps(
         &entry_mtimes,
         std::time::SystemTime::now(),
@@ -1445,12 +1392,12 @@ fn doctor_command(
             if fix && outcome.needs_fix.is_some() {
                 match doctor::install_script(&scripts_dir) {
                     Ok(()) => {
-                        println!("✓ fixed: companion script installed for {}", install.label);
+                        println!("✓ fixed: mpv script installed for {}", install.label);
                         outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
                     }
                     Err(e) => {
                         eprintln!(
-                            "warning: failed to install companion script for {}: {e}",
+                            "warning: failed to install mpv script for {}: {e}",
                             install.label
                         );
                     }
@@ -1459,11 +1406,7 @@ fn doctor_command(
             script_checks.push(outcome.result);
         }
         script_checks.extend(doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)));
-        results.push(doctor::combine(
-            "companion script",
-            "up to date",
-            &script_checks,
-        ));
+        results.push(doctor::combine("mpv script", "up to date", &script_checks));
     }
 
     let root_checks = doctor::check_tracked_roots(config, home);
@@ -1677,32 +1620,6 @@ mod tests {
         assert_eq!(sync_summary_line(1, 0, 1), "1 synced, 1 failed");
     }
 
-    /// Writes a `watch_later` entry at `record()`'s stored position (200s) for
-    /// a single-episode series, so reconcile leaves the fixture record alone.
-    fn fabricate_matching_bookmark(
-        config: &mut Config,
-        watch_later_dir: &Path,
-        root: &Path,
-        name: &str,
-    ) {
-        if config.mpv.watch_later_dir.is_empty() {
-            config.mpv.watch_later_dir = watch_later_dir.to_string_lossy().into_owned();
-        }
-        fs::create_dir_all(watch_later_dir).unwrap();
-        let entry_name = format!(
-            "entry-{}-{name}",
-            root.file_name().unwrap().to_string_lossy()
-        );
-        fs::write(
-            watch_later_dir.join(entry_name),
-            format!(
-                "# {}\nstart=200.000000\n",
-                root.join(name).join("ep01.mkv").display()
-            ),
-        )
-        .unwrap();
-    }
-
     // `pause`/`drop` `--root` disambiguation between identically named series.
 
     #[test]
@@ -1713,10 +1630,7 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let mut config = tracked_config(&[&root_a, &root_b]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
+        let config = tracked_config(&[&root_a, &root_b]);
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -1764,10 +1678,7 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let mut config = tracked_config(&[&root_a, &root_b]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
+        let config = tracked_config(&[&root_a, &root_b]);
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -1814,10 +1725,7 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let mut config = tracked_config(&[&root_a, &root_b]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
+        let config = tracked_config(&[&root_a, &root_b]);
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -1850,10 +1758,7 @@ mod tests {
         touch(&root_a.join("Monster").join("ep01.mkv"));
         touch(&root_b.join("Monster").join("ep01.mkv"));
 
-        let mut config = tracked_config(&[&root_a, &root_b]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_a, "Monster");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root_b, "Monster");
+        let config = tracked_config(&[&root_a, &root_b]);
         let state_path = dir.path().join("state.toml");
         let state = State {
             series: vec![
@@ -2046,9 +1951,7 @@ mod tests {
         touch(&root.join("StillHere").join("ep01.mkv"));
         // "GoneSeries" is tracked in state but has no folder on disk.
 
-        let mut config = tracked_config(&[&root]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root, "StillHere");
+        let config = tracked_config(&[&root]);
         let state_path = dir.path().join("state.toml");
         let before = State {
             series: vec![
@@ -2084,9 +1987,7 @@ mod tests {
         touch(&home.join("Anime").join("Monster").join("ep01.mkv"));
         let root = home.join("Anime");
 
-        let mut config = tracked_config(&[&root]);
-        let watch_later = dir.path().join("watch_later");
-        fabricate_matching_bookmark(&mut config, &watch_later, &root, "Monster");
+        let config = tracked_config(&[&root]);
         let state_path = dir.path().join("state.toml");
         let before = State {
             series: vec![record(&root, "Monster", Status::InProgress)],

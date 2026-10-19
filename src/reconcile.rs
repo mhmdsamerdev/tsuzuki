@@ -8,136 +8,59 @@ use std::time::SystemTime;
 
 use crate::anitomy;
 use crate::config::Config;
-use crate::duration::{self, DurationOutcome};
 use crate::exclude;
-use crate::mpv::{self, PlaybackAction, ScanWarning, WatchLaterEntry};
 use crate::roots::{expand_tilde, normalize, tracked_real_paths};
 use crate::script_log::{self, ScriptLogEntry};
 use crate::series;
 use crate::state::{SeriesRecord, State, Status, now_unix};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReconcileOutcome {
-    pub warning: Option<ScanWarning>,
+/// What a reading says about an episode.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PlaybackAction {
+    /// At or above `resume_seconds`, and not within `completion_remaining_seconds` of the end.
+    Resume(f64),
+    /// A script `eof`, or within `completion_remaining_seconds` of the end.
+    Completed,
 }
 
-/// One per-path reading, tagged with the source that won [`merge_candidates`].
-#[derive(Debug, Clone, PartialEq)]
-enum Candidate {
-    WatchLater(WatchLaterEntry),
-    ScriptLog(ScriptLogEntry),
-}
-
-impl Candidate {
-    fn source_path(&self) -> &Path {
-        match self {
-            Candidate::WatchLater(e) => &e.source_path,
-            Candidate::ScriptLog(e) => &e.source_path,
-        }
-    }
-
-    fn mtime(&self) -> SystemTime {
-        match self {
-            Candidate::WatchLater(e) => e.mtime,
-            Candidate::ScriptLog(e) => e.mtime,
-        }
-    }
-
-    /// Whether this reading is above the noise floor. A script `eof` always
-    /// counts, whatever its position; any other reading needs a position of
-    /// at least `resume_seconds`.
-    fn is_real_activity(&self, resume_seconds: u64) -> bool {
-        match self {
-            Candidate::WatchLater(e) => e.position_seconds >= resume_seconds as f64,
-            Candidate::ScriptLog(e) if e.reason == "eof" => true,
-            Candidate::ScriptLog(e) => e.position.is_some_and(|p| p >= resume_seconds as f64),
-        }
-    }
-}
-
-/// Merges `watch_later` and script-log entries into one candidate per
-/// normalized path. The fresher entry file wins; an exact mtime tie goes to
-/// the script entry.
-fn merge_candidates(
-    watch_later: Vec<WatchLaterEntry>,
-    script_log: Vec<ScriptLogEntry>,
-    home: Option<&Path>,
-) -> HashMap<PathBuf, Candidate> {
-    let mut map: HashMap<PathBuf, Candidate> = HashMap::new();
-    for entry in watch_later {
-        let key = normalize(&entry.source_path, home);
-        map.insert(key, Candidate::WatchLater(entry));
-    }
-    for entry in script_log {
-        let key = normalize(&entry.source_path, home);
-        let script_wins = match map.get(&key) {
-            Some(existing) => entry.mtime >= existing.mtime(),
-            None => true,
-        };
-        if script_wins {
-            map.insert(key, Candidate::ScriptLog(entry));
-        }
-    }
-    map
-}
-
-/// Classifies one candidate against the thresholds. Returns `None` for a
-/// below-`resume_seconds` reading or a non-`eof` script entry with no
-/// position; the scan treats that like no entry.
-fn classify_candidate(
-    candidate: &Candidate,
-    file: &Path,
+/// Classifies one script-log reading. `None` for a reading below
+/// `resume_seconds` or a non-`eof` one with no position: the scan treats that
+/// like no entry. The position check comes first, so a short file never reads
+/// as `Completed` from a position below it. Without a duration the completion
+/// check is skipped.
+fn classify_entry(
+    entry: &ScriptLogEntry,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
 ) -> Option<PlaybackAction> {
-    match candidate {
-        Candidate::WatchLater(entry) => {
-            if entry.position_seconds < resume_seconds as f64 {
-                return None;
-            }
-            let duration_outcome = duration::probe_duration(file);
-            let classification = mpv::classify(
-                entry.position_seconds,
-                duration_outcome,
-                resume_seconds,
-                completion_remaining_seconds,
-            );
-            Some(classification.action)
+    if entry.reason == "eof" {
+        return Some(PlaybackAction::Completed);
+    }
+    let position = entry.position?;
+    if position < resume_seconds as f64 {
+        return None;
+    }
+    match entry.duration {
+        Some(total) if total - position <= completion_remaining_seconds as f64 => {
+            Some(PlaybackAction::Completed)
         }
-        Candidate::ScriptLog(entry) if entry.reason == "eof" => Some(PlaybackAction::Completed),
-        Candidate::ScriptLog(entry) => {
-            let position = entry.position?;
-            if position < resume_seconds as f64 {
-                return None;
-            }
-            let duration_outcome = match entry.duration {
-                Some(d) => DurationOutcome::Known(d),
-                None => duration::probe_duration(file),
-            };
-            let classification = mpv::classify(
-                position,
-                duration_outcome,
-                resume_seconds,
-                completion_remaining_seconds,
-            );
-            Some(classification.action)
-        }
+        _ => Some(PlaybackAction::Resume(position)),
     }
 }
 
-/// The candidate for `key`. With a `cutoff` (unix seconds), a reading whose
+/// The reading for `key`. With a `cutoff` (unix seconds), a reading whose
 /// entry file is not strictly newer is a leftover and counts as absent.
 fn fresh_candidate<'a>(
-    candidates: &'a HashMap<PathBuf, Candidate>,
+    candidates: &'a HashMap<PathBuf, ScriptLogEntry>,
     key: &Path,
     cutoff: Option<u64>,
-) -> Option<&'a Candidate> {
+) -> Option<&'a ScriptLogEntry> {
     let candidate = candidates.get(key)?;
     let Some(cutoff) = cutoff else {
         return Some(candidate);
     };
     let mtime_seconds = candidate
-        .mtime()
+        .mtime
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     (mtime_seconds > cutoff).then_some(candidate)
@@ -145,9 +68,9 @@ fn fresh_candidate<'a>(
 
 /// Reconciles every series that has a record or real activity under a tracked
 /// root. Mutates `state` in place; persisting it is the caller's job.
-pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) -> ReconcileOutcome {
+pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) {
     let script_log_dirs = script_log::mpv_log_dirs(home);
-    reconcile_with_script_log_dirs(config, state, home, &script_log_dirs)
+    reconcile_with_script_log_dirs(config, state, home, &script_log_dirs);
 }
 
 /// [`reconcile`] with the script-log directories injected, since they have no
@@ -157,23 +80,25 @@ fn reconcile_with_script_log_dirs(
     state: &mut State,
     home: Option<&Path>,
     script_log_dirs: &[PathBuf],
-) -> ReconcileOutcome {
-    let scan = mpv::scan_watch_later(config, home);
-    let script_entries = script_log::scan_script_log(script_log_dirs, &config.roots.paths, home);
+) {
     let resume_seconds = config.thresholds.resume_seconds;
     let completion_remaining_seconds = config.thresholds.completion_remaining_seconds;
 
-    let candidates = merge_candidates(scan.entries, script_entries, home);
+    let candidates: HashMap<PathBuf, ScriptLogEntry> =
+        script_log::scan_script_log(script_log_dirs, &config.roots.paths, home)
+            .into_iter()
+            .map(|entry| (normalize(&entry.source_path, home), entry))
+            .collect();
 
     let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
     for record in &state.series {
         pairs.insert((record.root.clone(), record.name.clone()));
     }
     for candidate in candidates.values() {
-        if !candidate.is_real_activity(resume_seconds) {
+        if classify_entry(candidate, resume_seconds, completion_remaining_seconds).is_none() {
             continue;
         }
-        if let Some(pair) = classify_root_and_series(config, candidate.source_path(), home) {
+        if let Some(pair) = classify_root_and_series(config, &candidate.source_path, home) {
             pairs.insert(pair);
         }
     }
@@ -192,10 +117,6 @@ fn reconcile_with_script_log_dirs(
     }
 
     apply_idle_auto_pause(state, config.thresholds.auto_pause_days, now_unix());
-
-    ReconcileOutcome {
-        warning: scan.warning,
-    }
 }
 
 /// Auto-pauses every `in_progress` record idle for at least `auto_pause_days`
@@ -287,7 +208,7 @@ fn reconcile_one_series(
     state: &mut State,
     root: &str,
     name: &str,
-    candidates: &HashMap<PathBuf, Candidate>,
+    candidates: &HashMap<PathBuf, ScriptLogEntry>,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
     home: Option<&Path>,
@@ -349,9 +270,9 @@ fn reconcile_one_series(
     // when no `Resume` exists.
     //
     // `any_completed_found` covers the whole range, not just `start_index`.
-    // A missing entry proves nothing: mpv deletes a bookmark on load, so
-    // completing a file and abandoning it look the same. A `Completed`
-    // reading comes from a real entry, so it is enough on its own.
+    // A missing entry proves nothing: an episode may simply not have been
+    // opened since the script was installed. A `Completed` reading comes from
+    // a real entry, so it is enough on its own.
     let mut best: Option<(usize, f64)> = None;
     let mut any_completed_found = false;
     for (idx, file) in ordered.iter().enumerate().skip(start_index) {
@@ -359,12 +280,8 @@ fn reconcile_one_series(
         let Some(candidate) = fresh_candidate(candidates, &real_file, cutoff) else {
             continue;
         };
-        let Some(action) = classify_candidate(
-            candidate,
-            file,
-            resume_seconds,
-            completion_remaining_seconds,
-        ) else {
+        let Some(action) = classify_entry(candidate, resume_seconds, completion_remaining_seconds)
+        else {
             continue;
         };
         if matches!(action, PlaybackAction::Completed) {
@@ -486,7 +403,7 @@ fn apply_completion_advance(
     name: &str,
     expanded_root: &Path,
     ordered: &[PathBuf],
-    candidates: &HashMap<PathBuf, Candidate>,
+    candidates: &HashMap<PathBuf, ScriptLogEntry>,
     start_index: usize,
     cutoff: Option<u64>,
     resume_seconds: u64,
@@ -511,12 +428,7 @@ fn apply_completion_advance(
         let real_file = normalize(&ordered[cursor], home);
         let still_completed = match fresh_candidate(candidates, &real_file, cutoff) {
             Some(candidate) => matches!(
-                classify_candidate(
-                    candidate,
-                    &ordered[cursor],
-                    resume_seconds,
-                    completion_remaining_seconds
-                ),
+                classify_entry(candidate, resume_seconds, completion_remaining_seconds),
                 Some(PlaybackAction::Completed)
             ),
             // No entry is not completion evidence, so the walk stops.
@@ -565,20 +477,18 @@ mod tests {
         fs::File::create(path).unwrap();
     }
 
-    /// Writes an mpv-style `watch_later` entry file for `source` at
-    /// `position_seconds`, under a name distinct from other entries in the test.
-    fn write_entry(watch_later_dir: &Path, entry_name: &str, source: &Path, position_seconds: f64) {
-        fs::create_dir_all(watch_later_dir).unwrap();
-        fs::write(
-            watch_later_dir.join(entry_name),
-            format!("# {}\nstart={position_seconds}\n", source.display()),
-        )
-        .unwrap();
-    }
-
-    /// Points `config` at a single `watch_later` directory.
-    fn with_watch_later_override(config: &mut Config, dir: &Path) {
-        config.mpv.watch_later_dir = dir.to_string_lossy().into_owned();
+    /// Writes a script-log entry for `source` that quit at `position_seconds`
+    /// with no known duration, under a name distinct from other entries in the
+    /// test.
+    fn write_entry(log_dir: &Path, entry_name: &str, source: &Path, position_seconds: f64) {
+        write_script_entry(
+            log_dir,
+            entry_name,
+            source,
+            None,
+            Some(position_seconds),
+            "quit",
+        );
     }
 
     /// Writes a `tsuzuki.lua`-style script-log entry file for `source` in
@@ -616,15 +526,14 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let watch_later = dir.path().join("watch_later");
+        let log_dir = dir.path().join("mpv-log");
         // 45s is below the default 120s `resume_seconds`.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
-        let mut config = default_config(&root);
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let mut state = State::default();
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert!(
             state.series.is_empty(),
@@ -640,9 +549,8 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -661,9 +569,9 @@ mod tests {
         };
 
         // A brief reopen leaves a 45s entry that must not overwrite the real 900s.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 45.0);
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 45.0);
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -682,12 +590,11 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert!(state.series.is_empty());
     }
@@ -703,11 +610,10 @@ mod tests {
         touch(&series_path.join("ep02.mkv"));
         touch(&series_path.join("ep03.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         // No entry for ep01 or ep02.
-        write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 300.0);
+        write_entry(&log_dir, "entry3", &series_path.join("ep03.mkv"), 300.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -725,7 +631,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep03.mkv");
@@ -741,9 +647,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         // "Monster" is never created on disk, like a moved or deleted folder.
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
 
         let original = SeriesRecord {
             root: root.to_string_lossy().into_owned(),
@@ -762,7 +667,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert_eq!(
             state.series,
@@ -779,13 +684,12 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep02.mkv"), 500.0);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(&log_dir, "entry1", &series_path.join("ep02.mkv"), 500.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -801,17 +705,16 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         state.series[0].updated_at = 1;
         let after_first_call = state.series[0].clone();
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert_eq!(state.series[0], after_first_call);
     }
@@ -821,9 +724,9 @@ mod tests {
         // A leftover bookmark must never reactivate a dropped series, however
         // many times reconcile runs.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
-        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
-        set_mtime(&watch_later.join("w1"), at(CUTOFF - 60));
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
+        write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 300.0);
+        set_mtime(&log_dir.join("w1"), at(CUTOFF - 60));
         let original = record_at(
             &root,
             "Monster",
@@ -849,9 +752,9 @@ mod tests {
         // same path and position; after the drop that is still new watching.
         for status in [Status::Dropped, Status::Completed] {
             let dir = tempdir().unwrap();
-            let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
-            write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
-            set_mtime(&watch_later.join("w1"), at(CUTOFF + 60));
+            let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
+            write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 300.0);
+            set_mtime(&log_dir.join("w1"), at(CUTOFF + 60));
             let mut state = State {
                 series: vec![record_at(
                     &root,
@@ -885,11 +788,10 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         // Opens episode 1 directly.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -907,7 +809,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -923,11 +825,10 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         // Opens episode 1 directly.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -945,7 +846,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::InProgress);
@@ -961,10 +862,9 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 400.0);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 400.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -982,7 +882,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Paused);
@@ -1000,13 +900,12 @@ mod tests {
         touch(&series_path.join("ep02.mkv"));
         touch(&series_path.join("ep03.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         // ep01's own old bookmark is still there, completely unchanged...
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 200.0);
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 200.0);
         // ...but the user has since opened ep03 directly and quit mid-file.
-        write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 500.0);
+        write_entry(&log_dir, "entry3", &series_path.join("ep03.mkv"), 500.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -1024,7 +923,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1039,32 +938,41 @@ mod tests {
 
     #[test]
     fn a_duration_based_completed_reading_is_treated_like_absence_and_scanning_continues() {
-        // ~5.0s fixture, `resume_seconds=1`, `completion_remaining_seconds=2`:
+        // 5.0s duration, `resume_seconds=1`, `completion_remaining_seconds=2`:
         // quitting at 4.0s classifies as Completed, so the scan continues past it.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
-        let fixture = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/short.mkv"
-        ));
         fs::create_dir_all(&series_path).unwrap();
-        fs::copy(&fixture, series_path.join("ep01.mkv")).unwrap();
-        fs::copy(&fixture, series_path.join("ep02.mkv")).unwrap();
+        touch(&series_path.join("ep01.mkv"));
+        touch(&series_path.join("ep02.mkv"));
 
         let mut config = default_config(&root);
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
 
-        // ep01: 4.0s of ~5.0s -> Completed.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        // ep02: 1.5s of ~5.0s -> Resume.
-        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 1.5);
+        // ep01: 4.0s of 5.0s -> Completed.
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
+        // ep02: 1.5s of 5.0s -> Resume.
+        write_script_entry(
+            &log_dir,
+            "entry2",
+            &series_path.join("ep02.mkv"),
+            Some(5.0),
+            Some(1.5),
+            "quit",
+        );
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1082,31 +990,40 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
-        let fixture = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/short.mkv"
-        ));
         fs::create_dir_all(&series_path).unwrap();
-        fs::copy(&fixture, series_path.join("ep01.mkv")).unwrap();
+        touch(&series_path.join("ep01.mkv"));
 
         let mut config = default_config(&root);
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
 
         let mut state = State::default();
 
-        // Call 1: 1.5s of ~5.0s -> Resume.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 1.5);
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        // Call 1: 1.5s of 5.0s -> Resume.
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(1.5),
+            "quit",
+        );
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.position_seconds, 1.5);
         assert_eq!(record.status, Status::InProgress);
 
-        // Call 2: 4.0s of ~5.0s -> Completed on the only episode.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        // Call 2: 4.0s of 5.0s -> Completed on the only episode.
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.status,
@@ -1126,7 +1043,7 @@ mod tests {
         );
 
         // Call 3: nothing changed on disk, so nothing changes.
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Completed);
         assert_eq!(record.position_seconds, 1.5);
@@ -1134,17 +1051,16 @@ mod tests {
 
     #[test]
     fn absence_alone_never_advances_or_mutates_the_record() {
-        // Absence alone never justifies a mutation: mpv deletes a bookmark on
-        // load, so ep01's stored position must survive.
+        // Absence alone never justifies a mutation, so ep01's stored position
+        // must survive.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
 
         // No entry for ep01 and nothing for ep02.
         let mut state = State {
@@ -1163,7 +1079,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 1100.0);
@@ -1181,12 +1097,11 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
 
         // ep02: 60s, below the 120s default `resume_seconds`.
-        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 60.0);
+        write_entry(&log_dir, "entry2", &series_path.join("ep02.mkv"), 60.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -1204,7 +1119,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
         assert_eq!(record.position_seconds, 600.0);
@@ -1221,11 +1136,10 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         // No entry for ep01; a real bookmark on ep02.
-        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 700.0);
+        write_entry(&log_dir, "entry2", &series_path.join("ep02.mkv"), 700.0);
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -1243,7 +1157,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.current_relative_path, "Monster/ep02.mkv");
         assert_eq!(
@@ -1260,23 +1174,25 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
-        let fixture = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/short.mkv"
-        ));
         touch(&series_path.join("ep01.mkv"));
         fs::create_dir_all(&series_path).unwrap();
-        fs::copy(&fixture, series_path.join("ep02.mkv")).unwrap();
+        touch(&series_path.join("ep02.mkv"));
         touch(&series_path.join("ep03.mkv"));
 
         let mut config = default_config(&root);
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        // ep01: no entry. ep02: 4.0s of ~5.0s -> Completed.
+        let log_dir = dir.path().join("mpv-log");
+        // ep01: no entry. ep02: 4.0s of 5.0s -> Completed.
         // ep03: no entry.
-        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 4.0);
+        write_script_entry(
+            &log_dir,
+            "entry2",
+            &series_path.join("ep02.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -1294,7 +1210,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
             record.current_relative_path, "Monster/ep03.mkv",
@@ -1311,28 +1227,37 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
-        let fixture = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/short.mkv"
-        ));
         fs::create_dir_all(&series_path).unwrap();
         // ep01 has no entry, so no content is needed.
         touch(&series_path.join("ep01.mkv"));
-        // ep02 and ep03 need a probeable ~5.0s duration.
-        fs::copy(&fixture, series_path.join("ep02.mkv")).unwrap();
-        fs::copy(&fixture, series_path.join("ep03.mkv")).unwrap();
+        // ep02 and ep03 carry a 5.0s duration in their entries.
+        touch(&series_path.join("ep02.mkv"));
+        touch(&series_path.join("ep03.mkv"));
 
         let mut config = default_config(&root);
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
 
         // ep01: no entry.
-        // ep02: 4.0s of ~5.0s -> Completed.
-        write_entry(&watch_later, "entry2", &series_path.join("ep02.mkv"), 4.0);
-        // ep03: 1.5s of ~5.0s -> Resume.
-        write_entry(&watch_later, "entry3", &series_path.join("ep03.mkv"), 1.5);
+        // ep02: 4.0s of 5.0s -> Completed.
+        write_script_entry(
+            &log_dir,
+            "entry2",
+            &series_path.join("ep02.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
+        // ep03: 1.5s of 5.0s -> Resume.
+        write_script_entry(
+            &log_dir,
+            "entry3",
+            &series_path.join("ep03.mkv"),
+            Some(5.0),
+            Some(1.5),
+            "quit",
+        );
 
         let mut state = State {
             series: vec![SeriesRecord {
@@ -1350,7 +1275,7 @@ mod tests {
             mal_links: Vec::new(),
         };
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -1379,12 +1304,11 @@ mod tests {
             .paths
             .push(rewatches_root.to_string_lossy().into_owned());
 
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 300.0);
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert_eq!(state.series.len(), 1);
         let record = &state.series[0];
@@ -1410,9 +1334,8 @@ mod tests {
             .paths
             .push(rewatches_root.to_string_lossy().into_owned());
 
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(&log_dir, "entry1", &series_path.join("ep01.mkv"), 300.0);
 
         let stale = SeriesRecord {
             root: anime_root.to_string_lossy().into_owned(),
@@ -1429,7 +1352,7 @@ mod tests {
             series: vec![stale.clone()],
             mal_links: Vec::new(),
         };
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         assert_eq!(state.series.len(), 2);
         assert_eq!(state.series[0], stale);
@@ -1457,11 +1380,10 @@ mod tests {
         // A plain sibling series keeps working.
         touch(&root.join("Shokei Shoujo").join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
         write_entry(
-            &watch_later,
+            &log_dir,
             "entry-symlinked",
             &root
                 .join("Dungeon Meshi")
@@ -1470,14 +1392,14 @@ mod tests {
             685.852,
         );
         write_entry(
-            &watch_later,
+            &log_dir,
             "entry-ordinary",
             &root.join("Shokei Shoujo").join("ep01.mkv"),
             551.259,
         );
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let symlinked = state.find(&root.to_string_lossy(), "Dungeon Meshi");
         assert!(
@@ -1496,213 +1418,107 @@ mod tests {
         assert_eq!(ordinary.position_seconds, 551.259);
     }
 
-    #[test]
-    fn scan_warning_is_surfaced_through_reconcile_outcome() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("Anime");
-        fs::create_dir_all(&root).unwrap();
+    // --- reading classification ---
 
-        let mut config = default_config(&root);
-        config.mpv.watch_later_dir = dir
-            .path()
-            .join("does-not-exist")
-            .to_string_lossy()
-            .into_owned();
-
-        let mut state = State::default();
-        let outcome = reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
-
-        assert!(matches!(
-            outcome.warning,
-            Some(ScanWarning::WatchLaterDirNotFound(_))
-        ));
-    }
-
-    // --- script-log candidate source ---
-
-    #[test]
-    fn classify_candidate_script_eof_is_completed_regardless_of_position_or_duration() {
-        // An `eof` reading skips the proximity check, even with barely any time
-        // watched and no duration.
-        let candidate = Candidate::ScriptLog(ScriptLogEntry {
+    fn reading(duration: Option<f64>, position: Option<f64>, reason: &str) -> ScriptLogEntry {
+        ScriptLogEntry {
             source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
-            duration: None,
-            position: Some(3.0),
-            reason: "eof".to_string(),
-            mtime: SystemTime::now(),
-        });
-
-        let action = classify_candidate(&candidate, Path::new("/Anime/Show/ep01.mkv"), 120, 180);
-        assert_eq!(action, Some(PlaybackAction::Completed));
-    }
-
-    #[test]
-    fn classify_candidate_script_non_eof_below_resume_threshold_is_no_signal() {
-        let candidate = Candidate::ScriptLog(ScriptLogEntry {
-            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
-            duration: None,
-            position: Some(45.0),
-            reason: "stop".to_string(),
-            mtime: SystemTime::now(),
-        });
-
-        let action = classify_candidate(
-            &candidate,
-            Path::new("/definitely/does/not/exist/ep01.mkv"),
-            120,
-            180,
-        );
-        assert_eq!(action, None);
-    }
-
-    #[test]
-    fn classify_candidate_script_non_eof_with_no_position_is_no_signal() {
-        let candidate = Candidate::ScriptLog(ScriptLogEntry {
-            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
-            duration: None,
-            position: None,
-            reason: "error".to_string(),
-            mtime: SystemTime::now(),
-        });
-
-        let action = classify_candidate(
-            &candidate,
-            Path::new("/definitely/does/not/exist/ep01.mkv"),
-            120,
-            180,
-        );
-        assert_eq!(action, None);
-    }
-
-    #[test]
-    fn classify_candidate_script_non_eof_uses_its_own_duration_not_a_probe() {
-        // 1000s duration, 900s position -> 100s remaining -> Completed. The file
-        // doesn't exist, so the script's own duration must have been used.
-        let candidate = Candidate::ScriptLog(ScriptLogEntry {
-            source_path: PathBuf::from("/Anime/Show/ep01.mkv"),
-            duration: Some(1000.0),
-            position: Some(900.0),
-            reason: "stop".to_string(),
-            mtime: SystemTime::now(),
-        });
-
-        let action = classify_candidate(
-            &candidate,
-            Path::new("/definitely/does/not/exist/ep01.mkv"),
-            120,
-            180,
-        );
-        assert_eq!(action, Some(PlaybackAction::Completed));
-    }
-
-    #[test]
-    fn merge_candidates_watch_later_only_is_selected() {
-        let path = PathBuf::from("/Anime/Show/ep01.mkv");
-        let watch_later = vec![WatchLaterEntry {
-            source_path: path.clone(),
-            position_seconds: 500.0,
-            mtime: SystemTime::now(),
-        }];
-
-        let merged = merge_candidates(watch_later, Vec::new(), None);
-        assert!(matches!(
-            merged.get(&normalize(&path, None)),
-            Some(Candidate::WatchLater(_))
-        ));
-    }
-
-    #[test]
-    fn merge_candidates_script_only_is_selected() {
-        let path = PathBuf::from("/Anime/Show/ep01.mkv");
-        let script_log = vec![ScriptLogEntry {
-            source_path: path.clone(),
-            duration: None,
-            position: Some(500.0),
-            reason: "stop".to_string(),
-            mtime: SystemTime::now(),
-        }];
-
-        let merged = merge_candidates(Vec::new(), script_log, None);
-        assert!(matches!(
-            merged.get(&normalize(&path, None)),
-            Some(Candidate::ScriptLog(_))
-        ));
-    }
-
-    #[test]
-    fn merge_candidates_watch_later_strictly_fresher_wins() {
-        let path = PathBuf::from("/Anime/Show/ep01.mkv");
-        let now = SystemTime::now();
-
-        let watch_later = vec![WatchLaterEntry {
-            source_path: path.clone(),
-            position_seconds: 111.0,
-            mtime: now,
-        }];
-        let script_log = vec![ScriptLogEntry {
-            source_path: path.clone(),
-            duration: None,
-            position: Some(222.0),
-            reason: "stop".to_string(),
-            mtime: now - Duration::from_secs(60),
-        }];
-
-        let merged = merge_candidates(watch_later, script_log, None);
-        match merged.get(&normalize(&path, None)) {
-            Some(Candidate::WatchLater(e)) => assert_eq!(e.position_seconds, 111.0),
-            other => {
-                panic!("expected the strictly fresher watch_later entry to win, got {other:?}")
-            }
+            duration,
+            position,
+            reason: reason.to_string(),
+            mtime: SystemTime::UNIX_EPOCH,
         }
     }
 
     #[test]
-    fn merge_candidates_script_strictly_fresher_wins() {
-        let path = PathBuf::from("/Anime/Show/ep01.mkv");
-        let now = SystemTime::now();
-
-        let watch_later = vec![WatchLaterEntry {
-            source_path: path.clone(),
-            position_seconds: 111.0,
-            mtime: now - Duration::from_secs(60),
-        }];
-        let script_log = vec![ScriptLogEntry {
-            source_path: path.clone(),
-            duration: None,
-            position: Some(222.0),
-            reason: "stop".to_string(),
-            mtime: now,
-        }];
-
-        let merged = merge_candidates(watch_later, script_log, None);
-        match merged.get(&normalize(&path, None)) {
-            Some(Candidate::ScriptLog(e)) => assert_eq!(e.position, Some(222.0)),
-            other => panic!("expected the strictly fresher script entry to win, got {other:?}"),
+    fn classify_entry_eof_is_completed_regardless_of_position_or_duration() {
+        for entry in [
+            reading(None, Some(3.0), "eof"),
+            reading(None, None, "eof"),
+            reading(Some(1000.0), Some(3.0), "eof"),
+        ] {
+            assert_eq!(
+                classify_entry(&entry, 120, 180),
+                Some(PlaybackAction::Completed),
+                "{entry:?}"
+            );
         }
     }
 
     #[test]
-    fn merge_candidates_on_an_exact_mtime_tie_the_script_entry_wins() {
-        let path = PathBuf::from("/Anime/Show/ep01.mkv");
-        let now = SystemTime::now();
+    fn classify_entry_position_below_resume_threshold_is_no_signal() {
+        assert_eq!(
+            classify_entry(&reading(None, Some(119.9), "stop"), 120, 180),
+            None
+        );
+        assert_eq!(
+            classify_entry(&reading(None, Some(0.0), "stop"), 120, 180),
+            None
+        );
+    }
 
-        let watch_later = vec![WatchLaterEntry {
-            source_path: path.clone(),
-            position_seconds: 111.0,
-            mtime: now,
-        }];
-        let script_log = vec![ScriptLogEntry {
-            source_path: path.clone(),
-            duration: None,
-            position: Some(222.0),
-            reason: "stop".to_string(),
-            mtime: now,
-        }];
+    #[test]
+    fn classify_entry_position_at_and_above_resume_threshold_resumes() {
+        assert_eq!(
+            classify_entry(&reading(None, Some(120.0), "quit"), 120, 180),
+            Some(PlaybackAction::Resume(120.0))
+        );
+        assert_eq!(
+            classify_entry(&reading(None, Some(120.1), "quit"), 120, 180),
+            Some(PlaybackAction::Resume(120.1))
+        );
+    }
 
-        let merged = merge_candidates(watch_later, script_log, None);
-        match merged.get(&normalize(&path, None)) {
-            Some(Candidate::ScriptLog(e)) => assert_eq!(e.position, Some(222.0)),
-            other => panic!("expected the script entry to win an exact mtime tie, got {other:?}"),
+    #[test]
+    fn classify_entry_non_eof_with_no_position_is_no_signal() {
+        assert_eq!(
+            classify_entry(&reading(Some(1000.0), None, "quit"), 120, 180),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_entry_remaining_above_at_and_below_the_completion_threshold() {
+        // Duration 1000, completion window 180s: remaining 180.1, 180.0, 179.9.
+        assert_eq!(
+            classify_entry(&reading(Some(1000.0), Some(819.9), "quit"), 120, 180),
+            Some(PlaybackAction::Resume(819.9))
+        );
+        assert_eq!(
+            classify_entry(&reading(Some(1000.0), Some(820.0), "quit"), 120, 180),
+            Some(PlaybackAction::Completed)
+        );
+        assert_eq!(
+            classify_entry(&reading(Some(1000.0), Some(820.1), "quit"), 120, 180),
+            Some(PlaybackAction::Completed)
+        );
+    }
+
+    #[test]
+    fn classify_entry_short_file_position_below_resume_wins_over_completion() {
+        // Duration 100, position 50: inside the completion window, but below `resume_seconds`.
+        assert_eq!(
+            classify_entry(&reading(Some(100.0), Some(50.0), "quit"), 120, 180),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_entry_without_a_duration_never_completes_from_position_alone() {
+        assert_eq!(
+            classify_entry(&reading(None, Some(99_999.0), "quit"), 120, 180),
+            Some(PlaybackAction::Resume(99_999.0))
+        );
+    }
+
+    #[test]
+    fn classify_entry_non_eof_reasons_all_classify_by_position_and_duration() {
+        for reason in ["stop", "quit", "error", "unknown"] {
+            assert_eq!(
+                classify_entry(&reading(Some(1000.0), Some(500.0), reason), 120, 180),
+                Some(PlaybackAction::Resume(500.0)),
+                "{reason}"
+            );
         }
     }
 
@@ -1717,9 +1533,7 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -1761,9 +1575,7 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -1791,32 +1603,34 @@ mod tests {
     }
 
     #[test]
-    fn a_never_tracked_series_completed_via_an_ordinary_watch_later_reading_also_gets_a_record() {
-        // Same for a plain `watch_later` `Completed` reading.
+    fn a_never_tracked_series_completed_via_a_duration_based_reading_also_gets_a_record() {
+        // Same for a quit reading inside the completion window.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
-        let fixture = PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/short.mkv"
-        ));
         fs::create_dir_all(&series_path).unwrap();
-        fs::copy(&fixture, series_path.join("ep01.mkv")).unwrap();
+        touch(&series_path.join("ep01.mkv"));
 
         let mut config = default_config(&root);
         config.thresholds.resume_seconds = 1;
         config.thresholds.completion_remaining_seconds = 2;
-        let watch_later = dir.path().join("watch_later");
-        // 4.0s of ~5.0s -> Completed.
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 4.0);
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
+        // 4.0s of 5.0s -> Completed.
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
 
         let mut state = State::default();
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
-        let record = state
-            .find(&root.to_string_lossy(), "Monster")
-            .expect("a never-tracked series completed via watch_later alone must get a record");
+        let record = state.find(&root.to_string_lossy(), "Monster").expect(
+            "a never-tracked series completed via a duration-based reading must get a record",
+        );
         assert_eq!(record.status, Status::Completed);
     }
 
@@ -1829,9 +1643,7 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // A fresh `eof` on ep01.
         write_script_entry(
@@ -1882,9 +1694,7 @@ mod tests {
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // A fresh `eof` on ep01.
         write_script_entry(
@@ -1928,17 +1738,15 @@ mod tests {
 
     #[test]
     fn script_only_eof_on_the_last_episode_marks_completed_flagship() {
-        // A script-log-only `eof` on the last episode completes the series with no
-        // `watch_later` trace.
+        // A lone `eof` on the last episode completes the series, with no earlier
+        // reading for it.
         let dir = tempdir().unwrap();
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
         touch(&series_path.join("ep02.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -1997,9 +1805,7 @@ mod tests {
         touch(&series_path.join("ep04.mkv"));
         touch(&series_path.join("ep05.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // ep02 through ep05 all classify Completed (script `eof`).
         for (file_name, entry_name) in [
@@ -2068,9 +1874,7 @@ mod tests {
         touch(&series_path.join("ep02.mkv"));
         touch(&series_path.join("ep03.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // ep01: script-only `eof`. ep02 and ep03: nothing from either source.
         write_script_entry(
@@ -2118,9 +1922,7 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -2152,9 +1954,7 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // 45s is below the default 120s `resume_seconds`.
         write_script_entry(
@@ -2187,9 +1987,7 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         // A `redirect` entry never counts as activity, whatever its position.
         write_script_entry(
@@ -2222,9 +2020,7 @@ mod tests {
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
 
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later"); // left empty
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         fs::create_dir_all(&script_log_dir).unwrap();
         fs::write(
@@ -2261,7 +2057,7 @@ mod tests {
         // Script-log entries persist on disk, so an `eof` written before the
         // drop must not look like new activity on any later reconcile.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, script_log_dir) = monster_library(dir.path(), 2);
+        let (root, series_path, config, script_log_dir) = monster_library(dir.path(), 2);
         script_entry_at(
             &script_log_dir,
             "entry1",
@@ -2414,8 +2210,7 @@ mod tests {
 
         let mut config = default_config(&root);
         config.thresholds.auto_pause_days = 7;
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
 
         let long_ago = now_unix().saturating_sub(30 * 86_400);
         let mut state = State {
@@ -2428,14 +2223,9 @@ mod tests {
 
         // Naruto has a new bookmark in this very call, so it must not be
         // idle-paused.
-        write_entry(
-            &watch_later,
-            "entry1",
-            &fresh_series.join("ep01.mkv"),
-            300.0,
-        );
+        write_entry(&log_dir, "entry1", &fresh_series.join("ep01.mkv"), 300.0);
 
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
 
         let monster = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(
@@ -2483,9 +2273,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
-        let mut config = default_config(root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -2551,9 +2339,7 @@ mod tests {
         let root = dir.path().join("Anime");
         let series_path = root.join("Monster");
         touch(&series_path.join("ep01.mkv"));
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
         let script_log_dir = dir.path().join("mpv-log");
         write_script_entry(
             &script_log_dir,
@@ -2622,22 +2408,16 @@ mod tests {
         set_mtime(&log_dir.join(entry_name), at(mtime_unix));
     }
 
-    /// A library of `Monster` with `episodes` files, an empty `watch_later`
-    /// dir, and a config pointing at it.
-    fn monster_library(
-        dir: &Path,
-        episodes: usize,
-    ) -> (PathBuf, PathBuf, Config, PathBuf, PathBuf) {
+    /// A library of `Monster` with `episodes` files, and the path of its
+    /// (not yet created) script-log dir.
+    fn monster_library(dir: &Path, episodes: usize) -> (PathBuf, PathBuf, Config, PathBuf) {
         let root = dir.join("Anime");
         let series_path = root.join("Monster");
         for n in 1..=episodes {
             touch(&series_path.join(format!("ep{n:02}.mkv")));
         }
-        let mut config = default_config(&root);
-        let watch_later = dir.join("watch_later");
-        fs::create_dir_all(&watch_later).unwrap();
-        with_watch_later_override(&mut config, &watch_later);
-        (root, series_path, config, watch_later, dir.join("mpv-log"))
+        let config = default_config(&root);
+        (root, series_path, config, dir.join("mpv-log"))
     }
 
     fn run_reconcile(config: &Config, state: &mut State, log_dir: &Path) {
@@ -2654,7 +2434,7 @@ mod tests {
         // The reported case: dropped on EP01 at 139.994s, later quit EP01 97s
         // before its end (completion window 180s).
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
         script_entry_at(
             &log_dir,
             "e1",
@@ -2688,9 +2468,9 @@ mod tests {
     #[test]
     fn dropped_record_with_a_fresh_ten_minute_bookmark_resumes_there() {
         let dir = tempdir().unwrap();
-        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
-        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 600.0);
-        set_mtime(&watch_later.join("w1"), at(CUTOFF + 100));
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
+        write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 600.0);
+        set_mtime(&log_dir.join("w1"), at(CUTOFF + 100));
         let mut state = State {
             series: vec![record_at(
                 &root,
@@ -2718,7 +2498,7 @@ mod tests {
         for (mtime_unix, reactivates) in [(CUTOFF - 1, false), (CUTOFF, false), (CUTOFF + 1, true)]
         {
             let dir = tempdir().unwrap();
-            let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+            let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
             script_entry_at(
                 &log_dir,
                 "e1",
@@ -2757,9 +2537,9 @@ mod tests {
     fn dropped_record_ignores_a_stale_bookmark_on_a_later_episode() {
         // A bookmark from before the drop on EP03 must not revive the series.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 3);
-        write_entry(&watch_later, "w3", &series_path.join("ep03.mkv"), 500.0);
-        set_mtime(&watch_later.join("w3"), at(CUTOFF - 3600));
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 3);
+        write_entry(&log_dir, "w3", &series_path.join("ep03.mkv"), 500.0);
+        set_mtime(&log_dir.join("w3"), at(CUTOFF - 3600));
         let original = record_at(
             &root,
             "Monster",
@@ -2783,7 +2563,7 @@ mod tests {
         // Finished long ago: EP02..EP05 `eof` entries linger. Finishing EP01
         // now must land on EP02, not skip the stale entries to the end.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 5);
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 5);
         for n in 2..=5 {
             script_entry_at(
                 &log_dir,
@@ -2828,7 +2608,7 @@ mod tests {
     #[test]
     fn completed_record_with_only_stale_eofs_is_left_untouched() {
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 3);
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 3);
         for n in 1..=3 {
             script_entry_at(
                 &log_dir,
@@ -2861,7 +2641,7 @@ mod tests {
     #[test]
     fn dropped_single_episode_series_with_a_fresh_eof_becomes_completed() {
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 1);
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 1);
         script_entry_at(
             &log_dir,
             "e1",
@@ -2909,7 +2689,7 @@ mod tests {
             };
             for fresh in [true, false] {
                 let dir = tempdir().unwrap();
-                let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 3);
+                let (root, series_path, config, log_dir) = monster_library(dir.path(), 3);
                 script_entry_at(
                     &log_dir,
                     "e1",
@@ -2959,9 +2739,8 @@ mod tests {
             .roots
             .paths
             .push(inner.to_string_lossy().into_owned());
-        let watch_later = dir.path().join("watch_later");
-        fs::create_dir_all(&watch_later).unwrap();
-        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&log_dir).unwrap();
         let log_dir = dir.path().join("mpv-log");
         script_entry_at(
             &log_dir,
@@ -3012,10 +2791,9 @@ mod tests {
         touch(&real.join("Monster/ep02.mkv"));
         let link = dir.path().join("Anime");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        let mut config = default_config(&link);
-        let watch_later = dir.path().join("watch_later");
-        fs::create_dir_all(&watch_later).unwrap();
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&link);
+        let log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&log_dir).unwrap();
         let log_dir = dir.path().join("mpv-log");
         script_entry_at(
             &log_dir,
@@ -3049,7 +2827,7 @@ mod tests {
         // Pins current behavior: freshness is only "newer than `updated_at`",
         // so a clock-skewed entry from the future reactivates the record.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
         script_entry_at(
             &log_dir,
             "e1",
@@ -3078,20 +2856,20 @@ mod tests {
     }
 
     #[test]
-    fn dropped_record_takes_the_fresher_source_and_ignores_a_stale_one() {
-        // (watch_later mtime, script mtime, expected position on EP01).
-        // The script entry is a `quit` at 600s of a long file; watch_later 300s.
+    fn dropped_record_takes_the_fresher_entry_for_a_file_and_ignores_a_stale_one() {
+        // (first entry mtime, second entry mtime, expected position on EP01).
+        // Two entries for EP01: the first quit at 300s, the second at 600s of a long file.
         let cases: [(u64, u64, Option<f64>); 4] = [
-            (CUTOFF + 10, CUTOFF + 20, Some(600.0)), // both fresh, script newer
-            (CUTOFF + 20, CUTOFF + 10, Some(300.0)), // both fresh, watch_later newer
-            (CUTOFF - 20, CUTOFF + 10, Some(600.0)), // only the script is fresh
+            (CUTOFF + 10, CUTOFF + 20, Some(600.0)), // both fresh, second newer
+            (CUTOFF + 20, CUTOFF + 10, Some(300.0)), // both fresh, first newer
+            (CUTOFF - 20, CUTOFF + 10, Some(600.0)), // only the second is fresh
             (CUTOFF - 10, CUTOFF - 20, None),        // both stale
         ];
-        for (wl_mtime, script_mtime, expected) in cases {
+        for (first_mtime, second_mtime, expected) in cases {
             let dir = tempdir().unwrap();
-            let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
-            write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
-            set_mtime(&watch_later.join("w1"), at(wl_mtime));
+            let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
+            write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 300.0);
+            set_mtime(&log_dir.join("w1"), at(first_mtime));
             script_entry_at(
                 &log_dir,
                 "e1",
@@ -3099,7 +2877,7 @@ mod tests {
                 Some(5000.0),
                 Some(600.0),
                 "quit",
-                script_mtime,
+                second_mtime,
             );
             let original = record_at(
                 &root,
@@ -3121,14 +2899,14 @@ mod tests {
                     assert_eq!(
                         state.series[0].status,
                         Status::InProgress,
-                        "{wl_mtime} {script_mtime}"
+                        "{first_mtime} {second_mtime}"
                     );
                     assert_eq!(
                         state.series[0].position_seconds, position,
-                        "{wl_mtime} {script_mtime}"
+                        "{first_mtime} {second_mtime}"
                     );
                 }
-                None => assert_eq!(state.series[0], original, "{wl_mtime} {script_mtime}"),
+                None => assert_eq!(state.series[0], original, "{first_mtime} {second_mtime}"),
             }
         }
     }
@@ -3136,13 +2914,13 @@ mod tests {
     #[test]
     fn fresh_script_reading_on_a_dropped_record_by_reason_and_duration() {
         // Position 1454s. With a known 1551s duration the 97s remaining is
-        // inside the completion window for every reason; without one (an
-        // empty file has no probeable duration) only `eof` is a finish.
+        // inside the completion window for every reason; without one only
+        // `eof` is a finish.
         let reasons = ["eof", "quit", "stop", "error", "unknown"];
         for reason in reasons {
             for duration in [Some(1551.0), None] {
                 let dir = tempdir().unwrap();
-                let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+                let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
                 script_entry_at(
                     &log_dir,
                     "e1",
@@ -3185,9 +2963,9 @@ mod tests {
     fn paused_record_with_a_reading_older_than_it_and_equal_to_its_position_is_unchanged() {
         // Paused has no freshness cutoff; the stored position protects it.
         let dir = tempdir().unwrap();
-        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
-        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
-        set_mtime(&watch_later.join("w1"), at(CUTOFF - 60));
+        let (root, series_path, config, log_dir) = monster_library(dir.path(), 2);
+        write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 300.0);
+        set_mtime(&log_dir.join("w1"), at(CUTOFF - 60));
         let original = record_at(
             &root,
             "Monster",
@@ -3211,9 +2989,9 @@ mod tests {
         // Ancient dropped record, fresh reading, `auto_pause_days = 1`:
         // reactivation stamps `updated_at = now`, so the idle pass skips it.
         let dir = tempdir().unwrap();
-        let (root, series_path, mut config, watch_later, log_dir) = monster_library(dir.path(), 2);
+        let (root, series_path, mut config, log_dir) = monster_library(dir.path(), 2);
         config.thresholds.auto_pause_days = 1;
-        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+        write_entry(&log_dir, "w1", &series_path.join("ep01.mkv"), 300.0);
         let mut ancient = record_at(
             &root,
             "Monster",
@@ -3246,10 +3024,9 @@ mod tests {
         ] {
             touch(&series_path.join(file));
         }
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        fs::create_dir_all(&watch_later).unwrap();
-        with_watch_later_override(&mut config, &watch_later);
+        let config = default_config(&root);
+        let log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&log_dir).unwrap();
         let log_dir = dir.path().join("mpv-log");
         script_entry_at(
             &log_dir,
@@ -3283,7 +3060,7 @@ mod tests {
     #[test]
     fn dropped_record_ignores_a_fresh_reading_on_an_excluded_episode() {
         let dir = tempdir().unwrap();
-        let (root, series_path, mut config, _, log_dir) = monster_library(dir.path(), 2);
+        let (root, series_path, mut config, log_dir) = monster_library(dir.path(), 2);
         config.exclusions.push(crate::config::Exclusion {
             root: root.to_string_lossy().into_owned(),
             path: "Monster/ep02.mkv".to_string(),

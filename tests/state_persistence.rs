@@ -49,13 +49,13 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
         .replace("command_override = \"\"", "command_override = \"true\"");
     fs::write(&config_path, patched).unwrap();
 
-    // A watch_later bookmark above the default 120s `resume_seconds`, as mpv leaves after a mid-episode quit.
-    let watch_later_dir = home.join(".local/state/mpv/watch_later");
-    fs::create_dir_all(&watch_later_dir).unwrap();
+    // A quit reading above the default 120s `resume_seconds`, as the mpv script logs after a mid-episode quit.
+    let log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&log_dir).unwrap();
     fs::write(
-        watch_later_dir.join("fake-entry"),
+        log_dir.join("fake-entry"),
         format!(
-            "# {}\nstart=560.250000\n",
+            "# {}\nduration=\nposition=560.250000\nreason=quit\n",
             series_dir.join("ep01.mkv").display()
         ),
     )
@@ -131,12 +131,12 @@ fn list_and_status_read_back_the_same_real_persisted_state() {
         .replace("command_override = \"\"", "command_override = \"true\"");
     fs::write(&config_path, patched).unwrap();
 
-    let watch_later_dir = home.join(".local/state/mpv/watch_later");
-    fs::create_dir_all(&watch_later_dir).unwrap();
+    let log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&log_dir).unwrap();
     fs::write(
-        watch_later_dir.join("fake-entry"),
+        log_dir.join("fake-entry"),
         format!(
-            "# {}\nstart=400.000000\n",
+            "# {}\nduration=\nposition=400.000000\nreason=quit\n",
             series_dir.join("ep01.mkv").display()
         ),
     )

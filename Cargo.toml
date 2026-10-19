@@ -19,7 +19,6 @@ natord = "1.0.9"
 rand = "0.8"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
-symphonia = { version = "0.6.1", default-features = false, features = ["mkv", "isomp4"] }
 tempfile = "3.27.0"
 toml = "1.1.4"
 tsuzuki-anitomy = { path = "vendor/anitomy", version = "0.1.0" }

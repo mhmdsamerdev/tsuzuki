@@ -70,16 +70,17 @@ fn bypass_real_mpv(home: &Path) {
     fs::write(&path, patched).unwrap();
 }
 
-/// Fabricates one mpv `watch_later` entry (`# <path>` then `start=<seconds>`) in the first OS-default candidate directory.
-/// `entry_name` only needs to be unique within the directory.
-fn write_watch_later(home: &Path, entry_name: &str, source_file: &Path, position_seconds: f64) {
-    let dir = home.join(".local/state/mpv/watch_later");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join(entry_name),
-        format!("# {}\nstart={position_seconds:.6}\n", source_file.display()),
-    )
-    .unwrap();
+/// Fabricates one `tsuzuki.lua` quit entry (no duration) at `position_seconds`.
+/// `entry_name` only needs to be unique within the log directory.
+fn write_quit_entry(home: &Path, entry_name: &str, source_file: &Path, position_seconds: f64) {
+    write_script_log(
+        home,
+        entry_name,
+        source_file,
+        None,
+        Some(position_seconds),
+        "quit",
+    );
 }
 
 /// Fabricates one `tsuzuki.lua` log entry at `~/.local/share/tsuzuki/mpv-log`.
@@ -129,21 +130,16 @@ fn backdate_only_updated_at(home: &Path, seconds_ago: u64) {
     fs::write(&path, patched).unwrap();
 }
 
-/// Moves every existing `watch_later` and script-log entry back ten seconds, so anything written next is strictly fresher.
+/// Moves every existing script-log entry back ten seconds, so anything written next is strictly fresher.
 fn age_earlier_entries(home: &Path) {
-    for dir in [
-        home.join(".local/state/mpv/watch_later"),
-        home.join(".local/share/tsuzuki/mpv-log"),
-    ] {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.unwrap().path();
-            let file = fs::File::options().write(true).open(&path).unwrap();
-            let mtime = file.metadata().unwrap().modified().unwrap();
-            file.set_modified(mtime - Duration::from_secs(10)).unwrap();
-        }
+    let Ok(entries) = fs::read_dir(home.join(".local/share/tsuzuki/mpv-log")) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        let mtime = file.metadata().unwrap().modified().unwrap();
+        file.set_modified(mtime - Duration::from_secs(10)).unwrap();
     }
 }
 
@@ -248,7 +244,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     add_root(home, &anime_root);
 
     // A bookmark on the Season 1 file, which natural sort places first.
-    write_watch_later(home, "entry-1", &season1_file, 560.0);
+    write_quit_entry(home, "entry-1", &season1_file, 560.0);
 
     let list1 = run_ok(home, &["list"]);
     assert!(list1.contains("In progress:"), "got: {list1}");
@@ -395,7 +391,7 @@ fn pause_drop_lifecycle_list_grouping_and_invalid_transition_is_rejected() {
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]); // persists the real in_progress record
 
     let pause1 = run_ok(home, &["pause", "Monster"]);
@@ -465,8 +461,8 @@ fn multi_root_disambiguation_for_pause_is_explicit_and_never_mutates_on_ambiguit
     add_root(home, &root_a);
     add_root(home, &root_b);
 
-    write_watch_later(home, "entry-a", &file_a, 300.0);
-    write_watch_later(home, "entry-b", &file_b, 400.0);
+    write_quit_entry(home, "entry-a", &file_a, 300.0);
+    write_quit_entry(home, "entry-b", &file_b, 400.0);
     run_ok(home, &["list"]); // persists both real in_progress records
 
     let ambiguous = run(home, &["pause", "Overlap"]);
@@ -519,7 +515,7 @@ fn doctor_detects_and_forgets_a_real_orphaned_record() {
     touch(&anime_root.join("StillHere").join("ep01.mkv"));
 
     add_root(home, &anime_root);
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]); // persists a real in_progress record for GoneShow
 
     assert!(
@@ -650,10 +646,10 @@ fn config_show_and_edit_round_trip_including_a_broken_edit() {
     );
 }
 
-// The script log wins only when fresher, and an unchanged log entry isn't re-read as fresh activity.
+// For one file the freshest log entry wins, and an unchanged log entry isn't re-read as fresh activity.
 
 #[test]
-fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_activity() {
+fn freshest_log_entry_for_a_file_wins_and_a_stale_entry_never_reappears_as_new_activity() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
 
@@ -662,10 +658,10 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
     touch(&file);
     add_root(home, &anime_root);
 
-    // An older watch_later bookmark...
-    write_watch_later(home, "wl-entry", &file, 300.0);
+    // An older quit reading...
+    write_quit_entry(home, "wl-entry", &file, 300.0);
     age_earlier_entries(home);
-    // ...then a fresher script-log reading for the same file at a different position.
+    // ...then a fresher reading for the same file at a different position.
     write_script_log(
         home,
         "script-entry",
@@ -680,7 +676,7 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
     let state1 = fs::read_to_string(state_path(home)).unwrap();
     assert!(
         state1.contains("900"),
-        "the fresher script-log position must win over the older watch_later one, got:\n{state1}"
+        "the fresher position must win over the older one, got:\n{state1}"
     );
     assert!(!state1.contains("300.0"), "got:\n{state1}");
 
@@ -706,14 +702,14 @@ fn a_noise_level_reading_never_overwrites_a_real_saved_position() {
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 560.0);
+    write_quit_entry(home, "entry", &file, 560.0);
     run_ok(home, &["list"]);
     let state1 = fs::read_to_string(state_path(home)).unwrap();
     assert!(state1.contains("560"), "got:\n{state1}");
 
     // A 45s reading (below the default 120s) with a later mtime.
     age_earlier_entries(home);
-    write_watch_later(home, "entry", &file, 45.0);
+    write_quit_entry(home, "entry", &file, 45.0);
 
     let list2 = run_ok(home, &["list"]);
     assert!(list2.contains("In progress:"), "got: {list2}");
@@ -741,7 +737,7 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
     add_root(home, &anime_root);
 
     // Progress on episode 2, then paused.
-    write_watch_later(home, "entry-2", &ep2, 500.0);
+    write_quit_entry(home, "entry-2", &ep2, 500.0);
     run_ok(home, &["list"]);
     run_ok(home, &["pause", "Monster"]);
     let state_paused = fs::read_to_string(state_path(home)).unwrap();
@@ -749,7 +745,7 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
 
     // A bookmark on episode 1 with a fresher mtime than anything recorded.
     age_earlier_entries(home);
-    write_watch_later(home, "entry-1", &ep1, 200.0);
+    write_quit_entry(home, "entry-1", &ep1, 200.0);
 
     let list_after = run_ok(home, &["list"]);
     assert!(
@@ -763,7 +759,7 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
     );
 }
 
-// Symlinks are followed: a symlinked series folder is tracked like a real one, and a watch_later entry via the symlink path attributes correctly.
+// Symlinks are followed: a symlinked series folder is tracked like a real one, and an entry via the symlink path attributes correctly.
 
 #[test]
 #[cfg(unix)]
@@ -794,7 +790,7 @@ fn a_symlinked_series_folder_is_tracked_exactly_like_a_real_one() {
 
     // mpv reports the symlinked path it was opened through.
     let symlinked_path = anime_root.join("LinkedShow").join("ep01.mkv");
-    write_watch_later(home, "entry", &symlinked_path, 400.0);
+    write_quit_entry(home, "entry", &symlinked_path, 400.0);
 
     let list_after = run_ok(home, &["list"]);
     assert!(
@@ -817,8 +813,8 @@ fn non_tty_bare_resume_with_multiple_in_progress_series_lists_and_never_hangs() 
     touch(&file_b);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry-a", &file_a, 300.0);
-    write_watch_later(home, "entry-b", &file_b, 400.0);
+    write_quit_entry(home, "entry-a", &file_a, 300.0);
+    write_quit_entry(home, "entry-b", &file_b, 400.0);
     run_ok(home, &["list"]); // persists both as real in_progress records
 
     let resume = run(home, &["resume"]);
@@ -851,7 +847,7 @@ fn sync_without_a_prior_login_fails_cleanly_with_no_network_access() {
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]); // real progress to sync exists now
 
     let sync = run(home, &["sync"]);
@@ -883,7 +879,7 @@ fn paused_series_are_not_synced_and_need_no_mal_login() {
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]);
     run_ok(home, &["pause", "Monster"]);
     let before = fs::read_to_string(state_path(home)).unwrap();
@@ -913,7 +909,7 @@ fn dropped_series_are_not_synced_but_completed_series_are() {
     add_root(home, &anime_root);
 
     // Two minutes into ep1 of two, then a manual drop.
-    write_watch_later(home, "entry", &abandoned, 120.0);
+    write_quit_entry(home, "entry", &abandoned, 120.0);
     run_ok(home, &["list"]);
     run_ok(home, &["drop", "Abandoned"]);
     let before = fs::read_to_string(state_path(home)).unwrap();
@@ -959,7 +955,7 @@ fn dropped_at_every_depth_is_never_synced() {
         add_root(home, &anime_root);
 
         match name {
-            "MidFirst" => write_watch_later(home, "e1", &ep1, 120.0),
+            "MidFirst" => write_quit_entry(home, "e1", &ep1, 120.0),
             "AfterFirst" => {
                 write_script_log(home, "l1", &ep1, Some(1420.0), Some(1415.0), "eof");
             }
@@ -967,7 +963,7 @@ fn dropped_at_every_depth_is_never_synced() {
                 write_script_log(home, "l1", &ep1, Some(1420.0), Some(1415.0), "eof");
                 run_ok(home, &["list"]);
                 age_earlier_entries(home);
-                write_watch_later(home, "e2", &ep2, 700.0);
+                write_quit_entry(home, "e2", &ep2, 700.0);
             }
         }
         run_ok(home, &["list"]);
@@ -1029,7 +1025,7 @@ fn orphaned_series_are_not_synced_and_their_state_is_preserved() {
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]);
     fs::remove_dir_all(&series_dir).unwrap();
     let before = fs::read_to_string(state_path(home)).unwrap();
@@ -1056,7 +1052,7 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
     touch(&file);
     add_root(home, &anime_root);
 
-    write_watch_later(home, "entry", &file, 300.0);
+    write_quit_entry(home, "entry", &file, 300.0);
     run_ok(home, &["list"]); // persists a real in_progress record
 
     // Backdating with the default (0 = never) pauses nothing. Re-running `list` doesn't bump `updated_at`, so
@@ -1077,7 +1073,7 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
 
     // Fresh activity refreshes `updated_at`, so the series stays in_progress.
     age_earlier_entries(home);
-    write_watch_later(home, "entry", &file, 600.0);
+    write_quit_entry(home, "entry", &file, 600.0);
     let list_still_fresh = run_ok(home, &["list"]);
     assert!(
         list_still_fresh.contains("In progress:"),
@@ -1110,7 +1106,7 @@ fn start_series(home: &Path, names: &[&str]) -> PathBuf {
         if i == 0 {
             add_root(home, &anime_root);
         }
-        write_watch_later(home, &format!("entry-{i}"), &file, 300.0);
+        write_quit_entry(home, &format!("entry-{i}"), &file, 300.0);
     }
     run_ok(home, &["list"]);
     anime_root
@@ -1229,9 +1225,9 @@ fn pause_multiple_series_ambiguous_name_is_not_mutated_while_others_proceed() {
     }
     add_root(home, &root_a);
     add_root(home, &root_b);
-    write_watch_later(home, "entry-a", &overlap_a, 300.0);
-    write_watch_later(home, "entry-b", &overlap_b, 400.0);
-    write_watch_later(home, "entry-c", &solo, 500.0);
+    write_quit_entry(home, "entry-a", &overlap_a, 300.0);
+    write_quit_entry(home, "entry-b", &overlap_b, 400.0);
+    write_quit_entry(home, "entry-c", &solo, 500.0);
     run_ok(home, &["list"]);
 
     let out = run(home, &["pause", "Overlap", "Solo"]);
@@ -1432,13 +1428,13 @@ fn non_tty_resume_with_two_routes_groups_in_progress_series_under_route_headers(
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
     let (anime, shows) = two_roots_with_series(home, &["Monster"], &["Frieren"]);
-    write_watch_later(
+    write_quit_entry(
         home,
         "entry-a",
         &Path::new(&anime).join("Monster").join("ep01.mkv"),
         300.0,
     );
-    write_watch_later(
+    write_quit_entry(
         home,
         "entry-b",
         &Path::new(&shows).join("Frieren").join("ep01.mkv"),
@@ -1475,7 +1471,7 @@ fn library(home: &Path, roots: &[(&str, &[&str])]) -> Vec<String> {
 
 /// Marks `<root>/<series>/ep01.mkv` in progress at `position` seconds via a `list` run.
 fn watch(home: &Path, entry: &str, root: &str, series: &str, position: f64) {
-    write_watch_later(
+    write_quit_entry(
         home,
         entry,
         &Path::new(root).join(series).join("ep01.mkv"),
@@ -1898,7 +1894,7 @@ fn watched_single_file(home: &Path, name: &str, file: &str, position: f64) -> Pa
     touch(&path);
     add_root(home, &root);
     bypass_real_mpv(home);
-    write_watch_later(home, "entry-1", &path, position);
+    write_quit_entry(home, "entry-1", &path, position);
     path
 }
 
@@ -2019,7 +2015,7 @@ fn pause_drop_and_exclude_with_a_root_nested_in_another_root_never_see_it_as_a_s
 
 /// Plays `<root>/<series>/ep01.mkv` (via `path`) at 300 s and returns `list` output.
 fn list_after_watching(home: &Path, path: &Path) -> String {
-    write_watch_later(home, "entry", path, 300.0);
+    write_quit_entry(home, "entry", path, 300.0);
     run_ok(home, &["list"])
 }
 
@@ -2209,9 +2205,9 @@ fn sync_exclude_series_and_root_leave_nothing_eligible_and_state_untouched() {
     add_root(home, &root_a);
     add_root(home, &root_b);
 
-    write_watch_later(home, "m", &monster, 300.0);
-    write_watch_later(home, "n", &naruto, 300.0);
-    write_watch_later(home, "a", &akira, 300.0);
+    write_quit_entry(home, "m", &monster, 300.0);
+    write_quit_entry(home, "n", &naruto, 300.0);
+    write_quit_entry(home, "a", &akira, 300.0);
     run_ok(home, &["list"]);
 
     let out = run_ok(home, &["sync", "exclude", "Monster"]);
@@ -2362,7 +2358,7 @@ fn sync_exclude_through_a_symlinked_root_is_stored_as_typed_and_matches_its_reco
     add_root(home, &link);
 
     let via_link = link.join("Monster").join("ep01.mkv");
-    write_watch_later(home, "m", &via_link, 300.0);
+    write_quit_entry(home, "m", &via_link, 300.0);
     run_ok(home, &["list"]);
 
     // `--root` given as the real path still records the root as stored (the link).
@@ -2397,7 +2393,7 @@ fn sync_exclude_never_changes_local_tracking() {
     let file = root.join("Monster").join("ep01.mkv");
     touch(&file);
     add_root(home, &root);
-    write_watch_later(home, "m", &file, 300.0);
+    write_quit_entry(home, "m", &file, 300.0);
     let before = run_ok(home, &["list"]);
     let state_before = fs::read_to_string(state_path(home)).unwrap();
 

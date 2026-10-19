@@ -1,4 +1,4 @@
--- Optional mpv companion for Tsuzuki; watch_later alone is enough without it.
+-- Required mpv script for Tsuzuki: its only view of what you watch.
 -- Logs duration, last position and why playback ended (eof, stop, quit, ...).
 -- Passive: one file per played path, written atomically (temp file + rename).
 -- Nothing is read back and no socket is opened.

@@ -25,7 +25,7 @@ pub struct Config {
     pub sync_exclusions: Vec<SyncExclusion>,
 }
 
-/// `120`: below this a saved position is noise, not a bookmark.
+/// `120`: below this a saved position is noise, not a real stop.
 fn default_resume_seconds() -> u64 {
     120
 }
@@ -88,11 +88,9 @@ impl Default for Roots {
     }
 }
 
-/// Both fields default to `""`, so a derived `Default` is correct.
+/// `command_override` defaults to `""`, so a derived `Default` is correct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Mpv {
-    #[serde(default)]
-    pub watch_later_dir: String,
     /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`) that skips
     /// native/Flatpak auto-detection. Empty means auto-detect.
     #[serde(default)]
@@ -305,7 +303,6 @@ mod tests {
             config.roots.video_extensions,
             vec!["mkv", "mp4", "avi", "webm", "mov"]
         );
-        assert_eq!(config.mpv.watch_later_dir, "");
         assert_eq!(config.mpv.command_override, "");
         assert_eq!(config.mal.client_id, "");
         assert_eq!(config.mal.redirect_port, 8734);
@@ -451,7 +448,6 @@ paths = []
 video_extensions = ["mkv"]
 
 [mpv]
-watch_later_dir = ""
 
 [mal]
 client_id = ""
@@ -481,7 +477,6 @@ paths = []
 video_extensions = ["mkv"]
 
 [mpv]
-watch_later_dir = ""
 
 [mal]
 client_id = ""
@@ -491,6 +486,41 @@ client_id = ""
 
         let config = read(&path).unwrap();
         assert_eq!(config.mpv.command_override, "");
+    }
+
+    #[test]
+    fn removed_watch_later_dir_key_in_an_old_config_is_ignored_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[thresholds]
+resume_seconds = 120
+completion_remaining_seconds = 180
+auto_pause_days = 0
+
+[roots]
+paths = []
+video_extensions = ["mkv"]
+
+[mpv]
+watch_later_dir = "~/old"
+command_override = "mpv"
+
+[mal]
+client_id = ""
+"#,
+        )
+        .unwrap();
+
+        let config = read(&path).unwrap();
+        assert_eq!(
+            config.mpv,
+            Mpv {
+                command_override: "mpv".to_string()
+            }
+        );
     }
 
     #[test]
@@ -511,7 +541,6 @@ paths = []
 video_extensions = ["mkv"]
 
 [mpv]
-watch_later_dir = ""
 
 [mal]
 client_id = ""
@@ -541,7 +570,6 @@ paths = []
 video_extensions = ["mkv"]
 
 [mpv]
-watch_later_dir = ""
 
 [mal]
 client_id = ""

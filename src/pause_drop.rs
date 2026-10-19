@@ -72,7 +72,7 @@ pub fn pause(state: &mut State, root: &str, name: &str) -> Result<Outcome, Actio
 ///
 /// Leaves `current_relative_path` and `position_seconds` untouched: reconcile
 /// compares new observations against them, so resetting them would make an
-/// unchanged `watch_later` entry look like new activity and reactivate the
+/// unchanged script-log entry look like new activity and reactivate the
 /// series.
 pub fn drop_series(state: &mut State, root: &str, name: &str) -> Result<Outcome, ActionError> {
     let record = state.find_mut(root, name).ok_or(ActionError::NoRecord)?;

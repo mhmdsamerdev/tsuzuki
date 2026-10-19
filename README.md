@@ -50,24 +50,20 @@ it just remembers where you were and takes you back.
 
 ## A one-time setup step
 
-Tsuzuki reads mpv's own resume data, so it needs one line in your
-`mpv.conf`:
+Tsuzuki learns what you watched from a small mpv script,
+[`contrib/mpv/tsuzuki.lua`](contrib/mpv/tsuzuki.lua). Install it once:
 
 ```
-write-filename-in-watch-later-config=yes
+tsuzuki doctor --fix
 ```
+
+That copies the script into mpv's own `scripts/` folder (or copy it there
+yourself). Without it Tsuzuki can't see what you watch. It records when
+you finish an episode and where you stopped, so binging straight through
+a series without ever pausing works.
 
 Run `tsuzuki doctor` any time to check this — and everything else Tsuzuki
 depends on — is set up correctly.
-
-**Strongly recommended:** also install the small companion script,
-[`contrib/mpv/tsuzuki.lua`](contrib/mpv/tsuzuki.lua), into mpv's own
-`scripts/` folder. It gives Tsuzuki a direct, accurate signal for when
-you actually finish an episode, instead of an inferred one — meaning far
-better tracking, especially if you binge straight through a series
-without ever pausing mid-episode. Nothing else changes and nothing is
-required to keep using Tsuzuki without it, but it's a two-minute copy
-that noticeably improves how well the tool works day to day.
 
 ## Commands you'll actually use
 

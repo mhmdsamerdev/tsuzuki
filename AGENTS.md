@@ -19,12 +19,12 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Never guess. Every tracked or excluded path is explicit.
 - MAL sync only ever writes a higher episode number, never a lower one, even on retries or partial failures.
 - Natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.
-- Absence of a `watch_later` entry proves nothing. Only a real position or a `Completed` reading moves state.
+- Absence of an mpv-script log entry proves nothing. Only a real position or a `Completed` reading moves state.
 
 ## Engineering choices
 - Local-first. No network at startup; only `sync` and `update` touch it, through `crate::http`. No async runtime.
 - State is one flat TOML, separate from the hand-edited `config.toml`. Every state write goes through the single atomic temp-file-then-rename helper. `config.toml` is a hand-edited file written only by `add`/`exclude` with a plain write.
-- mpv is read-only: `watch_later` files (fixed per-install candidate list, freshest wins) plus the optional `contrib/mpv/tsuzuki.lua` log. No IPC. Resuming spawns mpv fire-and-forget.
+- mpv is read-only: the only input is the `contrib/mpv/tsuzuki.lua` script's log (required; freshest entry per file wins). No IPC. Resuming spawns mpv fire-and-forget.
 - Pure Rust only, no C/C++ dependencies. `vendor/anitomy` is read-only (edit only for a reproduced, blocking parsing bug). Distribution is prebuilt binaries via cargo-dist only.
 
 ## Architecture
@@ -33,7 +33,6 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - A moved or deleted series folder is a new series. The old record stays inert until `doctor --fix --forget-orphans`. No rename detection.
 - `Completed` is set only by reconcile when the final episode finishes; no command sets it, `pause`/`drop` reject it. Paused and dropped series are excluded from sync. `pause`/`drop` never zero the stored position.
 - Every state-touching command reconciles with mpv through the one shared function, then acts.
-- Episode duration comes from Symphonia content-probe (AVI header fallback), never `ffprobe`.
 - Series-ness is decided only by `series::is_series_dir`. No ad-hoc `join(..).is_dir()` for series.
 - Symlinks are followed everywhere, with cycle protection. Roots are stored as the user typed them.
 - `mal::DEFAULT_CLIENT_ID` is public on purpose (PKCE, no secret). Never redact or remove it.
@@ -66,13 +65,13 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Live-network tests are `#[ignore = "reason"]`.
 
 **Real binary**
-- Anything that reads or writes `config.toml`, `state.toml`, `watch_later` or `mpv-log` needs at least one test that runs the real binary (`env!("CARGO_BIN_EXE_tsuzuki")`) against a temp `HOME`/XDG.
+- Anything that reads or writes `config.toml`, `state.toml` or `mpv-log` needs at least one test that runs the real binary (`env!("CARGO_BIN_EXE_tsuzuki")`) against a temp `HOME`/XDG.
 
 **Invariants that must always have a test** (add one if missing)
 - Topology: a directory equal to a tracked root (canonical path) is never a series, at every site that decides series-ness (pickers, positional/`--root` resolution, pause/drop, sync, reconcile, exclude).
 - Ordering: directories before a level's loose files; numbered natural sort; exclusions applied before sort; symlink cycle terminates.
-- `watch_later` parsing: redirect entries skipped; malformed entries skipped without aborting; missing `write-filename-in-watch-later-config` reported.
-- Thresholds: a position below `resume_seconds` never creates or overwrites state; `classify()` position check wins over completion on short files; script `eof` is `Completed`; absence alone never moves state.
+- Script-log parsing: redirect entries skipped; malformed entries skipped without aborting; a missing or outdated mpv script reported by `doctor`.
+- Thresholds: a position below `resume_seconds` never creates or overwrites state; `classify_entry()` position check wins over completion on short files; script `eof` is `Completed`; absence alone never moves state.
 - MAL: never write a lower episode; paused and dropped excluded; push count is the watched count (cursor − 1, or the cursor for `Completed`); only `Completed` marks a MAL entry finished; status moves forward only.
 - `exclude`/`pause`/`drop`: legal transitions only; no-record error; idempotent repeat; absolute exclude path rejected; `pause`/`drop` keep the stored position.
 - State: write is atomic (no partial file); unchanged script-log entries don't bump `updated_at`.
