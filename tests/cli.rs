@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::thread::sleep;
 use std::time::Duration;
 
 fn tsuzuki_bin() -> &'static str {
@@ -130,9 +129,22 @@ fn backdate_only_updated_at(home: &Path, seconds_ago: u64) {
     fs::write(&path, patched).unwrap();
 }
 
-/// Coarse filesystem mtime can tie two writes, so ordering-dependent tests pause between them.
-fn ensure_next_write_is_strictly_fresher() {
-    sleep(Duration::from_millis(1100));
+/// Moves every existing `watch_later` and script-log entry back ten seconds, so anything written next is strictly fresher.
+fn age_earlier_entries(home: &Path) {
+    for dir in [
+        home.join(".local/state/mpv/watch_later"),
+        home.join(".local/share/tsuzuki/mpv-log"),
+    ] {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let file = fs::File::options().write(true).open(&path).unwrap();
+            let mtime = file.metadata().unwrap().modified().unwrap();
+            file.set_modified(mtime - Duration::from_secs(10)).unwrap();
+        }
+    }
 }
 
 // First-time onboarding: add, non-TTY `start` lists choices, explicit `start <series>` plays episode 1.
@@ -247,7 +259,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     );
 
     // The `eof` signal completes the current episode, so the cursor advances to the next at position 0.
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     write_script_log(
         home,
         "log-1",
@@ -269,7 +281,7 @@ fn natural_sort_orders_seasons_anitomy_only_annotates_and_a_binge_chain_resolves
     );
 
     // The last file completing moves the series to Completed; there is no next episode.
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     write_script_log(
         home,
         "log-2",
@@ -652,7 +664,7 @@ fn companion_script_wins_on_freshness_and_a_stale_entry_never_reappears_as_new_a
 
     // An older watch_later bookmark...
     write_watch_later(home, "wl-entry", &file, 300.0);
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     // ...then a fresher script-log reading for the same file at a different position.
     write_script_log(
         home,
@@ -700,7 +712,7 @@ fn a_noise_level_reading_never_overwrites_a_real_saved_position() {
     assert!(state1.contains("560"), "got:\n{state1}");
 
     // A 45s reading (below the default 120s) with a later mtime.
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     write_watch_later(home, "entry", &file, 45.0);
 
     let list2 = run_ok(home, &["list"]);
@@ -736,7 +748,7 @@ fn forward_scan_never_reactivates_a_paused_series_from_an_earlier_bookmark() {
     assert!(state_paused.contains("ep02.mkv"), "got:\n{state_paused}");
 
     // A bookmark on episode 1 with a fresher mtime than anything recorded.
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     write_watch_later(home, "entry-1", &ep1, 200.0);
 
     let list_after = run_ok(home, &["list"]);
@@ -954,7 +966,7 @@ fn dropped_at_every_depth_is_never_synced() {
             _ => {
                 write_script_log(home, "l1", &ep1, Some(1420.0), Some(1415.0), "eof");
                 run_ok(home, &["list"]);
-                ensure_next_write_is_strictly_fresher();
+                age_earlier_entries(home);
                 write_watch_later(home, "e2", &ep2, 700.0);
             }
         }
@@ -1064,7 +1076,7 @@ fn auto_pause_days_is_off_by_default_and_pauses_a_genuinely_idle_series_once_opt
     fs::write(&cfg, patched).unwrap();
 
     // Fresh activity refreshes `updated_at`, so the series stays in_progress.
-    ensure_next_write_is_strictly_fresher();
+    age_earlier_entries(home);
     write_watch_later(home, "entry", &file, 600.0);
     let list_still_fresh = run_ok(home, &["list"]);
     assert!(
