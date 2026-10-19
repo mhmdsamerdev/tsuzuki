@@ -674,8 +674,8 @@ fn merge_and_maybe_update(
 }
 
 /// Records the agreed episode count in `mal_episode_awareness` for
-/// `Push`/`Pull`. Other actions leave state untouched. Cursor movement is
-/// [`advance_local_cursor`]'s job.
+/// `Push`/`Pull`, leaving `updated_at` alone. Other actions leave state
+/// untouched. Cursor movement is [`advance_local_cursor`]'s job.
 fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAction) {
     let new_awareness = match action {
         MergeAction::Push(n) | MergeAction::Pull(n) => n,
@@ -683,7 +683,6 @@ fn apply_merge_result(state: &mut State, root: &str, name: &str, action: MergeAc
     };
     if let Some(record) = state.find_mut(root, name) {
         record.mal_episode_awareness = Some(new_awareness);
-        record.updated_at = now_unix();
     }
 }
 
@@ -2781,21 +2780,28 @@ mod tests {
     }
 
     #[test]
-    fn apply_merge_result_push_on_a_completed_record_records_awareness_and_bumps_updated_at() {
-        // Pins that an awareness update moves `updated_at`, which is also the
-        // freshness cutoff reconcile uses for completed records.
-        let mut record = base_record();
-        record.status = Status::Completed;
-        record.updated_at = 5;
-        let mut state = State {
-            series: vec![record],
-            mal_links: Vec::new(),
-        };
+    fn apply_merge_result_push_records_awareness_without_touching_updated_at_for_every_status() {
+        // `updated_at` is the reconcile freshness cutoff and the idle-pause
+        // clock; a sync that only learns an episode count is neither.
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ] {
+            let mut record = base_record();
+            record.status = status;
+            record.updated_at = 5;
+            let mut expected = record.clone();
+            expected.mal_episode_awareness = Some(12);
+            let mut state = State {
+                series: vec![record],
+                mal_links: Vec::new(),
+            };
 
-        apply_merge_result(&mut state, "~/Anime", "One Piece", MergeAction::Push(12));
+            apply_merge_result(&mut state, "~/Anime", "One Piece", MergeAction::Push(12));
 
-        let after = &state.series[0];
-        assert_eq!(after.mal_episode_awareness, Some(12));
-        assert!(after.updated_at > 5);
+            assert_eq!(state.series[0], expected, "{status:?}");
+        }
     }
 }
