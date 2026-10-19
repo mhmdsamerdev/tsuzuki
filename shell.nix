@@ -5,15 +5,8 @@ pkgs.mkShell {
     # Toolchain manager; the compiler comes from rustup, not nixpkgs.
     pkgs.rustup
 
-    # Linker (`cc`) for Rust.
+    # Linker (`cc`) for Rust, and the C/asm part of ring.
     pkgs.gcc
-
-    # Locate and provide the OpenSSL that native-tls builds against.
-    pkgs.pkg-config
-    pkgs.openssl
-
-    # The vendored OpenSSL build runs `perl ./Configure`, which needs perl's core modules.
-    pkgs.perl
 
     # Release packaging (`cargo dist`).
     pkgs.cargo-dist

@@ -1,9 +1,7 @@
 //! Shared `ureq` HTTP plumbing: the one place that builds an `Agent` and
 //! interprets its result.
 //!
-//! Always go through [`build_agent`], never the bare `ureq::get`/`ureq::post`
-//! shortcuts. With only `native-tls` enabled, the shortcuts have no TLS
-//! backend and every HTTPS request fails.
+//! Always go through [`build_agent`], the one place an `Agent` is built.
 
 use std::fmt;
 
@@ -21,14 +19,10 @@ impl fmt::Display for HttpError {
     }
 }
 
-/// Builds a fresh `Agent` with an explicit native-tls connector. Not cached:
-/// callers are rare, on-demand paths, so the setup cost is irrelevant.
+/// Builds a fresh `Agent` (rustls, system CA store). Not cached: callers are
+/// rare, on-demand paths, so the setup cost is irrelevant.
 pub fn build_agent() -> Result<ureq::Agent, HttpError> {
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|e| HttpError(format!("could not initialize TLS: {e}")))?;
-    Ok(ureq::AgentBuilder::new()
-        .tls_connector(std::sync::Arc::new(connector))
-        .build())
+    Ok(ureq::AgentBuilder::new().build())
 }
 
 /// Maps a `ureq` result to `HttpResponse`/`HttpError`. A non-2xx status is
@@ -106,6 +100,25 @@ mod tests {
             reason_for("http://nonexistent.invalid/secret/path"),
             "no internet connection (DNS lookup failed)"
         );
+    }
+
+    #[test]
+    fn build_agent_https_to_plaintext_server_fails_tls_handshake() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        });
+        let agent = build_agent().expect("agent builds");
+        let err = map_ureq_result(agent.get(&format!("https://127.0.0.1:{port}/")).call())
+            .err()
+            .expect("handshake should fail");
+        server.join().unwrap();
+        assert_eq!(err.0, "connection failed");
     }
 
     #[test]

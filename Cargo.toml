@@ -23,13 +23,9 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mkv", "i
 tempfile = "3.27.0"
 toml = "1.1.4"
 tsuzuki-anitomy = { path = "vendor/anitomy", version = "0.1.0" }
-# Blocking HTTP client, so no async runtime. native-tls avoids a second TLS stack.
-ureq = { version = "2.10", default-features = false, features = ["native-tls", "gzip"] }
-# Direct dependency: `mal.rs` builds the `native_tls::TlsConnector` itself.
-native-tls = "0.2"
+# Blocking HTTP client, so no async runtime. rustls with the system CA store.
+ureq = { version = "2.10", default-features = false, features = ["tls", "native-certs", "gzip"] }
 webbrowser = "1.0"
-# Statically links a vendored OpenSSL so prebuilt binaries don't need the host's libssl.
-openssl = { version = "0.10", features = ["vendored"] }
 
 # Profile used by cargo-dist builds
 [profile.dist]

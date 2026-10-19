@@ -4,7 +4,7 @@ Design rules and conventions are in [`AGENTS.md`](../AGENTS.md). Read it before 
 
 ## Setup
 
-All commands run inside `nix-shell` (pins the Rust toolchain, linker and OpenSSL):
+All commands run inside `nix-shell` (pins the Rust toolchain, and linker):
 
 ```
 nix-shell
