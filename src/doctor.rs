@@ -740,7 +740,13 @@ mod tests {
         let r = check_mpv_conf(&install);
         assert_eq!(r.level, Level::Fail);
         assert!(r.message.contains("not enabled"));
-        assert!(r.action.is_some());
+        assert_eq!(
+            r.action,
+            Some(format!(
+                "add `write-filename-in-watch-later-config=yes` to {}",
+                dir.path().join("mpv").join("mpv.conf").display()
+            ))
+        );
     }
 
     #[cfg(unix)]
@@ -912,7 +918,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let outcome = check_tsuzuki_lua(&dir.path().join("scripts"), "native");
         assert_eq!(outcome.result.level, Level::Fail);
-        assert!(outcome.needs_fix.is_some());
+        assert_eq!(outcome.needs_fix, Some(dir.path().join("scripts")));
     }
 
     #[test]
@@ -1061,7 +1067,7 @@ mod tests {
     fn summarize_tracked_roots_with_none_configured_is_ok_not_absent() {
         let r = summarize_tracked_roots(&[]);
         assert_eq!(r.level, Level::Ok);
-        assert!(r.action.is_some());
+        assert_eq!(r.action, Some("tsuzuki add <path>".to_string()));
     }
 
     #[test]

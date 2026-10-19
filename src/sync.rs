@@ -2767,4 +2767,35 @@ mod tests {
         want.sort();
         assert_eq!(got, want);
     }
+
+    #[test]
+    fn local_effective_keeps_mal_awareness_when_a_finished_series_is_rewatched_from_episode_one() {
+        // Finished all 12 and synced, then reopened at episode 1 mid-watch:
+        // the count sent to MAL must not drop below what MAL already has.
+        let mut record = base_record();
+        record.status = Status::InProgress;
+        record.current_relative_path = "One Piece/ep01.mkv".to_string();
+        record.episode_number = Some(1);
+        record.mal_episode_awareness = Some(12);
+        assert_eq!(local_effective_episode(&record), 12);
+    }
+
+    #[test]
+    fn apply_merge_result_push_on_a_completed_record_records_awareness_and_bumps_updated_at() {
+        // Pins that an awareness update moves `updated_at`, which is also the
+        // freshness cutoff reconcile uses for completed records.
+        let mut record = base_record();
+        record.status = Status::Completed;
+        record.updated_at = 5;
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+
+        apply_merge_result(&mut state, "~/Anime", "One Piece", MergeAction::Push(12));
+
+        let after = &state.series[0];
+        assert_eq!(after.mal_episode_awareness, Some(12));
+        assert!(after.updated_at > 5);
+    }
 }
