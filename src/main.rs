@@ -1366,6 +1366,21 @@ fn doctor_command(
 
     results.push(doctor::check_watch_later(config, home));
 
+    let mut entry_mtimes: Vec<std::time::SystemTime> = mpv::scan_watch_later(config, home)
+        .entries
+        .iter()
+        .map(|e| e.mtime)
+        .collect();
+    entry_mtimes.extend(
+        script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)
+            .iter()
+            .map(|e| e.mtime),
+    );
+    results.push(doctor::check_entry_timestamps(
+        &entry_mtimes,
+        std::time::SystemTime::now(),
+    ));
+
     if presence.flatpak {
         let flatpak_cli_present = launch::program_on_path("flatpak");
         let permissions_output = if flatpak_cli_present {

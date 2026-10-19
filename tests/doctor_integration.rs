@@ -175,3 +175,79 @@ fn doctor_prints_the_local_version_banner_first_with_no_network_involved() {
         "expected doctor's first line to be {expected:?}, got:\n{stdout}"
     );
 }
+
+/// Tracked root with one series, mpv never spawned, and one script-log entry stamped `offset_seconds` from now.
+fn home_with_a_script_log_entry(home: &Path, offset_seconds: i64) -> std::path::PathBuf {
+    let ep = home.join("Anime/Monster/ep01.mkv");
+    fs::create_dir_all(ep.parent().unwrap()).unwrap();
+    fs::File::create(&ep).unwrap();
+    assert!(run(home, &["add", "~/Anime"]).status.success());
+    let config_path = home.join(".config/tsuzuki/config.toml");
+    let patched = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("command_override = \"\"", "command_override = \"true\"");
+    fs::write(&config_path, patched).unwrap();
+
+    let log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&log_dir).unwrap();
+    let entry = log_dir.join("e1");
+    fs::write(
+        &entry,
+        format!(
+            "# {}\nduration=1420\nposition=300\nreason=quit\n",
+            ep.display()
+        ),
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now();
+    let when = if offset_seconds >= 0 {
+        now + std::time::Duration::from_secs(offset_seconds as u64)
+    } else {
+        now - std::time::Duration::from_secs(offset_seconds.unsigned_abs())
+    };
+    fs::File::options()
+        .write(true)
+        .open(&entry)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    entry
+}
+
+#[test]
+fn doctor_warns_about_a_future_dated_entry_without_touching_state() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    home_with_a_script_log_entry(home, 86_400);
+
+    let doctor = run(home, &["doctor"]);
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+
+    assert!(
+        stdout.contains(
+            "⚠ mpv timestamps — 1 entry dated in the future, which can reactivate dropped series\n  → check the system clock"
+        ),
+        "got:\n{stdout}"
+    );
+    let state_path = home.join(".local/share/tsuzuki/state.toml");
+    let state = fs::read_to_string(&state_path).unwrap_or_default();
+    assert!(
+        state.contains("position_seconds = 300.0"),
+        "doctor still reconciles like every state command, got:\n{state}"
+    );
+}
+
+#[test]
+fn doctor_reports_timestamps_ok_when_no_entry_is_in_the_future() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    home_with_a_script_log_entry(home, -60);
+
+    let doctor = run(home, &["doctor"]);
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+
+    assert!(
+        stdout.contains("✓ mpv timestamps — none dated in the future"),
+        "got:\n{stdout}"
+    );
+}

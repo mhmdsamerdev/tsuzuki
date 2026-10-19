@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::config::Config;
 use crate::mpv;
@@ -265,6 +266,24 @@ pub fn check_watch_later(config: &Config, home: Option<&Path>) -> CheckResult {
     CheckResult::ok("watch-later", "storage available")
 }
 
+// --- 1c-bis. entry timestamps ---
+
+/// Warns when any tracked-root mpv entry (`mtimes`) is dated after `now`.
+/// Report only: reconcile treats such an entry like any other, so a clock that
+/// ran ahead can make a `drop` look undone until the clock catches up.
+pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> CheckResult {
+    let future = mtimes.iter().filter(|&&mtime| mtime > now).count();
+    if future == 0 {
+        return CheckResult::ok("mpv timestamps", "none dated in the future");
+    }
+    let noun = if future == 1 { "entry" } else { "entries" };
+    CheckResult::warn(
+        "mpv timestamps",
+        format!("{future} {noun} dated in the future, which can reactivate dropped series"),
+    )
+    .with_action("check the system clock")
+}
+
 // --- 1d. Flatpak filesystem-permission gap ---
 
 /// Best-effort check that Flatpak mpv can reach the tracked roots, from a
@@ -518,6 +537,7 @@ mod tests {
     use super::*;
     use crate::state::{SeriesRecord, Status};
     use std::fs as std_fs;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     // --- CheckResult::render, combine ---
@@ -1352,6 +1372,62 @@ mod tests {
                 root: anime.to_string_lossy().into_owned(),
                 name: "Rewatch".to_string(),
             }]
+        );
+    }
+
+    // --- 1c-bis: entry timestamps ---
+
+    #[test]
+    fn entry_timestamps_with_no_entries_is_ok() {
+        let now = SystemTime::now();
+        let r = check_entry_timestamps(&[], now);
+        assert_eq!(
+            r,
+            CheckResult::ok("mpv timestamps", "none dated in the future")
+        );
+    }
+
+    #[test]
+    fn entry_timestamps_at_or_before_now_is_ok() {
+        let now = SystemTime::now();
+        let past = now - Duration::from_secs(1);
+        let r = check_entry_timestamps(&[past, now], now);
+        assert_eq!(
+            r,
+            CheckResult::ok("mpv timestamps", "none dated in the future")
+        );
+    }
+
+    #[test]
+    fn entry_timestamps_one_second_after_now_warns_with_the_clock_action() {
+        let now = SystemTime::now();
+        let r = check_entry_timestamps(&[now + Duration::from_secs(1)], now);
+        assert_eq!(
+            r,
+            CheckResult::warn(
+                "mpv timestamps",
+                "1 entry dated in the future, which can reactivate dropped series"
+            )
+            .with_action("check the system clock")
+        );
+    }
+
+    #[test]
+    fn entry_timestamps_counts_only_the_future_ones_among_mixed_entries() {
+        let now = SystemTime::now();
+        let mtimes = [
+            now - Duration::from_secs(60),
+            now + Duration::from_secs(60),
+            now + Duration::from_secs(86_400),
+        ];
+        let r = check_entry_timestamps(&mtimes, now);
+        assert_eq!(
+            r,
+            CheckResult::warn(
+                "mpv timestamps",
+                "2 entries dated in the future, which can reactivate dropped series"
+            )
+            .with_action("check the system clock")
         );
     }
 }
