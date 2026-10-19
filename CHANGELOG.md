@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- Watching a dropped or completed series again now reactivates it, including finishing an episode.
 - `sync exclude <series|root>` keeps a series, or every series under a root, out of MAL sync.
 
 ## [v0.1.4]

@@ -158,3 +158,111 @@ fn corrupt_state_toml_errors_without_panic_and_is_not_overwritten() {
         "this is = not [toml\n"
     );
 }
+
+fn mpv_log_dir(home: &Path) -> std::path::PathBuf {
+    let dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Writes a script-log entry and stamps its mtime `offset_seconds` from now.
+fn write_log_entry(home: &Path, name: &str, source: &Path, body: &str, offset_seconds: i64) {
+    let path = mpv_log_dir(home).join(name);
+    fs::write(&path, format!("# {}\n{body}", source.display())).unwrap();
+    let now = std::time::SystemTime::now();
+    let when = if offset_seconds >= 0 {
+        now + std::time::Duration::from_secs(offset_seconds as u64)
+    } else {
+        now - std::time::Duration::from_secs(offset_seconds.unsigned_abs())
+    };
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn state_text(home: &Path) -> String {
+    fs::read_to_string(state_file(home)).unwrap()
+}
+
+#[test]
+fn dropped_series_stays_dropped_on_a_leftover_reading_and_resumes_on_a_fresh_one() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = library(home);
+    let ep01 = root.join("Monster/ep01.mkv");
+
+    fs::write(
+        watch_later_dir(home).join("abc"),
+        format!("# {}\nstart=300\n", ep01.display()),
+    )
+    .unwrap();
+    assert!(run(home, &["list"]).status.success());
+    assert!(run(home, &["drop", "Monster"]).status.success());
+    assert!(state_text(home).contains("status = \"dropped\""));
+
+    // Quit 97s before the end of EP01, but written before the drop.
+    let quit = "duration=1551.551000\nposition=1454.474000\nreason=quit\n";
+    write_log_entry(home, "e1", &ep01, quit, -3600);
+    assert!(run(home, &["list"]).status.success());
+    let state = state_text(home);
+    assert!(state.contains("status = \"dropped\""), "{state}");
+    assert!(state.contains("position_seconds = 300.0"), "{state}");
+
+    // The same reading written after the drop is new watching.
+    write_log_entry(home, "e1", &ep01, quit, 3600);
+    assert!(run(home, &["list"]).status.success());
+    let state = state_text(home);
+    assert!(state.contains("status = \"in_progress\""), "{state}");
+    assert!(
+        state.contains("current_relative_path = \"Monster/ep02.mkv\""),
+        "{state}"
+    );
+    assert!(state.contains("position_seconds = 0.0"), "{state}");
+}
+
+#[test]
+fn completed_series_rewatched_mid_episode_is_in_progress_at_that_position() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = library(home);
+    let ep01 = root.join("Monster/ep01.mkv");
+    let ep02 = root.join("Monster/ep02.mkv");
+
+    fs::write(
+        watch_later_dir(home).join("abc"),
+        format!("# {}\nstart=300\n", ep01.display()),
+    )
+    .unwrap();
+    assert!(run(home, &["list"]).status.success());
+    // mpv deletes a bookmark when the file is reopened.
+    fs::remove_file(watch_later_dir(home).join("abc")).unwrap();
+    write_log_entry(
+        home,
+        "last",
+        &ep02,
+        "duration=1420\nposition=1415\nreason=eof\n",
+        0,
+    );
+    assert!(run(home, &["list"]).status.success());
+    assert!(state_text(home).contains("status = \"completed\""));
+
+    // Months later: stop EP01 ten minutes in.
+    write_log_entry(
+        home,
+        "again",
+        &ep01,
+        "duration=1420\nposition=600\nreason=quit\n",
+        3600,
+    );
+    assert!(run(home, &["list"]).status.success());
+    let state = state_text(home);
+    assert!(state.contains("status = \"in_progress\""), "{state}");
+    assert!(
+        state.contains("current_relative_path = \"Monster/ep01.mkv\""),
+        "{state}"
+    );
+    assert!(state.contains("position_seconds = 600.0"), "{state}");
+}
