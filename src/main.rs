@@ -1110,6 +1110,20 @@ fn ensure_sync_access_token(
     .map_err(|e| fail(&e.to_string()))
 }
 
+/// Wraps `inner` so a 401 mid-run refreshes the token once and retries.
+fn refreshing_client<'a>(
+    inner: &'a dyn mal::MalHttpClient,
+    config: &Config,
+) -> Result<mal::RefreshOn401Client<'a>, ExitCode> {
+    let token_path = mal::mal_token_path()
+        .map_err(|e| fail(&format!("could not resolve MAL token path: {e}")))?;
+    Ok(mal::RefreshOn401Client::new(
+        inner,
+        token_path,
+        mal::resolve_client_id(config),
+    ))
+}
+
 /// `tsuzuki sync` (bare): links each eligible series if not yet linked, then
 /// merges progress. Paused and orphaned records are filtered before MAL
 /// authentication, so nothing eligible means no network work. One series
@@ -1130,9 +1144,13 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         return ExitCode::SUCCESS;
     }
 
-    let client = mal::UreqClient;
-    let access_token = match ensure_sync_access_token(&client, config) {
+    let ureq_client = mal::UreqClient;
+    let access_token = match ensure_sync_access_token(&ureq_client, config) {
         Ok(t) => t,
+        Err(code) => return code,
+    };
+    let client = match refreshing_client(&ureq_client, config) {
+        Ok(c) => c,
         Err(code) => return code,
     };
 
@@ -1201,6 +1219,9 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         "Sync complete: {}",
         sync_summary_line(synced, needs_linking, failed)
     );
+    if client.refresh_failed() {
+        eprintln!("⚠ MyAnimeList rejected the stored token — run `tsuzuki sync login` again");
+    }
 
     if failed > 0 {
         ExitCode::FAILURE
@@ -1292,9 +1313,13 @@ fn sync_link_command(
         Err(e) => return print_target_error(&e, "sync link"),
     };
 
-    let client = mal::UreqClient;
-    let access_token = match ensure_sync_access_token(&client, config) {
+    let ureq_client = mal::UreqClient;
+    let access_token = match ensure_sync_access_token(&ureq_client, config) {
         Ok(t) => t,
+        Err(code) => return code,
+    };
+    let client = match refreshing_client(&ureq_client, config) {
+        Ok(c) => c,
         Err(code) => return code,
     };
 

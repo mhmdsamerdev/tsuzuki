@@ -594,6 +594,106 @@ fn ensure_token(
     }
 }
 
+/// Wraps a client so a `401` from the data API (MAL's `expires_in` is not
+/// trustworthy, so the stored expiry can claim a dead token is valid)
+/// refreshes the token once and retries the call. Later calls use the
+/// refreshed token; a failed refresh is not retried.
+pub struct RefreshOn401Client<'a> {
+    inner: &'a dyn MalHttpClient,
+    token_path: PathBuf,
+    client_id: String,
+    state: std::cell::RefCell<RefreshState>,
+}
+
+enum RefreshState {
+    Untried,
+    Refreshed(String),
+    Failed,
+}
+
+impl<'a> RefreshOn401Client<'a> {
+    pub fn new(
+        inner: &'a dyn MalHttpClient,
+        token_path: PathBuf,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            token_path,
+            client_id: client_id.into(),
+            state: std::cell::RefCell::new(RefreshState::Untried),
+        }
+    }
+
+    /// Whether MAL answered 401 and the stored refresh token could not fix it.
+    pub fn refresh_failed(&self) -> bool {
+        matches!(*self.state.borrow(), RefreshState::Failed)
+    }
+
+    fn refresh(&self) -> Option<String> {
+        let stored = read_token(&self.token_path).ok().flatten()?;
+        let refreshed = refresh_with_token(
+            self.inner,
+            &self.client_id,
+            &stored.refresh_token,
+            crate::state::now_unix(),
+        )
+        .ok()?;
+        let _ = write_token(&self.token_path, &refreshed);
+        Some(refreshed.access_token)
+    }
+
+    fn authorized(
+        &self,
+        bearer_token: &str,
+        call: &dyn Fn(&str) -> Result<HttpResponse, HttpError>,
+    ) -> Result<HttpResponse, HttpError> {
+        let current = match &*self.state.borrow() {
+            RefreshState::Refreshed(token) => token.clone(),
+            _ => bearer_token.to_string(),
+        };
+        let resp = call(&current)?;
+        if resp.status != 401 || !matches!(*self.state.borrow(), RefreshState::Untried) {
+            return Ok(resp);
+        }
+        match self.refresh() {
+            Some(token) => {
+                let retried = call(&token);
+                *self.state.borrow_mut() = RefreshState::Refreshed(token);
+                retried
+            }
+            None => {
+                *self.state.borrow_mut() = RefreshState::Failed;
+                Ok(resp)
+            }
+        }
+    }
+}
+
+impl MalHttpClient for RefreshOn401Client<'_> {
+    fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
+        self.inner.post_form(url, params)
+    }
+
+    fn get(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        query: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError> {
+        self.authorized(bearer_token, &|t| self.inner.get(url, t, query))
+    }
+
+    fn patch_form(
+        &self,
+        url: &str,
+        bearer_token: &str,
+        params: &[(&str, &str)],
+    ) -> Result<HttpResponse, HttpError> {
+        self.authorized(bearer_token, &|t| self.inner.patch_form(url, t, params))
+    }
+}
+
 /// Why no usable access token could be produced; fatal to a whole sync run.
 #[derive(Debug)]
 pub enum AccessTokenError {
@@ -1093,6 +1193,202 @@ mod tests {
         };
         let status = token_status(&client, &path, "client-id", now);
         assert!(matches!(status, TokenStatus::NetworkError(_)));
+    }
+
+    // --- 401 recovery: the clock says valid, MAL says expired ---
+
+    /// Data API accepts only `valid_bearer`; the token endpoint answers
+    /// `refresh_response`. Records every bearer seen and the post count.
+    struct StaleTokenClient {
+        valid_bearer: &'static str,
+        refresh_response: Result<HttpResponse, String>,
+        bearers_seen: std::cell::RefCell<Vec<String>>,
+        posts: std::cell::Cell<u32>,
+    }
+
+    impl StaleTokenClient {
+        fn new(valid_bearer: &'static str, refresh_response: Result<HttpResponse, String>) -> Self {
+            Self {
+                valid_bearer,
+                refresh_response,
+                bearers_seen: Default::default(),
+                posts: Default::default(),
+            }
+        }
+
+        fn data_response(&self, bearer: &str) -> Result<HttpResponse, HttpError> {
+            self.bearers_seen.borrow_mut().push(bearer.to_string());
+            if bearer == self.valid_bearer {
+                Ok(HttpResponse {
+                    status: 200,
+                    body: "{}".to_string(),
+                })
+            } else {
+                Ok(HttpResponse {
+                    status: 401,
+                    body: r#"{"error":"invalid_token"}"#.to_string(),
+                })
+            }
+        }
+    }
+
+    impl MalHttpClient for StaleTokenClient {
+        fn post_form(
+            &self,
+            _url: &str,
+            _params: &[(&str, &str)],
+        ) -> Result<HttpResponse, HttpError> {
+            self.posts.set(self.posts.get() + 1);
+            match &self.refresh_response {
+                Ok(r) => Ok(HttpResponse {
+                    status: r.status,
+                    body: r.body.clone(),
+                }),
+                Err(m) => Err(HttpError(m.clone())),
+            }
+        }
+
+        fn get(
+            &self,
+            _url: &str,
+            bearer_token: &str,
+            _query: &[(&str, &str)],
+        ) -> Result<HttpResponse, HttpError> {
+            self.data_response(bearer_token)
+        }
+
+        fn patch_form(
+            &self,
+            _url: &str,
+            bearer_token: &str,
+            _params: &[(&str, &str)],
+        ) -> Result<HttpResponse, HttpError> {
+            self.data_response(bearer_token)
+        }
+    }
+
+    fn stale_token_file(dir: &Path) -> PathBuf {
+        let path = dir.join("mal_token.toml");
+        write_token(
+            &path,
+            &TokenRecord {
+                access_token: "stale".to_string(),
+                refresh_token: "old-refresh".to_string(),
+                expires_at: u64::MAX / 2, // the clock claims it is valid
+            },
+        )
+        .unwrap();
+        path
+    }
+
+    fn refresh_ok() -> Result<HttpResponse, String> {
+        Ok(HttpResponse {
+            status: 200,
+            body: fake_success_body("fresh", "new-refresh", 3600),
+        })
+    }
+
+    #[test]
+    fn data_call_with_stale_token_refreshes_retries_and_persists_the_new_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let inner = StaleTokenClient::new("fresh", refresh_ok());
+        let client = RefreshOn401Client::new(&inner, path.clone(), "client-id");
+
+        let resp = client.get("https://x/list", "stale", &[]).unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert_eq!(*inner.bearers_seen.borrow(), vec!["stale", "fresh"]);
+        assert_eq!(inner.posts.get(), 1);
+        let persisted = read_token(&path).unwrap().unwrap();
+        assert_eq!(persisted.access_token, "fresh");
+        assert_eq!(persisted.refresh_token, "new-refresh");
+        assert!(!client.refresh_failed());
+    }
+
+    #[test]
+    fn later_calls_reuse_the_refreshed_token_without_another_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let inner = StaleTokenClient::new("fresh", refresh_ok());
+        let client = RefreshOn401Client::new(&inner, path, "client-id");
+
+        client.get("https://x/a", "stale", &[]).unwrap();
+        let resp = client.patch_form("https://x/b", "stale", &[]).unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert_eq!(
+            *inner.bearers_seen.borrow(),
+            vec!["stale", "fresh", "fresh"]
+        );
+        assert_eq!(inner.posts.get(), 1);
+    }
+
+    #[test]
+    fn rejected_refresh_returns_the_401_and_leaves_the_stored_token_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let inner = StaleTokenClient::new(
+            "fresh",
+            Ok(HttpResponse {
+                status: 400,
+                body: r#"{"error":"invalid_grant"}"#.to_string(),
+            }),
+        );
+        let client = RefreshOn401Client::new(&inner, path.clone(), "client-id");
+
+        let first = client.get("https://x/a", "stale", &[]).unwrap();
+        let second = client.get("https://x/b", "stale", &[]).unwrap();
+
+        assert_eq!((first.status, second.status), (401, 401));
+        assert!(client.refresh_failed());
+        assert_eq!(inner.posts.get(), 1, "a dead refresh token is tried once");
+        assert_eq!(read_token(&path).unwrap().unwrap().access_token, "stale");
+    }
+
+    #[test]
+    fn still_unauthorized_after_a_refresh_is_returned_without_a_second_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let inner = StaleTokenClient::new("never-issued", refresh_ok());
+        let client = RefreshOn401Client::new(&inner, path, "client-id");
+
+        let resp = client.get("https://x/a", "stale", &[]).unwrap();
+
+        assert_eq!(resp.status, 401);
+        assert_eq!(inner.posts.get(), 1);
+        assert_eq!(*inner.bearers_seen.borrow(), vec!["stale", "fresh"]);
+    }
+
+    #[test]
+    fn non_401_failures_never_trigger_a_refresh() {
+        struct Forbidden;
+        impl MalHttpClient for Forbidden {
+            fn post_form(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
+                panic!("must not refresh on 403");
+            }
+            fn get(&self, _: &str, _: &str, _: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
+                Ok(HttpResponse {
+                    status: 403,
+                    body: "forbidden".to_string(),
+                })
+            }
+            fn patch_form(
+                &self,
+                _: &str,
+                _: &str,
+                _: &[(&str, &str)],
+            ) -> Result<HttpResponse, HttpError> {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let client = RefreshOn401Client::new(&Forbidden, path, "client-id");
+
+        let resp = client.get("https://x/a", "stale", &[]).unwrap();
+
+        assert_eq!(resp.status, 403);
     }
 
     #[test]
