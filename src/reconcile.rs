@@ -427,10 +427,13 @@ fn reconcile_one_series(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| name.to_string());
 
+    // Readings that reach here for a dropped or completed record are already
+    // newer than it, so even an identical one is new watching.
     let changed = match existing_index {
         Some(i) => {
             let record = &state.series[i];
-            record.current_relative_path != new_relative
+            cutoff.is_some()
+                || record.current_relative_path != new_relative
                 || (record.position_seconds - position).abs() > f64::EPSILON
         }
         None => true,
@@ -814,43 +817,64 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_series_with_an_unchanged_bookmark_stays_dropped_across_reconcile_calls() {
-        // An unchanged bookmark must never reactivate a dropped series, however
+    fn a_dropped_series_with_a_bookmark_older_than_the_drop_stays_dropped_across_reconcile_calls() {
+        // A leftover bookmark must never reactivate a dropped series, however
         // many times reconcile runs.
         let dir = tempdir().unwrap();
-        let root = dir.path().join("Anime");
-        let series_path = root.join("One Piece");
-        touch(&series_path.join("ep01.mkv"));
-        touch(&series_path.join("ep02.mkv"));
-
-        let mut config = default_config(&root);
-        let watch_later = dir.path().join("watch_later");
-        with_watch_later_override(&mut config, &watch_later);
-        write_entry(&watch_later, "entry1", &series_path.join("ep01.mkv"), 300.0);
-
+        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
+        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+        set_mtime(&watch_later.join("w1"), at(CUTOFF - 60));
+        let original = record_at(
+            &root,
+            "Monster",
+            Status::Dropped,
+            "Monster/ep01.mkv",
+            300.0,
+            1,
+        );
         let mut state = State {
-            series: vec![SeriesRecord {
-                root: root.to_string_lossy().into_owned(),
-                name: "One Piece".to_string(),
-                status: Status::Dropped,
-                current_relative_path: "One Piece/ep01.mkv".to_string(),
-                position_seconds: 300.0,
-                episode_number: Some(1),
-                updated_at: 1,
-                mal_episode_awareness: None,
-                season_number: None,
-            }],
-
+            series: vec![original.clone()],
             mal_links: Vec::new(),
         };
 
-        // Two reconciles with the mpv file untouched.
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
-        reconcile_with_script_log_dirs(&config, &mut state, None, &[]);
+        run_reconcile(&config, &mut state, &log_dir);
+        run_reconcile(&config, &mut state, &log_dir);
 
-        let record = state.find(&root.to_string_lossy(), "One Piece").unwrap();
-        assert_eq!(record.status, Status::Dropped);
-        assert_eq!(record.updated_at, 1, "no genuine change occurred");
+        assert_eq!(state.series, vec![original]);
+    }
+
+    #[test]
+    fn dropped_or_completed_record_reopened_at_the_stored_position_becomes_in_progress() {
+        // Reopening and quitting right away rewrites the bookmark with the
+        // same path and position; after the drop that is still new watching.
+        for status in [Status::Dropped, Status::Completed] {
+            let dir = tempdir().unwrap();
+            let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
+            write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+            set_mtime(&watch_later.join("w1"), at(CUTOFF + 60));
+            let mut state = State {
+                series: vec![record_at(
+                    &root,
+                    "Monster",
+                    status,
+                    "Monster/ep01.mkv",
+                    300.0,
+                    1,
+                )],
+                mal_links: Vec::new(),
+            };
+
+            run_reconcile(&config, &mut state, &log_dir);
+
+            let record = &state.series[0];
+            assert_eq!(record.status, Status::InProgress, "{status:?}");
+            assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+            assert_eq!(record.position_seconds, 300.0);
+            assert!(
+                record.updated_at > CUTOFF,
+                "{status:?} must record the change"
+            );
+        }
     }
 
     #[test]
@@ -3018,5 +3042,276 @@ mod tests {
 
         assert_eq!(state.series[0].status, Status::InProgress);
         assert_eq!(state.series[0].current_relative_path, "Monster/ep02.mkv");
+    }
+
+    #[test]
+    fn dropped_record_with_a_future_dated_reading_counts_it_as_fresh() {
+        // Pins current behavior: freshness is only "newer than `updated_at`",
+        // so a clock-skewed entry from the future reactivates the record.
+        let dir = tempdir().unwrap();
+        let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+        script_entry_at(
+            &log_dir,
+            "e1",
+            &series_path.join("ep01.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+            CUTOFF + 10 * 365 * 86_400,
+        );
+        let mut state = State {
+            series: vec![record_at(
+                &root,
+                "Monster",
+                Status::Dropped,
+                "Monster/ep01.mkv",
+                139.994,
+                1,
+            )],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(state.series[0].current_relative_path, "Monster/ep02.mkv");
+    }
+
+    #[test]
+    fn dropped_record_takes_the_fresher_source_and_ignores_a_stale_one() {
+        // (watch_later mtime, script mtime, expected position on EP01).
+        // The script entry is a `quit` at 600s of a long file; watch_later 300s.
+        let cases: [(u64, u64, Option<f64>); 4] = [
+            (CUTOFF + 10, CUTOFF + 20, Some(600.0)), // both fresh, script newer
+            (CUTOFF + 20, CUTOFF + 10, Some(300.0)), // both fresh, watch_later newer
+            (CUTOFF - 20, CUTOFF + 10, Some(600.0)), // only the script is fresh
+            (CUTOFF - 10, CUTOFF - 20, None),        // both stale
+        ];
+        for (wl_mtime, script_mtime, expected) in cases {
+            let dir = tempdir().unwrap();
+            let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
+            write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+            set_mtime(&watch_later.join("w1"), at(wl_mtime));
+            script_entry_at(
+                &log_dir,
+                "e1",
+                &series_path.join("ep01.mkv"),
+                Some(5000.0),
+                Some(600.0),
+                "quit",
+                script_mtime,
+            );
+            let original = record_at(
+                &root,
+                "Monster",
+                Status::Dropped,
+                "Monster/ep01.mkv",
+                139.994,
+                1,
+            );
+            let mut state = State {
+                series: vec![original.clone()],
+                mal_links: Vec::new(),
+            };
+
+            run_reconcile(&config, &mut state, &log_dir);
+
+            match expected {
+                Some(position) => {
+                    assert_eq!(
+                        state.series[0].status,
+                        Status::InProgress,
+                        "{wl_mtime} {script_mtime}"
+                    );
+                    assert_eq!(
+                        state.series[0].position_seconds, position,
+                        "{wl_mtime} {script_mtime}"
+                    );
+                }
+                None => assert_eq!(state.series[0], original, "{wl_mtime} {script_mtime}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_script_reading_on_a_dropped_record_by_reason_and_duration() {
+        // Position 1454s. With a known 1551s duration the 97s remaining is
+        // inside the completion window for every reason; without one (an
+        // empty file has no probeable duration) only `eof` is a finish.
+        let reasons = ["eof", "quit", "stop", "error", "unknown"];
+        for reason in reasons {
+            for duration in [Some(1551.0), None] {
+                let dir = tempdir().unwrap();
+                let (root, series_path, config, _, log_dir) = monster_library(dir.path(), 2);
+                script_entry_at(
+                    &log_dir,
+                    "e1",
+                    &series_path.join("ep01.mkv"),
+                    duration,
+                    Some(1454.0),
+                    reason,
+                    CUTOFF + 60,
+                );
+                let mut state = State {
+                    series: vec![record_at(
+                        &root,
+                        "Monster",
+                        Status::Dropped,
+                        "Monster/ep01.mkv",
+                        139.994,
+                        1,
+                    )],
+                    mal_links: Vec::new(),
+                };
+
+                run_reconcile(&config, &mut state, &log_dir);
+
+                let record = &state.series[0];
+                let finished = reason == "eof" || duration.is_some();
+                let label = format!("{reason} {duration:?}");
+                assert_eq!(record.status, Status::InProgress, "{label}");
+                if finished {
+                    assert_eq!(record.current_relative_path, "Monster/ep02.mkv", "{label}");
+                    assert_eq!(record.position_seconds, 0.0, "{label}");
+                } else {
+                    assert_eq!(record.current_relative_path, "Monster/ep01.mkv", "{label}");
+                    assert_eq!(record.position_seconds, 1454.0, "{label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paused_record_with_a_reading_older_than_it_and_equal_to_its_position_is_unchanged() {
+        // Paused has no freshness cutoff; the stored position protects it.
+        let dir = tempdir().unwrap();
+        let (root, series_path, config, watch_later, log_dir) = monster_library(dir.path(), 2);
+        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+        set_mtime(&watch_later.join("w1"), at(CUTOFF - 60));
+        let original = record_at(
+            &root,
+            "Monster",
+            Status::Paused,
+            "Monster/ep01.mkv",
+            300.0,
+            1,
+        );
+        let mut state = State {
+            series: vec![original.clone()],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series, vec![original]);
+    }
+
+    #[test]
+    fn reactivated_record_is_not_idle_paused_in_the_same_reconcile() {
+        // Ancient dropped record, fresh reading, `auto_pause_days = 1`:
+        // reactivation stamps `updated_at = now`, so the idle pass skips it.
+        let dir = tempdir().unwrap();
+        let (root, series_path, mut config, watch_later, log_dir) = monster_library(dir.path(), 2);
+        config.thresholds.auto_pause_days = 1;
+        write_entry(&watch_later, "w1", &series_path.join("ep01.mkv"), 300.0);
+        let mut ancient = record_at(
+            &root,
+            "Monster",
+            Status::Dropped,
+            "Monster/ep01.mkv",
+            139.994,
+            1,
+        );
+        ancient.updated_at = 1;
+        let mut state = State {
+            series: vec![ancient],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(state.series[0].position_seconds, 300.0);
+    }
+
+    #[test]
+    fn dropped_record_walks_across_season_directories_on_a_fresh_eof() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let series_path = root.join("Monster");
+        for file in [
+            "Season 1/ep01.mkv",
+            "Season 1/ep02.mkv",
+            "Season 2/ep01.mkv",
+        ] {
+            touch(&series_path.join(file));
+        }
+        let mut config = default_config(&root);
+        let watch_later = dir.path().join("watch_later");
+        fs::create_dir_all(&watch_later).unwrap();
+        with_watch_later_override(&mut config, &watch_later);
+        let log_dir = dir.path().join("mpv-log");
+        script_entry_at(
+            &log_dir,
+            "e2",
+            &series_path.join("Season 1/ep02.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+            CUTOFF + 60,
+        );
+        let mut state = State {
+            series: vec![record_at(
+                &root,
+                "Monster",
+                Status::Completed,
+                "Monster/Season 2/ep01.mkv",
+                1400.0,
+                1,
+            )],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        let record = &state.series[0];
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/Season 2/ep01.mkv");
+        assert_eq!(record.position_seconds, 0.0);
+    }
+
+    #[test]
+    fn dropped_record_ignores_a_fresh_reading_on_an_excluded_episode() {
+        let dir = tempdir().unwrap();
+        let (root, series_path, mut config, _, log_dir) = monster_library(dir.path(), 2);
+        config.exclusions.push(crate::config::Exclusion {
+            root: root.to_string_lossy().into_owned(),
+            path: "Monster/ep02.mkv".to_string(),
+        });
+        script_entry_at(
+            &log_dir,
+            "e2",
+            &series_path.join("ep02.mkv"),
+            Some(1420.0),
+            Some(1415.0),
+            "eof",
+            CUTOFF + 60,
+        );
+        let original = record_at(
+            &root,
+            "Monster",
+            Status::Dropped,
+            "Monster/ep01.mkv",
+            139.994,
+            1,
+        );
+        let mut state = State {
+            series: vec![original.clone()],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series, vec![original]);
     }
 }
