@@ -8,6 +8,7 @@ All notable changes to Tsuzuki are documented here.
 - Watching a dropped or completed series again now reactivates it, including finishing an episode.
 - `sync exclude <series|root>` keeps a series, or every series under a root, out of MAL sync.
 - `sync` refreshes the MAL token and retries when MAL answers 401 instead of failing every series.
+- `sync` stops with one short message when MyAnimeList is unreachable instead of repeating a long error per series.
 
 ## [v0.1.4]
 

@@ -231,7 +231,7 @@ pub enum SyncApiError {
 impl fmt::Display for SyncApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SyncApiError::Transport(m) => write!(f, "network error contacting MyAnimeList: {m}"),
+            SyncApiError::Transport(m) => write!(f, "can't reach MyAnimeList: {m}"),
             SyncApiError::Rejected(m) => write!(f, "MyAnimeList rejected the request: {m}"),
             SyncApiError::Parse(m) => write!(f, "could not parse MyAnimeList's response: {m}"),
         }
@@ -751,6 +751,9 @@ pub enum OutcomeKind {
     EmptyList,
     /// Any failure for this series; the rest of the run continues.
     Failed(String),
+    /// MAL could not be reached (the reason is URL-free). The run stops here,
+    /// so later series have no outcome.
+    Unreachable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -846,6 +849,19 @@ pub fn run_sync(
     )
 }
 
+/// The outcome for a series whose MAL call failed with `e`.
+fn failure_outcome(root: &str, name: &str, e: &SyncApiError) -> SeriesOutcome {
+    let kind = match e {
+        SyncApiError::Transport(reason) => OutcomeKind::Unreachable(reason.clone()),
+        _ => OutcomeKind::Failed(e.to_string()),
+    };
+    SeriesOutcome {
+        root: root.to_string(),
+        name: name.to_string(),
+        kind,
+    }
+}
+
 /// [`run_sync`] with the date injected for tests.
 fn run_sync_on_date(
     client: &dyn MalHttpClient,
@@ -868,6 +884,11 @@ fn run_sync_on_date(
     } else {
         None
     };
+
+    if let Some(Err(e @ SyncApiError::Transport(_))) = &list {
+        let (root, name) = &targets[0];
+        return vec![failure_outcome(root, name, e)];
+    }
 
     let mut outcomes = Vec::with_capacity(targets.len());
     let mut is_first_call = list.is_none(); // the list fetch, if any, used the first slot
@@ -923,11 +944,15 @@ fn run_sync_on_date(
                                         kind: OutcomeKind::Merged { mal_id: id, action },
                                     });
                                 }
-                                Err(e) => outcomes.push(SeriesOutcome {
-                                    root: root.clone(),
-                                    name: name.clone(),
-                                    kind: OutcomeKind::Failed(e.to_string()),
-                                }),
+                                Err(e) => {
+                                    let outcome = failure_outcome(root, name, &e);
+                                    let unreachable =
+                                        matches!(outcome.kind, OutcomeKind::Unreachable(_));
+                                    outcomes.push(outcome);
+                                    if unreachable {
+                                        break;
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -948,11 +973,7 @@ fn run_sync_on_date(
                     }
                 }
                 Some(Err(e)) => {
-                    outcomes.push(SeriesOutcome {
-                        root: root.clone(),
-                        name: name.clone(),
-                        kind: OutcomeKind::Failed(e.to_string()),
-                    });
+                    outcomes.push(failure_outcome(root, name, e));
                     continue;
                 }
                 None => unreachable!(
@@ -983,11 +1004,14 @@ fn run_sync_on_date(
                     kind: OutcomeKind::Merged { mal_id, action },
                 });
             }
-            Err(e) => outcomes.push(SeriesOutcome {
-                root: root.clone(),
-                name: name.clone(),
-                kind: OutcomeKind::Failed(e.to_string()),
-            }),
+            Err(e) => {
+                let outcome = failure_outcome(root, name, &e);
+                let unreachable = matches!(outcome.kind, OutcomeKind::Unreachable(_));
+                outcomes.push(outcome);
+                if unreachable {
+                    break;
+                }
+            }
         }
     }
 
@@ -1982,6 +2006,135 @@ mod tests {
         assert_eq!(working.mal_episode_awareness, Some(50));
     }
 
+    fn two_linked_series_state() -> State {
+        let mut first = base_record();
+        first.name = "Show A".to_string();
+        let mut second = base_record();
+        second.name = "Show B".to_string();
+        let mut third = base_record();
+        third.name = "Show C".to_string();
+        State {
+            series: vec![first, second, third],
+            mal_links: ["Show A", "Show B", "Show C"]
+                .iter()
+                .zip(1..)
+                .map(|(name, mal_id)| MalLink {
+                    root: "~/Anime".to_string(),
+                    name: name.to_string(),
+                    mal_id,
+                })
+                .collect(),
+        }
+    }
+
+    fn targets_abc() -> Vec<(String, String)> {
+        ["Show A", "Show B", "Show C"]
+            .iter()
+            .map(|n| ("~/Anime".to_string(), n.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn run_sync_transport_error_stops_run_and_skips_remaining_series() {
+        let client = FakeClient::new();
+        client.offline_when_empty.set(true);
+        client.push_status_response(
+            200,
+            r#"{"id":1,"title":"T","my_list_status":{"num_episodes_watched":0}}"#,
+        );
+        let mut state = two_linked_series_state();
+
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &targets_abc(),
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|o| (o.name.as_str(), o.kind.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Show A",
+                    OutcomeKind::Merged {
+                        mal_id: 1,
+                        action: MergeAction::Push(8)
+                    }
+                ),
+                (
+                    "Show B",
+                    OutcomeKind::Unreachable(
+                        "no internet connection (DNS lookup failed)".to_string()
+                    )
+                ),
+            ]
+        );
+        assert_eq!(
+            client.get_calls.borrow().len(),
+            2,
+            "Show C must not be attempted"
+        );
+    }
+
+    #[test]
+    fn run_sync_list_fetch_transport_error_stops_before_any_series() {
+        let client = FakeClient::new();
+        client.offline_when_empty.set(true);
+        let mut state = two_linked_series_state();
+        state.mal_links.truncate(1); // Show B and C unlinked -> list needed
+
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &targets_abc(),
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(
+            outcomes,
+            vec![SeriesOutcome {
+                root: "~/Anime".to_string(),
+                name: "Show A".to_string(),
+                kind: OutcomeKind::Unreachable(
+                    "no internet connection (DNS lookup failed)".to_string()
+                ),
+            }]
+        );
+        assert_eq!(client.get_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn run_sync_rejected_response_still_continues_to_later_series() {
+        let client = FakeClient::new();
+        client.push_status_response(500, "boom");
+        client.push_status_response(500, "boom");
+        client.push_status_response(500, "boom");
+        let mut state = two_linked_series_state();
+
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &targets_abc(),
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| matches!(o.kind, OutcomeKind::Failed(_)))
+        );
+    }
+
     #[test]
     fn list_fetch_failure_fails_every_unlinked_series_but_never_touches_already_linked_ones() {
         let client = FakeClient::new();
@@ -2287,6 +2440,8 @@ mod tests {
         get_calls: RefCell<Vec<String>>,
         patch_calls: RefCell<Vec<(String, String)>>,
         patch_status: std::cell::Cell<u16>,
+        /// When set, a GET with no queued response fails like a dropped connection.
+        offline_when_empty: std::cell::Cell<bool>,
     }
 
     impl FakeClient {
@@ -2296,6 +2451,7 @@ mod tests {
                 get_calls: RefCell::new(Vec::new()),
                 patch_calls: RefCell::new(Vec::new()),
                 patch_status: std::cell::Cell::new(200),
+                offline_when_empty: std::cell::Cell::new(false),
             }
         }
 
@@ -2329,6 +2485,11 @@ mod tests {
         ) -> Result<HttpResponse, HttpError> {
             self.get_calls.borrow_mut().push(url.to_string());
             let mut responses = self.get_responses.borrow_mut();
+            if responses.is_empty() && self.offline_when_empty.get() {
+                return Err(HttpError(
+                    "no internet connection (DNS lookup failed)".into(),
+                ));
+            }
             if responses.is_empty() {
                 panic!("FakeClient: no queued response for get({url})");
             }

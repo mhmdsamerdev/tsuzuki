@@ -1205,8 +1205,11 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
             sync::OutcomeKind::NoExactMatch { .. } | sync::OutcomeKind::EmptyList => {
                 needs_linking += 1;
             }
-            sync::OutcomeKind::Failed(_) => failed += 1,
+            sync::OutcomeKind::Failed(_) | sync::OutcomeKind::Unreachable(_) => failed += 1,
         }
+    }
+    if let Some(line) = sync_skipped_line(targets.len(), outcomes.len()) {
+        detail_lines.push(line);
     }
 
     for line in &detail_lines {
@@ -1250,6 +1253,12 @@ fn sync_summary_line(synced: u32, needs_linking: u32, failed: u32) -> String {
     }
 }
 
+/// Note that an unreachable MAL cut the run short; `None` when nothing was skipped.
+fn sync_skipped_line(targets: usize, reported: usize) -> Option<String> {
+    let skipped = targets.saturating_sub(reported);
+    (skipped > 0).then(|| format!("  {skipped} more skipped — try again when online"))
+}
+
 /// Output lines for one series. A no-op produces none. `✓` is a real
 /// push/pull, `⚠` needs user action, `✗` is a failure.
 fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>) -> Vec<String> {
@@ -1285,6 +1294,9 @@ fn sync_outcome_lines(outcome: &sync::SeriesOutcome, local_advance: Option<u32>)
             vec![format!("⚠ {name} — your MyAnimeList list is empty")]
         }
         sync::OutcomeKind::Failed(msg) => vec![format!("✗ {name} — sync failed: {msg}")],
+        sync::OutcomeKind::Unreachable(reason) => {
+            vec![format!("✗ {name} — can't reach MyAnimeList: {reason}")]
+        }
     }
 }
 
@@ -1639,6 +1651,30 @@ mod tests {
             sync_outcome_lines(&outcome, None),
             vec!["✓ Hinamatsuri — moved to Watching"]
         );
+    }
+
+    #[test]
+    fn unreachable_sync_outcome_renders_one_short_line_and_skipped_note() {
+        let outcome = sync::SeriesOutcome {
+            root: "~/Anime".to_string(),
+            name: "Gurren Lagann".to_string(),
+            kind: sync::OutcomeKind::Unreachable(
+                "no internet connection (DNS lookup failed)".to_string(),
+            ),
+        };
+
+        assert_eq!(
+            sync_outcome_lines(&outcome, None),
+            vec![
+                "✗ Gurren Lagann — can't reach MyAnimeList: no internet connection (DNS lookup failed)"
+            ]
+        );
+        assert_eq!(
+            sync_skipped_line(5, 2),
+            Some("  3 more skipped — try again when online".to_string())
+        );
+        assert_eq!(sync_skipped_line(2, 2), None);
+        assert_eq!(sync_summary_line(1, 0, 1), "1 synced, 1 failed");
     }
 
     /// Writes a `watch_later` entry at `record()`'s stored position (200s) for

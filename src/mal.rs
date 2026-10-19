@@ -434,7 +434,7 @@ impl fmt::Display for TokenExchangeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TokenExchangeError::Transport(m) => {
-                write!(f, "network error contacting MyAnimeList: {m}")
+                write!(f, "can't reach MyAnimeList: {m}")
             }
             TokenExchangeError::Rejected(m) => write!(f, "MyAnimeList rejected the request: {m}"),
             TokenExchangeError::Parse(m) => {
@@ -630,17 +630,25 @@ impl<'a> RefreshOn401Client<'a> {
         matches!(*self.state.borrow(), RefreshState::Failed)
     }
 
-    fn refresh(&self) -> Option<String> {
-        let stored = read_token(&self.token_path).ok().flatten()?;
-        let refreshed = refresh_with_token(
+    /// `Ok(None)` when the stored token can't be refreshed; `Err` when MAL
+    /// couldn't be reached, which says nothing about the token.
+    fn refresh(&self) -> Result<Option<String>, HttpError> {
+        let Some(stored) = read_token(&self.token_path).ok().flatten() else {
+            return Ok(None);
+        };
+        match refresh_with_token(
             self.inner,
             &self.client_id,
             &stored.refresh_token,
             crate::state::now_unix(),
-        )
-        .ok()?;
-        let _ = write_token(&self.token_path, &refreshed);
-        Some(refreshed.access_token)
+        ) {
+            Ok(refreshed) => {
+                let _ = write_token(&self.token_path, &refreshed);
+                Ok(Some(refreshed.access_token))
+            }
+            Err(TokenExchangeError::Transport(reason)) => Err(HttpError(reason)),
+            Err(_) => Ok(None),
+        }
     }
 
     fn authorized(
@@ -656,7 +664,7 @@ impl<'a> RefreshOn401Client<'a> {
         if resp.status != 401 || !matches!(*self.state.borrow(), RefreshState::Untried) {
             return Ok(resp);
         }
-        match self.refresh() {
+        match self.refresh()? {
             Some(token) => {
                 let retried = call(&token);
                 *self.state.borrow_mut() = RefreshState::Refreshed(token);
@@ -716,7 +724,7 @@ impl fmt::Display for AccessTokenError {
                 "MyAnimeList rejected the stored refresh token — run `tsuzuki sync login` again ({msg})"
             ),
             AccessTokenError::NetworkError(msg) => {
-                write!(f, "network error contacting MyAnimeList: {msg}")
+                write!(f, "can't reach MyAnimeList: {msg}")
             }
         }
     }
@@ -1343,6 +1351,32 @@ mod tests {
         assert_eq!((first.status, second.status), (401, 401));
         assert!(client.refresh_failed());
         assert_eq!(inner.posts.get(), 1, "a dead refresh token is tried once");
+        assert_eq!(read_token(&path).unwrap().unwrap().access_token, "stale");
+    }
+
+    #[test]
+    fn transport_errors_display_as_short_cant_reach_message() {
+        assert_eq!(
+            TokenExchangeError::Transport("timed out".to_string()).to_string(),
+            "can't reach MyAnimeList: timed out"
+        );
+        assert_eq!(
+            AccessTokenError::NetworkError("connection failed".to_string()).to_string(),
+            "can't reach MyAnimeList: connection failed"
+        );
+    }
+
+    #[test]
+    fn transport_failure_during_401_refresh_is_an_error_not_a_dead_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_token_file(dir.path());
+        let inner = StaleTokenClient::new("fresh", Err("connection failed".to_string()));
+        let client = RefreshOn401Client::new(&inner, path.clone(), "client-id");
+
+        let err = client.get("https://x/a", "stale", &[]).err().unwrap();
+
+        assert_eq!(err.0, "connection failed");
+        assert!(!client.refresh_failed());
         assert_eq!(read_token(&path).unwrap().unwrap().access_token, "stale");
     }
 
