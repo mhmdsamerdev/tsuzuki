@@ -18,6 +18,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Never modify or rename user files.
 - filesystem is the library. Never add labels, tags, or a library database; the folder layout on disk is the only source of what exists and how it's grouped.
 - Never guess. Every tracked or excluded path is explicit.
+- Tsuzuki doesn't launch mpv itself or hold an IPC socket to observe playback.
 - MAL sync only ever writes a higher episode number, never a lower one, even on retries or partial failures.
 - Natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.
 - Absence of an mpv-script log entry proves nothing. Only a real position or a `Completed` reading moves state.
