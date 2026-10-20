@@ -101,11 +101,11 @@ pub enum Command {
         action: Option<ConfigCommand>,
     },
 
-    /// Check the environment: mpv, tsuzuki.lua, Flatpak
+    /// Check the environment: the mpv in use, its tsuzuki.lua, Flatpak
     /// permissions, tracked roots, orphaned records
     Doctor {
-        /// Apply safe fixes (install/update tsuzuki.lua); never clears
-        /// orphaned records unless asked
+        /// Apply safe fixes (install/update tsuzuki.lua for the mpv in use);
+        /// never clears orphaned records unless asked
         #[arg(long)]
         fix: bool,
 

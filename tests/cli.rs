@@ -56,17 +56,29 @@ fn touch(path: &Path) {
     fs::File::create(path).unwrap();
 }
 
-/// Registers `root` (an absolute path under `home`) as a tracked root.
+/// Registers `root` (an absolute path under `home`) as a tracked root, with
+/// mpv pinned to the stand-in from [`bypass_real_mpv`].
 fn add_root(home: &Path, root: &Path) {
     run_ok(home, &["add", root.to_str().unwrap()]);
+    bypass_real_mpv(home);
 }
 
-/// Points `[mpv] command_override` at `true` so `resume`/`start` never spawn a real mpv.
+/// Pins `[mpv]` to a custom `true` with no script to check, so `resume`/`start`
+/// never spawn a real mpv.
 fn bypass_real_mpv(home: &Path) {
     let path = config_path(home);
-    let patched = fs::read_to_string(&path)
-        .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"");
+    let original = fs::read_to_string(&path).unwrap();
+    if original.contains("command = \"true\"") {
+        return;
+    }
+    let patched = original.replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
+    assert_ne!(
+        patched, original,
+        "config.toml must hold the default [mpv] keys"
+    );
     fs::write(&path, patched).unwrap();
 }
 
@@ -1573,6 +1585,7 @@ fn start_with_root_folder_name_matches_a_root_stored_with_a_trailing_slash() {
     let home = home_dir.path();
     touch(&home.join("re").join("Bleach").join("ep01.mkv"));
     run_ok(home, &["add", &format!("{}/", home.join("re").display())]);
+    bypass_real_mpv(home);
 
     let out = run(home, &["start", "re"]);
 

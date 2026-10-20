@@ -44,9 +44,10 @@ fn resume_persists_state_toml_to_the_real_xdg_data_path_with_episode_and_timesta
     );
 
     // `true` stands in for mpv so the test doesn't need it installed.
-    let patched = fs::read_to_string(&config_path)
-        .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"");
+    let patched = fs::read_to_string(&config_path).unwrap().replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
     fs::write(&config_path, patched).unwrap();
 
     // A quit reading above the default 120s `resume_seconds`, as the mpv script logs after a mid-episode quit.
@@ -126,9 +127,10 @@ fn list_and_status_read_back_the_same_real_persisted_state() {
 
     run(home, &["add", "~/Anime"]);
     let config_path = home.join(".config").join("tsuzuki").join("config.toml");
-    let patched = fs::read_to_string(&config_path)
-        .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"");
+    let patched = fs::read_to_string(&config_path).unwrap().replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
     fs::write(&config_path, patched).unwrap();
 
     let log_dir = home.join(".local/share/tsuzuki/mpv-log");

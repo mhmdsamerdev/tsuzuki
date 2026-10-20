@@ -58,9 +58,10 @@ tsuzuki doctor --fix
 ```
 
 That copies the script into mpv's own `scripts/` folder (or copy it there
-yourself). Without it Tsuzuki can't see what you watch. It records when
-you finish an episode and where you stopped, so binging straight through
-a series without ever pausing works.
+yourself). Without it Tsuzuki can't see what you watch, so `tsuzuki`
+won't start playback until it's installed. It records when you finish an
+episode and where you stopped, so binging straight through a series
+without ever pausing works.
 
 Run `tsuzuki doctor` any time to check this — and everything else Tsuzuki
 depends on — is set up correctly.

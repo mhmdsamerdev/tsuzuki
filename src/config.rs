@@ -88,12 +88,32 @@ impl Default for Roots {
     }
 }
 
-/// `command_override` defaults to `""`, so a derived `Default` is correct.
+/// Which mpv to use. `Auto` picks native, then Flatpak; any other value is
+/// pinned and never falls back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Install {
+    #[default]
+    Auto,
+    Native,
+    Flatpak,
+    Custom,
+}
+
+/// Every field defaults to auto/empty, so a derived `Default` is correct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Mpv {
-    /// Explicit launch command (e.g. `"flatpak run io.mpv.Mpv"`) that skips
-    /// native/Flatpak auto-detection. Empty means auto-detect.
     #[serde(default)]
+    pub install: Install,
+    /// Launch command for `custom` (e.g. `"/opt/mpv/mpv --profile=anime"`).
+    #[serde(default)]
+    pub command: String,
+    /// The `tsuzuki.lua` the `custom` mpv loads. Empty means it isn't checked.
+    #[serde(default)]
+    pub script_path: String,
+    /// Legacy key, read but never written. A non-empty value maps to
+    /// `custom` + `command` (see [`migrate_command_override`]).
+    #[serde(default, skip_serializing)]
     pub command_override: String,
 }
 
@@ -178,7 +198,18 @@ pub fn read(path: &Path) -> io::Result<Config> {
         Err(e) => return Err(e),
     };
     normalize_video_extensions(&mut config);
+    migrate_command_override(&mut config.mpv);
     Ok(config)
+}
+
+/// Maps a legacy `command_override` to `install = "custom"` + `command`, unless
+/// the new keys are already set. In-memory only; `command_override` is kept
+/// so `doctor` can suggest the new keys, and the next write drops it.
+fn migrate_command_override(mpv: &mut Mpv) {
+    if !mpv.command_override.is_empty() && mpv.install == Install::Auto && mpv.command.is_empty() {
+        mpv.install = Install::Custom;
+        mpv.command = mpv.command_override.clone();
+    }
 }
 
 /// Strips a leading `.` from each `video_extensions` entry so `.mkv` and `mkv`
@@ -303,7 +334,15 @@ mod tests {
             config.roots.video_extensions,
             vec!["mkv", "mp4", "avi", "webm", "mov"]
         );
-        assert_eq!(config.mpv.command_override, "");
+        assert_eq!(
+            config.mpv,
+            Mpv {
+                install: Install::Auto,
+                command: String::new(),
+                script_path: String::new(),
+                command_override: String::new(),
+            }
+        );
         assert_eq!(config.mal.client_id, "");
         assert_eq!(config.mal.redirect_port, 8734);
         assert_eq!(config.mal.fuzzy_match_threshold, 0.8);
@@ -460,8 +499,7 @@ client_id = ""
     }
 
     #[test]
-    fn missing_command_override_key_defaults_to_empty_on_read() {
-        // A missing `command_override` key under `[mpv]` must read cleanly.
+    fn empty_mpv_table_defaults_to_auto_with_no_custom_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -485,11 +523,12 @@ client_id = ""
         .unwrap();
 
         let config = read(&path).unwrap();
-        assert_eq!(config.mpv.command_override, "");
+        assert_eq!(config.mpv, Mpv::default());
+        assert_eq!(config.mpv.install, Install::Auto);
     }
 
     #[test]
-    fn removed_watch_later_dir_key_in_an_old_config_is_ignored_on_read() {
+    fn old_config_ignores_watch_later_dir_and_maps_command_override_to_custom() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -518,9 +557,117 @@ client_id = ""
         assert_eq!(
             config.mpv,
             Mpv {
-                command_override: "mpv".to_string()
+                install: Install::Custom,
+                command: "mpv".to_string(),
+                script_path: String::new(),
+                command_override: "mpv".to_string(),
             }
         );
+    }
+
+    fn read_mpv_table(table: &str) -> io::Result<Mpv> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, format!("[mpv]\n{table}")).unwrap();
+        read(&path).map(|c| c.mpv)
+    }
+
+    #[test]
+    fn mpv_install_values_parse_lowercase() {
+        for (value, install) in [
+            ("auto", Install::Auto),
+            ("native", Install::Native),
+            ("flatpak", Install::Flatpak),
+            ("custom", Install::Custom),
+        ] {
+            assert_eq!(
+                read_mpv_table(&format!("install = \"{value}\"\n")).unwrap(),
+                Mpv {
+                    install,
+                    ..Mpv::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn mpv_install_unknown_value_such_as_snap_is_a_read_error() {
+        let err = read_mpv_table("install = \"snap\"\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn legacy_empty_command_override_is_ignored() {
+        assert_eq!(
+            read_mpv_table("command_override = \"\"\n").unwrap(),
+            Mpv::default()
+        );
+    }
+
+    #[test]
+    fn legacy_command_override_is_ignored_when_install_is_pinned() {
+        assert_eq!(
+            read_mpv_table("install = \"flatpak\"\ncommand_override = \"mpv\"\n").unwrap(),
+            Mpv {
+                install: Install::Flatpak,
+                command: String::new(),
+                script_path: String::new(),
+                command_override: "mpv".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_command_override_is_ignored_when_command_is_already_set() {
+        assert_eq!(
+            read_mpv_table("command = \"/opt/mpv\"\ncommand_override = \"mpv\"\n").unwrap(),
+            Mpv {
+                install: Install::Auto,
+                command: "/opt/mpv".to_string(),
+                script_path: String::new(),
+                command_override: "mpv".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn migrated_config_is_written_with_the_new_keys_and_without_command_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[mpv]\ncommand_override = \"mpv --fs\"\n").unwrap();
+
+        let config = read(&path).unwrap();
+        write(&path, &config).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("command_override"), "{written}");
+        assert_eq!(
+            read(&path).unwrap().mpv,
+            Mpv {
+                install: Install::Custom,
+                command: "mpv --fs".to_string(),
+                script_path: String::new(),
+                command_override: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn custom_mpv_keys_round_trip_through_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            mpv: Mpv {
+                install: Install::Custom,
+                command: "/opt/mpv/mpv --profile=anime".to_string(),
+                script_path: "~/mpv/scripts/tsuzuki.lua".to_string(),
+                command_override: String::new(),
+            },
+            ..Config::default()
+        };
+
+        write(&path, &config).unwrap();
+        assert_eq!(read(&path).unwrap(), config);
     }
 
     #[test]

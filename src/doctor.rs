@@ -11,7 +11,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::config::Config;
+use crate::config::{Config, Install, Mpv};
+use crate::mpv::{self, ChosenBy, Installed, Kind, ResolveError, Target};
 use crate::roots;
 use crate::series;
 use crate::state::State;
@@ -109,85 +110,108 @@ pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResul
     CheckResult::ok(label, ok_message)
 }
 
-// --- 1a. mpv availability ---
+// --- 1a. mpv target ---
 
-/// Which mpv installs were detected, computed once by the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MpvPresence {
-    pub native: bool,
-    pub flatpak: bool,
-}
-
-/// Reports mpv availability. A `command_override` bypasses detection but must
-/// resolve (`override_resolves`). Native and Flatpak both present warns
-/// (native wins); neither present fails.
-pub fn check_mpv_availability(
-    command_override: &str,
-    presence: MpvPresence,
-    override_resolves: bool,
+/// Reports the mpv `mpv::resolve` picked and why. A custom target's program
+/// must exist (`custom_resolves`). Other detected installs become one
+/// `→` line saying how to pin them.
+pub fn check_mpv_target(
+    target: &Result<Target, ResolveError>,
+    installed: Installed,
+    custom_resolves: bool,
 ) -> CheckResult {
-    if !command_override.is_empty() {
-        return if override_resolves {
-            CheckResult::ok("mpv", "custom command found")
-        } else {
-            CheckResult::fail("mpv", "configured command not found")
-                .with_action("check [mpv] command_override in config.toml")
-        };
-    }
-
-    match (presence.native, presence.flatpak) {
-        (false, false) => CheckResult::fail("mpv", "not found")
-            .with_action("install mpv, or set [mpv] command_override in config.toml"),
-        (true, false) => CheckResult::ok("mpv", "native installation found"),
-        (false, true) => CheckResult::ok("mpv", "Flatpak installation found"),
-        (true, true) => CheckResult::warn("mpv", "both native and Flatpak found, using native")
-            .with_action("pin [mpv] command_override in config.toml to avoid ambiguity"),
-    }
-}
-
-/// Whether the override's first whitespace-separated token is an executable
-/// path (if it contains `/`) or a program on `$PATH`.
-pub fn command_override_resolves(command_override: &str) -> bool {
-    let Some(program) = command_override.split_whitespace().next() else {
-        return false;
+    let target = match target {
+        Ok(target) => target,
+        Err(ResolveError::NotFound) => {
+            return CheckResult::fail("mpv", "not found").with_action(
+                "install mpv, or set [mpv] install = \"custom\" and command in config.toml",
+            );
+        }
+        Err(ResolveError::NotInstalled(kind)) => {
+            return CheckResult::fail(
+                "mpv",
+                format!(
+                    "[mpv] install is \"{}\" but it is not installed",
+                    install_key(*kind)
+                ),
+            )
+            .with_action("install it, or change [mpv] install in config.toml");
+        }
+        Err(ResolveError::NoCustomCommand) => {
+            return CheckResult::fail("mpv", "[mpv] install is \"custom\" but command is empty")
+                .with_action("set [mpv] command in config.toml");
+        }
     };
+
+    if target.kind == Kind::Custom && !custom_resolves {
+        return CheckResult::fail("mpv", "custom command not found")
+            .with_action("check [mpv] command in config.toml");
+    }
+
+    let chosen_by = match target.chosen_by {
+        ChosenBy::Auto => "auto",
+        ChosenBy::Pinned => "pinned",
+    };
+    let result = CheckResult::ok("mpv", format!("{} ({chosen_by})", target.kind.label()));
+
+    let others: Vec<Kind> = [
+        (Kind::Native, installed.native),
+        (Kind::Flatpak, installed.flatpak),
+    ]
+    .into_iter()
+    .filter(|&(kind, present)| present && kind != target.kind)
+    .map(|(kind, _)| kind)
+    .collect();
+    match others.as_slice() {
+        [] => result,
+        [kind] => result.with_action(format!(
+            "also found: {} mpv; to use it, set [mpv] install = \"{}\"",
+            kind.label(),
+            install_key(*kind)
+        )),
+        _ => result.with_action(
+            "also found: native and Flatpak mpv; to use one, set [mpv] install = \"native\" or \"flatpak\"",
+        ),
+    }
+}
+
+/// The `[mpv] install` value that pins `kind`.
+fn install_key(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Native => "native",
+        Kind::Flatpak => "flatpak",
+        Kind::Custom => "custom",
+    }
+}
+
+/// Whether a custom target's program is an executable path (if it contains
+/// `/`) or a program on `$PATH`.
+pub fn custom_command_resolves(program: &str) -> bool {
     if program.contains('/') {
-        crate::launch::is_executable_file(Path::new(program))
+        mpv::is_executable_file(Path::new(program))
     } else {
-        crate::launch::program_on_path(program)
+        mpv::program_on_path(program)
     }
 }
 
-// --- 1b. mpv installs ---
+// --- 1b. legacy config key ---
 
-/// One mpv install's config directory (holds `mpv.conf` and `scripts/`).
-/// Flatpak's lives under `home`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MpvInstall {
-    pub label: &'static str,
-    pub config_dir: PathBuf,
-}
-
-/// The installs detected per `presence`; undetected ones have nothing to check.
-pub fn detected_mpv_installs(presence: MpvPresence, home: Option<&Path>) -> Vec<MpvInstall> {
-    let mut installs = Vec::new();
-    if presence.native
-        && let Some(base) = dirs::config_dir()
-    {
-        installs.push(MpvInstall {
-            label: "native",
-            config_dir: base.join("mpv"),
-        });
+/// Warns while the legacy `[mpv] command_override` key is still in config.toml.
+pub fn check_legacy_command_override(config: &Mpv) -> Option<CheckResult> {
+    if config.command_override.is_empty() {
+        return None;
     }
-    if presence.flatpak
-        && let Some(home) = home
-    {
-        installs.push(MpvInstall {
-            label: "flatpak",
-            config_dir: home.join(".var/app/io.mpv.Mpv/config/mpv"),
-        });
-    }
-    installs
+    let result = CheckResult::warn("config", "[mpv] command_override is deprecated");
+    Some(
+        if config.install == Install::Custom && config.command == config.command_override {
+            result.with_action(format!(
+                "replace it with install = \"custom\" and command = \"{}\"",
+                config.command_override
+            ))
+        } else {
+            result.with_action("remove it from config.toml; [mpv] install is used instead")
+        },
+    )
 }
 
 // --- 1c. entry timestamps ---
@@ -255,41 +279,57 @@ pub fn check_flatpak_permissions(
 
 pub struct ScriptCheckOutcome {
     pub result: CheckResult,
-    /// The scripts directory `--fix` should install into, if any.
+    /// The script file `--fix` should install, if any.
     pub needs_fix: Option<PathBuf>,
 }
 
-/// Compares one install's `scripts/tsuzuki.lua` byte-for-byte with the
-/// bundled copy.
-pub fn check_tsuzuki_lua(scripts_dir: &Path, label: &str) -> ScriptCheckOutcome {
-    let script_path = scripts_dir.join("tsuzuki.lua");
-    let full_label = format!("mpv script ({label})");
+/// Compares the target's `tsuzuki.lua` byte-for-byte with the bundled copy.
+/// A target without a known script path can't be verified.
+pub fn check_tsuzuki_lua(target: &Target) -> ScriptCheckOutcome {
+    let label = target.kind.label();
+    let Some(script_path) = &target.script_path else {
+        let result = CheckResult::warn("mpv script", format!("not verified ({label})"));
+        return ScriptCheckOutcome {
+            result: if target.kind == Kind::Custom {
+                result.with_action("set [mpv] script_path in config.toml")
+            } else {
+                result
+            },
+            needs_fix: None,
+        };
+    };
 
-    match fs::read(&script_path) {
+    match fs::read(script_path) {
         Ok(bytes) if bytes == BUNDLED_SCRIPT.as_bytes() => ScriptCheckOutcome {
-            result: CheckResult::ok(full_label, "up to date"),
+            result: CheckResult::ok("mpv script", format!("up to date ({label})")),
             needs_fix: None,
         },
         Ok(_) => ScriptCheckOutcome {
-            result: CheckResult::fail(full_label, format!("out of date ({label})"))
+            result: CheckResult::fail("mpv script", format!("out of date ({label})"))
                 .with_action("tsuzuki doctor --fix"),
-            needs_fix: Some(scripts_dir.to_path_buf()),
+            needs_fix: Some(script_path.clone()),
         },
         Err(_) => ScriptCheckOutcome {
-            result: CheckResult::fail(full_label, format!("not installed ({label})"))
+            result: CheckResult::fail("mpv script", format!("not installed ({label})"))
                 .with_action("tsuzuki doctor --fix"),
-            needs_fix: Some(scripts_dir.to_path_buf()),
+            needs_fix: Some(script_path.clone()),
         },
     }
 }
 
-/// Installs or updates `tsuzuki.lua` atomically (temp file, then rename).
-pub fn install_script(scripts_dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(scripts_dir)?;
-    let target = scripts_dir.join("tsuzuki.lua");
-    let mut temp = tempfile::NamedTempFile::new_in(scripts_dir)?;
+/// Installs or updates the script at `script_path` atomically (temp file in
+/// the same directory, then rename).
+pub fn install_script(script_path: &Path) -> io::Result<()> {
+    let dir = script_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "script path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(dir)?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
     io::Write::write_all(&mut temp, BUNDLED_SCRIPT.as_bytes())?;
-    temp.persist(&target).map_err(|e| e.error)?;
+    temp.persist(script_path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -514,115 +554,199 @@ mod tests {
         assert_eq!(r.message, "hmm");
     }
 
-    // --- 1a: mpv availability ---
+    // --- 1a: mpv target ---
 
-    #[test]
-    fn native_only_is_ok() {
-        let r = check_mpv_availability(
-            "",
-            MpvPresence {
-                native: true,
-                flatpak: false,
-            },
-            false,
-        );
-        assert_eq!(r.level, Level::Ok);
-        assert!(r.message.contains("native"));
+    const NONE: Installed = Installed {
+        native: false,
+        flatpak: false,
+    };
+    const NATIVE: Installed = Installed {
+        native: true,
+        flatpak: false,
+    };
+    const FLATPAK: Installed = Installed {
+        native: false,
+        flatpak: true,
+    };
+    const BOTH: Installed = Installed {
+        native: true,
+        flatpak: true,
+    };
+
+    fn target(kind: Kind, chosen_by: ChosenBy, script_path: Option<PathBuf>) -> Target {
+        Target {
+            kind,
+            chosen_by,
+            program: "mpv".to_string(),
+            base_args: Vec::new(),
+            script_path,
+        }
     }
 
     #[test]
-    fn flatpak_only_is_ok() {
-        let r = check_mpv_availability(
-            "",
-            MpvPresence {
-                native: false,
-                flatpak: true,
-            },
-            false,
+    fn mpv_target_auto_native_alone_is_ok_with_no_also_found_line() {
+        let t = Ok(target(Kind::Native, ChosenBy::Auto, None));
+        assert_eq!(
+            check_mpv_target(&t, NATIVE, false),
+            CheckResult::ok("mpv", "native (auto)")
         );
-        assert_eq!(r.level, Level::Ok);
-        assert!(r.message.contains("Flatpak"));
     }
 
     #[test]
-    fn neither_present_is_fail() {
-        let r = check_mpv_availability(
-            "",
-            MpvPresence {
-                native: false,
-                flatpak: false,
-            },
-            false,
+    fn mpv_target_auto_native_with_flatpak_present_names_how_to_pin_flatpak() {
+        let t = Ok(target(Kind::Native, ChosenBy::Auto, None));
+        assert_eq!(
+            check_mpv_target(&t, BOTH, false),
+            CheckResult::ok("mpv", "native (auto)")
+                .with_action("also found: Flatpak mpv; to use it, set [mpv] install = \"flatpak\"")
         );
-        assert_eq!(r.level, Level::Fail);
     }
 
     #[test]
-    fn both_present_is_warn_not_fail() {
-        let r = check_mpv_availability(
-            "",
-            MpvPresence {
-                native: true,
-                flatpak: true,
-            },
-            false,
-        );
-        assert_eq!(r.level, Level::Warn);
-    }
-
-    #[test]
-    fn command_override_set_and_resolving_is_ok_regardless_of_presence() {
-        let r = check_mpv_availability(
-            "flatpak run io.mpv.Mpv",
-            MpvPresence {
-                native: false,
-                flatpak: false,
-            },
-            true,
-        );
-        assert_eq!(r.level, Level::Ok);
-    }
-
-    #[test]
-    fn command_override_set_and_not_resolving_is_fail_even_if_native_present() {
-        let r = check_mpv_availability(
-            "/does/not/exist",
-            MpvPresence {
-                native: true,
-                flatpak: false,
-            },
-            false,
+    fn mpv_target_pinned_flatpak_with_native_present_names_how_to_pin_native() {
+        let t = Ok(target(Kind::Flatpak, ChosenBy::Pinned, None));
+        assert_eq!(
+            check_mpv_target(&t, BOTH, false),
+            CheckResult::ok("mpv", "Flatpak (pinned)")
+                .with_action("also found: native mpv; to use it, set [mpv] install = \"native\"")
         );
         assert_eq!(
-            r.level,
-            Level::Fail,
-            "an override takes priority over detection — a broken override must fail even \
-             though native mpv would otherwise resolve fine"
+            check_mpv_target(&t, FLATPAK, false),
+            CheckResult::ok("mpv", "Flatpak (pinned)")
         );
     }
 
     #[test]
-    fn command_override_resolves_checks_the_first_token_on_path() {
-        assert!(command_override_resolves("true"));
-        assert!(!command_override_resolves(
+    fn mpv_target_custom_resolving_lists_both_other_installs() {
+        let t = Ok(target(Kind::Custom, ChosenBy::Pinned, None));
+        assert_eq!(
+            check_mpv_target(&t, BOTH, true),
+            CheckResult::ok("mpv", "custom (pinned)").with_action(
+                "also found: native and Flatpak mpv; to use one, set [mpv] install = \"native\" or \"flatpak\""
+            )
+        );
+        assert_eq!(
+            check_mpv_target(&t, NONE, true),
+            CheckResult::ok("mpv", "custom (pinned)")
+        );
+    }
+
+    #[test]
+    fn mpv_target_custom_not_resolving_fails_whatever_is_installed() {
+        let t = Ok(target(Kind::Custom, ChosenBy::Pinned, None));
+        for installed in [NONE, NATIVE, FLATPAK, BOTH] {
+            assert_eq!(
+                check_mpv_target(&t, installed, false),
+                CheckResult::fail("mpv", "custom command not found")
+                    .with_action("check [mpv] command in config.toml")
+            );
+        }
+    }
+
+    #[test]
+    fn mpv_target_resolve_errors_fail_with_the_next_step() {
+        assert_eq!(
+            check_mpv_target(&Err(ResolveError::NotFound), NONE, false),
+            CheckResult::fail("mpv", "not found").with_action(
+                "install mpv, or set [mpv] install = \"custom\" and command in config.toml"
+            )
+        );
+        assert_eq!(
+            check_mpv_target(
+                &Err(ResolveError::NotInstalled(Kind::Flatpak)),
+                NATIVE,
+                false
+            ),
+            CheckResult::fail(
+                "mpv",
+                "[mpv] install is \"flatpak\" but it is not installed"
+            )
+            .with_action("install it, or change [mpv] install in config.toml")
+        );
+        assert_eq!(
+            check_mpv_target(&Err(ResolveError::NoCustomCommand), BOTH, true),
+            CheckResult::fail("mpv", "[mpv] install is \"custom\" but command is empty")
+                .with_action("set [mpv] command in config.toml")
+        );
+    }
+
+    #[test]
+    fn custom_command_resolves_checks_a_bare_name_on_path() {
+        assert!(custom_command_resolves("true"));
+        assert!(!custom_command_resolves(
             "tsuzuki-definitely-not-a-real-binary"
         ));
-        assert!(!command_override_resolves(""));
     }
 
     #[cfg(unix)]
     #[test]
-    fn command_override_resolves_checks_an_absolute_path_directly() {
+    fn custom_command_resolves_checks_an_absolute_path_directly() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
         let fake = dir.path().join("fake-mpv");
         std_fs::write(&fake, b"#!/bin/sh\n").unwrap();
-        let mut perms = std_fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        std_fs::set_permissions(&fake, perms).unwrap();
+        std_fs::set_permissions(&fake, std_fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(command_override_resolves(&fake.to_string_lossy()));
-        assert!(!command_override_resolves("/definitely/not/here/mpv"));
+        assert!(custom_command_resolves(&fake.to_string_lossy()));
+        assert!(!custom_command_resolves("/definitely/not/here/mpv"));
+    }
+
+    // --- 1b: legacy config key ---
+
+    #[test]
+    fn legacy_command_override_absent_reports_nothing() {
+        assert_eq!(check_legacy_command_override(&Mpv::default()), None);
+    }
+
+    #[test]
+    fn legacy_command_override_migrated_suggests_the_new_keys() {
+        let config = Mpv {
+            install: Install::Custom,
+            command: "mpv --fs".to_string(),
+            script_path: String::new(),
+            command_override: "mpv --fs".to_string(),
+        };
+        assert_eq!(
+            check_legacy_command_override(&config),
+            Some(
+                CheckResult::warn("config", "[mpv] command_override is deprecated")
+                    .with_action("replace it with install = \"custom\" and command = \"mpv --fs\"")
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_command_override_next_to_a_different_custom_command_says_to_remove_it() {
+        let config = Mpv {
+            install: Install::Custom,
+            command: "/opt/mpv/mpv".to_string(),
+            script_path: String::new(),
+            command_override: "mpv".to_string(),
+        };
+        assert_eq!(
+            check_legacy_command_override(&config),
+            Some(
+                CheckResult::warn("config", "[mpv] command_override is deprecated")
+                    .with_action("remove it from config.toml; [mpv] install is used instead")
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_command_override_overridden_by_new_keys_says_to_remove_it() {
+        let config = Mpv {
+            install: Install::Flatpak,
+            command: String::new(),
+            script_path: String::new(),
+            command_override: "mpv".to_string(),
+        };
+        assert_eq!(
+            check_legacy_command_override(&config),
+            Some(
+                CheckResult::warn("config", "[mpv] command_override is deprecated")
+                    .with_action("remove it from config.toml; [mpv] install is used instead")
+            )
+        );
     }
 
     // --- 1d: Flatpak filesystem-permission gap ---
@@ -680,68 +804,102 @@ mod tests {
     // --- 1e: tsuzuki.lua mpv script ---
 
     #[test]
-    fn tsuzuki_lua_missing_needs_fix() {
+    fn tsuzuki_lua_missing_fails_and_needs_fix_at_the_target_path() {
         let dir = tempdir().unwrap();
-        let outcome = check_tsuzuki_lua(&dir.path().join("scripts"), "native");
-        assert_eq!(outcome.result.level, Level::Fail);
-        assert_eq!(outcome.needs_fix, Some(dir.path().join("scripts")));
+        let script = dir.path().join("scripts").join("tsuzuki.lua");
+        let outcome =
+            check_tsuzuki_lua(&target(Kind::Native, ChosenBy::Auto, Some(script.clone())));
+        assert_eq!(
+            outcome.result,
+            CheckResult::fail("mpv script", "not installed (native)")
+                .with_action("tsuzuki doctor --fix")
+        );
+        assert_eq!(outcome.needs_fix, Some(script));
     }
 
     #[test]
     fn tsuzuki_lua_matching_bundled_is_ok_and_needs_no_fix() {
         let dir = tempdir().unwrap();
-        let scripts_dir = dir.path().join("scripts");
-        std_fs::create_dir_all(&scripts_dir).unwrap();
-        std_fs::write(scripts_dir.join("tsuzuki.lua"), BUNDLED_SCRIPT).unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        std_fs::write(&script, BUNDLED_SCRIPT).unwrap();
 
-        let outcome = check_tsuzuki_lua(&scripts_dir, "native");
-        assert_eq!(outcome.result.level, Level::Ok);
+        let outcome = check_tsuzuki_lua(&target(Kind::Flatpak, ChosenBy::Auto, Some(script)));
+        assert_eq!(
+            outcome.result,
+            CheckResult::ok("mpv script", "up to date (Flatpak)")
+        );
         assert_eq!(outcome.needs_fix, None);
     }
 
     #[test]
-    fn tsuzuki_lua_stale_content_needs_fix() {
+    fn tsuzuki_lua_stale_content_fails_and_needs_fix() {
         let dir = tempdir().unwrap();
-        let scripts_dir = dir.path().join("scripts");
-        std_fs::create_dir_all(&scripts_dir).unwrap();
-        std_fs::write(scripts_dir.join("tsuzuki.lua"), "-- an old version\n").unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        std_fs::write(&script, "-- an old version\n").unwrap();
 
-        let outcome = check_tsuzuki_lua(&scripts_dir, "native");
-        assert_eq!(outcome.result.level, Level::Fail);
-        assert_eq!(outcome.needs_fix, Some(scripts_dir));
+        let outcome = check_tsuzuki_lua(&target(
+            Kind::Custom,
+            ChosenBy::Pinned,
+            Some(script.clone()),
+        ));
+        assert_eq!(
+            outcome.result,
+            CheckResult::fail("mpv script", "out of date (custom)")
+                .with_action("tsuzuki doctor --fix")
+        );
+        assert_eq!(outcome.needs_fix, Some(script));
+    }
+
+    #[test]
+    fn tsuzuki_lua_custom_without_script_path_warns_not_verified_and_needs_no_fix() {
+        let outcome = check_tsuzuki_lua(&target(Kind::Custom, ChosenBy::Pinned, None));
+        assert_eq!(
+            outcome.result,
+            CheckResult::warn("mpv script", "not verified (custom)")
+                .with_action("set [mpv] script_path in config.toml")
+        );
+        assert_eq!(outcome.needs_fix, None);
+    }
+
+    #[test]
+    fn tsuzuki_lua_native_with_unknown_path_warns_without_a_custom_action() {
+        let outcome = check_tsuzuki_lua(&target(Kind::Native, ChosenBy::Auto, None));
+        assert_eq!(
+            outcome.result,
+            CheckResult::warn("mpv script", "not verified (native)")
+        );
+        assert_eq!(outcome.needs_fix, None);
     }
 
     #[test]
     fn install_script_writes_the_bundled_content_and_creates_the_directory() {
         let dir = tempdir().unwrap();
-        let scripts_dir = dir
+        let script = dir
             .path()
             .join("does")
             .join("not")
             .join("exist")
-            .join("scripts");
+            .join("tsuzuki.lua");
 
-        install_script(&scripts_dir).unwrap();
+        install_script(&script).unwrap();
 
-        let installed = std_fs::read_to_string(scripts_dir.join("tsuzuki.lua")).unwrap();
-        assert_eq!(installed, BUNDLED_SCRIPT);
-
-        // Re-checking now reports OK with no further fix needed.
-        let outcome = check_tsuzuki_lua(&scripts_dir, "native");
-        assert_eq!(outcome.result.level, Level::Ok);
+        assert_eq!(std_fs::read_to_string(&script).unwrap(), BUNDLED_SCRIPT);
+        let outcome = check_tsuzuki_lua(&target(Kind::Native, ChosenBy::Auto, Some(script)));
+        assert_eq!(
+            outcome.result,
+            CheckResult::ok("mpv script", "up to date (native)")
+        );
     }
 
     #[test]
     fn install_script_overwrites_stale_content() {
         let dir = tempdir().unwrap();
-        let scripts_dir = dir.path().join("scripts");
-        std_fs::create_dir_all(&scripts_dir).unwrap();
-        std_fs::write(scripts_dir.join("tsuzuki.lua"), "-- stale\n").unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        std_fs::write(&script, "-- stale\n").unwrap();
 
-        install_script(&scripts_dir).unwrap();
+        install_script(&script).unwrap();
 
-        let installed = std_fs::read_to_string(scripts_dir.join("tsuzuki.lua")).unwrap();
-        assert_eq!(installed, BUNDLED_SCRIPT);
+        assert_eq!(std_fs::read_to_string(&script).unwrap(), BUNDLED_SCRIPT);
     }
 
     #[cfg(unix)]
@@ -749,14 +907,13 @@ mod tests {
     fn install_script_leaves_no_stray_temp_files() {
         let dir = tempdir().unwrap();
         let scripts_dir = dir.path().join("scripts");
-        install_script(&scripts_dir).unwrap();
+        install_script(&scripts_dir.join("tsuzuki.lua")).unwrap();
 
-        let entries: Vec<_> = std_fs::read_dir(&scripts_dir).unwrap().collect();
-        assert_eq!(
-            entries.len(),
-            1,
-            "exactly one file should remain after an atomic write"
-        );
+        let names: Vec<_> = std_fs::read_dir(&scripts_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("tsuzuki.lua")]);
     }
 
     // --- 1f: mpv-log directory reachability ---
@@ -993,46 +1150,6 @@ mod tests {
 
         assert_eq!(state.series.len(), 1);
         assert_eq!(state.series[0].name, "One Piece");
-    }
-
-    // --- detected_mpv_installs: Flatpak branch (home-injectable) ---
-
-    #[test]
-    fn detected_installs_includes_flatpak_when_present_and_home_known() {
-        let home = PathBuf::from("/home/user");
-        let installs = detected_mpv_installs(
-            MpvPresence {
-                native: false,
-                flatpak: true,
-            },
-            Some(&home),
-        );
-        assert!(installs.iter().any(|i| i.label == "flatpak"));
-    }
-
-    #[test]
-    fn detected_installs_excludes_flatpak_when_not_present() {
-        let home = PathBuf::from("/home/user");
-        let installs = detected_mpv_installs(
-            MpvPresence {
-                native: false,
-                flatpak: false,
-            },
-            Some(&home),
-        );
-        assert!(installs.is_empty());
-    }
-
-    #[test]
-    fn detected_installs_excludes_flatpak_with_no_home() {
-        let installs = detected_mpv_installs(
-            MpvPresence {
-                native: false,
-                flatpak: true,
-            },
-            None,
-        );
-        assert!(installs.is_empty());
     }
 
     // --- 1i: MAL auth status ---

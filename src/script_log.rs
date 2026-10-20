@@ -31,8 +31,8 @@ struct FlatpakCandidate {
 }
 
 /// Flatpak mpv runs with `XDG_DATA_HOME` set to its per-app data dir, so the
-/// script logs here instead of the native path. Linux-only; Snap is unverified
-/// and not guessed.
+/// script logs here instead of the native path. Linux-only; Snap isn't
+/// supported (see `mpv`).
 const FLATPAK_CANDIDATES: &[FlatpakCandidate] = &[FlatpakCandidate {
     os: "linux",
     relative: ".var/app/io.mpv.Mpv/data/tsuzuki/mpv-log",
@@ -54,7 +54,7 @@ pub struct ScriptLogEntry {
 }
 
 /// Native `$XDG_DATA_HOME/tsuzuki/mpv-log`, next to `state.toml`. Correct for
-/// native and Snap mpv, not Flatpak (see [`mpv_log_dirs`]).
+/// native mpv, not Flatpak (see [`mpv_log_dirs`]).
 fn native_mpv_log_dir() -> io::Result<PathBuf> {
     let base = dirs::data_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "could not resolve data directory")
@@ -63,7 +63,8 @@ fn native_mpv_log_dir() -> io::Result<PathBuf> {
 }
 
 /// Every directory that might hold script-log entries: the native one (if
-/// it resolves) plus the Flatpak remap when `home` is known.
+/// it resolves) plus the Flatpak remap when `home` is known. Independent of
+/// the mpv target on purpose, so entries from any mpv the user ran are read.
 pub fn mpv_log_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(native) = native_mpv_log_dir() {

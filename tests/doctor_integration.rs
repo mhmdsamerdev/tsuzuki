@@ -1,4 +1,4 @@
-//! Real-binary tests for `tsuzuki doctor`. The tsuzuki.lua assertions depend on whether mpv is installed here.
+//! Real-binary tests for `tsuzuki doctor`. mpv-target checks live in `mpv_target_integration.rs`.
 
 use std::fs;
 use std::path::Path;
@@ -18,21 +18,6 @@ fn run(home: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to spawn the tsuzuki binary")
 }
 
-/// Whether this machine has an mpv install `doctor` would detect, checked independently of the binary under test.
-fn any_mpv_install_detected() -> bool {
-    if Path::new("/var/lib/flatpak/app/io.mpv.Mpv").is_dir() {
-        return true;
-    }
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            if dir.join("mpv").is_file() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[test]
 fn doctor_reports_an_orphaned_record_then_clears_the_orphan() {
     let home_dir = tempfile::tempdir().unwrap();
@@ -46,9 +31,10 @@ fn doctor_reports_an_orphaned_record_then_clears_the_orphan() {
     assert!(add.status.success(), "add failed: {add:?}");
 
     let config_path = home.join(".config").join("tsuzuki").join("config.toml");
-    let patched = fs::read_to_string(&config_path)
-        .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"");
+    let patched = fs::read_to_string(&config_path).unwrap().replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
     fs::write(&config_path, patched).unwrap();
 
     // An orphan: "GoneSeries" is tracked under "~/Anime" but has no directory on disk.
@@ -103,16 +89,6 @@ updated_at = 1
          (that state is no longer reachable from an empty config), and not the old Phase-7 \
          placeholder line either, got:\n{stdout}"
     );
-
-    if any_mpv_install_detected() {
-        assert!(
-            stdout.contains("mpv script")
-                && stdout.contains("not installed")
-                && stdout.contains("tsuzuki doctor --fix"),
-            "a fresh scratch $HOME never has the mpv script installed — if any mpv \
-             install method was detected at all, its script check must FAIL with the fix command, got:\n{stdout}"
-        );
-    }
 
     // Clearing the confirmed orphan must actually remove it.
     let fix = run(home, &["doctor", "--fix", "--forget-orphans"]);
@@ -179,9 +155,10 @@ fn home_with_a_script_log_entry(home: &Path, offset_seconds: i64) -> std::path::
     fs::File::create(&ep).unwrap();
     assert!(run(home, &["add", "~/Anime"]).status.success());
     let config_path = home.join(".config/tsuzuki/config.toml");
-    let patched = fs::read_to_string(&config_path)
-        .unwrap()
-        .replace("command_override = \"\"", "command_override = \"true\"");
+    let patched = fs::read_to_string(&config_path).unwrap().replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
     fs::write(&config_path, patched).unwrap();
 
     let log_dir = home.join(".local/share/tsuzuki/mpv-log");

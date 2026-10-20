@@ -6,6 +6,7 @@ mod exclude;
 mod http;
 mod launch;
 mod mal;
+mod mpv;
 mod overview;
 mod pause_drop;
 mod picker;
@@ -407,6 +408,23 @@ fn reconcile_state(
     Ok(state)
 }
 
+/// Resolves the mpv `resume`/`start` launch and refuses when its
+/// `tsuzuki.lua` is missing, since nothing watched would be tracked. A script
+/// that differs from the bundled one still launches; `doctor` reports it.
+fn launch_target(config: &Config, home: Option<&Path>) -> Result<mpv::Target, ExitCode> {
+    let target = mpv::resolve_here(&config.mpv, home).map_err(|e| fail(&e.to_string()))?;
+    if let Some(script) = &target.script_path
+        && !script.is_file()
+    {
+        return Err(fail(&format!(
+            "mpv script not installed for {} mpv at {} — run: tsuzuki doctor --fix",
+            target.kind.label(),
+            script.display()
+        )));
+    }
+    Ok(target)
+}
+
 /// The resolved file, starting position, and episode number to play.
 struct PlaybackTarget {
     file: PathBuf,
@@ -486,6 +504,7 @@ fn format_timestamp(seconds: f64) -> String {
 fn play_series(
     config: &Config,
     state: &State,
+    mpv: &mpv::Target,
     root: &str,
     name: &str,
     home: Option<&Path>,
@@ -493,42 +512,37 @@ fn play_series(
 ) -> ExitCode {
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
-        Some(target) => {
-            match launch::resume_playback(
-                &config.mpv.command_override,
-                home,
-                &target.file,
-                target.position_seconds,
-            ) {
-                Ok(()) => {
-                    println!(
-                        "✓ {verb} \"{name}\" — {} ({})",
-                        anitomy::episode_phrase(target.season, target.episode_number),
-                        format_timestamp(target.position_seconds),
-                    );
-                    println!("  → {}", target.file.display());
-                    ExitCode::SUCCESS
-                }
-                Err(e) => fail(&e.to_string()),
+        Some(target) => match launch::resume_playback(mpv, &target.file, target.position_seconds) {
+            Ok(()) => {
+                println!(
+                    "✓ {verb} \"{name}\" — {} ({})",
+                    anitomy::episode_phrase(target.season, target.episode_number),
+                    format_timestamp(target.position_seconds),
+                );
+                println!("  → {}", target.file.display());
+                ExitCode::SUCCESS
             }
-        }
+            Err(e) => fail(&format!("failed to launch mpv: {e}")),
+        },
         None => fail(&format!("no episodes found for \"{name}\"")),
     }
 }
 
 /// Resolves an explicit `series [--root]` argument and plays it, bypassing
 /// the picker whether or not there is a TTY.
+#[allow(clippy::too_many_arguments)]
 fn explicit_play(
     series: &str,
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
+    mpv: &mpv::Target,
     home: Option<&Path>,
     command_name: &str,
     verb: &str,
 ) -> ExitCode {
     match target::resolve_series_root(config, series, root_arg, home) {
-        Ok(root) => play_series(config, state, &root, series, home, verb),
+        Ok(root) => play_series(config, state, mpv, &root, series, home, verb),
         Err(e) => print_target_error(&e, command_name),
     }
 }
@@ -537,11 +551,13 @@ fn explicit_play(
 /// was played, or the arguments were rejected); `Continue(Some(root))` limits
 /// the picker to that stored root. A bare `series` is a series first, else a
 /// root's folder name (both is an error); `--root` alone is that root.
+#[allow(clippy::too_many_arguments)]
 fn resolve_scope(
     series: Option<String>,
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
+    mpv: &mpv::Target,
     home: Option<&Path>,
     command_name: &str,
     verb: &str,
@@ -552,13 +568,14 @@ fn resolve_scope(
             root_arg,
             config,
             state,
+            mpv,
             home,
             command_name,
             verb,
         )),
         (Some(arg), None) => match target::resolve_positional(config, &arg, home) {
             Ok(target::Resolved::Series(root)) => {
-                ControlFlow::Break(play_series(config, state, &root, &arg, home, verb))
+                ControlFlow::Break(play_series(config, state, mpv, &root, &arg, home, verb))
             }
             Ok(target::Resolved::Root(root)) => ControlFlow::Continue(Some(root)),
             Err(e) => ControlFlow::Break(print_positional_error(&e, command_name)),
@@ -655,12 +672,17 @@ fn resume_command(
         Ok(v) => v,
         Err(code) => return code,
     };
+    let mpv = match launch_target(config, home) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let scope = match resolve_scope(
         series,
         root.as_deref(),
         config,
         &state,
+        &mpv,
         home,
         "resume",
         "Resuming",
@@ -687,7 +709,7 @@ fn resume_command(
         },
         1 => {
             let o = &in_progress[0];
-            play_series(config, &state, &o.root, &o.name, home, "Resuming")
+            play_series(config, &state, &mpv, &o.root, &o.name, home, "Resuming")
         }
         _ => {
             let outcome = picker::pick(
@@ -706,7 +728,7 @@ fn resume_command(
             );
             match outcome {
                 picker::PickerOutcome::Selected(o) => {
-                    play_series(config, &state, &o.root, &o.name, home, "Resuming")
+                    play_series(config, &state, &mpv, &o.root, &o.name, home, "Resuming")
                 }
                 picker::PickerOutcome::Listed => {
                     println!();
@@ -832,12 +854,17 @@ fn start_command(
         Ok(v) => v,
         Err(code) => return code,
     };
+    let mpv = match launch_target(config, home) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let scope = match resolve_scope(
         series,
         root.as_deref(),
         config,
         &state,
+        &mpv,
         home,
         "start",
         "Starting",
@@ -878,9 +905,15 @@ fn start_command(
         picker::dialoguer_select,
     );
     match outcome {
-        picker::PickerOutcome::Selected(o) => {
-            play_series(config, &state, &o.root, &o.name, home, start_verb(o.status))
-        }
+        picker::PickerOutcome::Selected(o) => play_series(
+            config,
+            &state,
+            &mpv,
+            &o.root,
+            &o.name,
+            home,
+            start_verb(o.status),
+        ),
         picker::PickerOutcome::Listed => {
             println!();
             println!("Run `tsuzuki start <series>` to pick one.");
@@ -1319,8 +1352,8 @@ fn sync_link_command(
 }
 
 /// `tsuzuki doctor [--fix] [--forget-orphans]`: reconciles first, then
-/// prints one line per conceptual check to stdout. Install-scoped checks are
-/// folded into one row via `doctor::combine`; a check with nothing to check
+/// prints one line per conceptual check to stdout. mpv checks and `--fix`
+/// cover only the target `mpv::resolve` picks; a check with nothing to check
 /// against is omitted. Exits non-zero only if a check still FAILs after any
 /// fixes, never on WARN alone.
 fn doctor_command(
@@ -1342,18 +1375,17 @@ fn doctor_command(
 
     let mut results = Vec::new();
 
-    let presence = doctor::MpvPresence {
-        native: launch::native_mpv_on_path(),
-        flatpak: launch::flatpak_mpv_installed(home),
-    };
-    let override_resolves = doctor::command_override_resolves(&config.mpv.command_override);
-    results.push(doctor::check_mpv_availability(
-        &config.mpv.command_override,
-        presence,
-        override_resolves,
+    let installed = mpv::detect(home);
+    let target = mpv::resolve(&config.mpv, installed, dirs::config_dir().as_deref(), home);
+    let custom_resolves = target
+        .as_ref()
+        .is_ok_and(|t| doctor::custom_command_resolves(&t.program));
+    results.push(doctor::check_mpv_target(
+        &target,
+        installed,
+        custom_resolves,
     ));
-
-    let installs = doctor::detected_mpv_installs(presence, home);
+    results.extend(doctor::check_legacy_command_override(&config.mpv));
 
     let entry_mtimes: Vec<std::time::SystemTime> =
         script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)
@@ -1365,48 +1397,43 @@ fn doctor_command(
         std::time::SystemTime::now(),
     ));
 
-    if presence.flatpak {
-        let flatpak_cli_present = launch::program_on_path("flatpak");
-        let permissions_output = if flatpak_cli_present {
-            std::process::Command::new("flatpak")
-                .args(["info", "--show-permissions", "io.mpv.Mpv"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        } else {
-            None
-        };
-        results.push(doctor::check_flatpak_permissions(
-            presence.flatpak,
-            flatpak_cli_present,
-            permissions_output.as_deref(),
-        ));
-    }
+    if let Ok(target) = &target {
+        if target.kind == mpv::Kind::Flatpak {
+            let flatpak_cli_present = mpv::program_on_path("flatpak");
+            let permissions_output = if flatpak_cli_present {
+                std::process::Command::new("flatpak")
+                    .args(["info", "--show-permissions", "io.mpv.Mpv"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            } else {
+                None
+            };
+            results.push(doctor::check_flatpak_permissions(
+                true,
+                flatpak_cli_present,
+                permissions_output.as_deref(),
+            ));
+        }
 
-    if !installs.is_empty() {
-        let mut script_checks = Vec::new();
-        for install in &installs {
-            let scripts_dir = install.config_dir.join("scripts");
-            let mut outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
-            if fix && outcome.needs_fix.is_some() {
-                match doctor::install_script(&scripts_dir) {
-                    Ok(()) => {
-                        println!("✓ fixed: mpv script installed for {}", install.label);
-                        outcome = doctor::check_tsuzuki_lua(&scripts_dir, install.label);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "warning: failed to install mpv script for {}: {e}",
-                            install.label
-                        );
-                    }
+        let mut outcome = doctor::check_tsuzuki_lua(target);
+        if fix && let Some(script_path) = &outcome.needs_fix {
+            let label = target.kind.label();
+            match doctor::install_script(script_path) {
+                Ok(()) => {
+                    println!("✓ fixed: mpv script installed for {label} mpv");
+                    outcome = doctor::check_tsuzuki_lua(target);
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to install mpv script for {label} mpv: {e}");
                 }
             }
-            script_checks.push(outcome.result);
         }
+        let ok_message = outcome.result.message.clone();
+        let mut script_checks = vec![outcome.result];
         script_checks.extend(doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)));
-        results.push(doctor::combine("mpv script", "up to date", &script_checks));
+        results.push(doctor::combine("mpv script", &ok_message, &script_checks));
     }
 
     let root_checks = doctor::check_tracked_roots(config, home);
@@ -1540,10 +1567,22 @@ mod tests {
         for root in roots {
             config.roots.paths.push(root.to_string_lossy().into_owned());
         }
-        // `true` exits immediately and bypasses mpv detection, so tests that
-        // reach `play_series` never spawn a real mpv.
-        config.mpv.command_override = "true".to_string();
+        // A custom `true` exits immediately and has no script to check, so
+        // tests that reach `play_series` never spawn a real mpv.
+        config.mpv.install = config::Install::Custom;
+        config.mpv.command = "true".to_string();
         config
+    }
+
+    /// The target `tracked_config` resolves to.
+    fn true_target() -> mpv::Target {
+        mpv::Target {
+            kind: mpv::Kind::Custom,
+            chosen_by: mpv::ChosenBy::Pinned,
+            program: "true".to_string(),
+            base_args: Vec::new(),
+            script_path: None,
+        }
     }
 
     fn record(root: &Path, name: &str, status: Status) -> SeriesRecord {
@@ -1804,6 +1843,7 @@ mod tests {
             Some(&root_a),
             &config,
             &state,
+            &true_target(),
             None,
             "resume",
             "Resuming",
@@ -1819,6 +1859,7 @@ mod tests {
             Some(&root_b),
             &config,
             &state,
+            &true_target(),
             None,
             "resume",
             "Resuming",

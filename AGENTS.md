@@ -4,6 +4,7 @@
 
 Local-first Rust CLI (続き). It remembers what you were watching in mpv and resumes it with `tsuzuki`.
 Not a player, library manager, or MAL replacement. Maintenance mode: fixes, small enhancements, dependency upkeep. Product pitch: `README.md`. Commands and dev setup: `docs/development.md`.
+`README.md` is for general users: don't document niche setups there (custom mpv, Snap).
 
 ## How to work
 - Read this file fully before touching code.
@@ -25,6 +26,8 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Local-first. No network at startup; only `sync` and `update` touch it, through `crate::http`. No async runtime.
 - State is one flat TOML, separate from the hand-edited `config.toml`. Every state write goes through the single atomic temp-file-then-rename helper. `config.toml` is a hand-edited file written only by `add`/`exclude` with a plain write.
 - mpv is read-only: the only input is the `contrib/mpv/tsuzuki.lua` script's log (required; freshest entry per file wins). No IPC. Resuming spawns mpv fire-and-forget.
+- One resolver (`mpv::resolve`, from `[mpv] install`) picks the mpv target. Launch, the script check, `doctor` and `--fix` use only it; nothing else detects mpv. Log reading deliberately merges every known log dir (native, Flatpak) regardless of target.
+- The mpv script is enforced only by `tsuzuki`/`start` (refuse to launch when the target's script file is missing) and `doctor`. No runtime warnings anywhere else. Snap isn't supported (its paths can't be known); Snap users use `custom`.
 - Pure Rust only, no C/C++ dependencies. `vendor/anitomy` is read-only (edit only for a reproduced, blocking parsing bug). Distribution is prebuilt binaries via cargo-dist only.
 
 ## Architecture
@@ -71,6 +74,7 @@ Every test guards a named invariant. Rules are checkable, not taste.
 - Topology: a directory equal to a tracked root (canonical path) is never a series, at every site that decides series-ness (pickers, positional/`--root` resolution, pause/drop, sync, reconcile, exclude).
 - Ordering: directories before a level's loose files; numbered natural sort; exclusions applied before sort; symlink cycle terminates.
 - Script-log parsing: redirect entries skipped; malformed entries skipped without aborting; a missing or outdated mpv script reported by `doctor`.
+- mpv target: every `install` value; auto order (native, then Flatpak) for each combination present; pinned-but-missing errors, never falls back; `/snap/bin` mpv is not native. `tsuzuki`/`start` block on a missing target script and never spawn mpv; other commands stay silent; doctor checks and fixes only the target; logs merge regardless of target.
 - Thresholds: a position below `resume_seconds` never creates or overwrites state; `classify_entry()` position check wins over completion on short files; script `eof` is `Completed`; absence alone never moves state.
 - MAL: never write a lower episode; paused and dropped excluded; push count is the watched count (cursor − 1, or the cursor for `Completed`); only `Completed` marks a MAL entry finished; status moves forward only.
 - `exclude`/`pause`/`drop`: legal transitions only; no-record error; idempotent repeat; absolute exclude path rejected; `pause`/`drop` keep the stored position.
