@@ -23,8 +23,7 @@ tempfile = "3.27.0"
 toml = "1.1.4"
 tsuzuki-anitomy = { path = "vendor/anitomy", version = "0.1.0" }
 # Blocking HTTP client, so no async runtime. rustls with the system CA store.
-ureq = { version = "2.10", default-features = false, features = ["tls", "native-certs", "gzip"] }
-webbrowser = "1.0"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 
 # Profile used by cargo-dist builds
 [profile.dist]

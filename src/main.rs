@@ -425,6 +425,18 @@ fn launch_target(
     })
 }
 
+/// Opens `url` with `program` (`xdg-open`), fire-and-forget; an `Err` means it
+/// could not be started.
+fn open_in_browser(program: &str, url: &str) -> std::io::Result<()> {
+    std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
 /// The resolved file, starting position, and episode number to play.
 struct PlaybackTarget {
     file: PathBuf,
@@ -1059,7 +1071,7 @@ fn sync_login_command(config: &Config) -> ExitCode {
     println!();
     println!("  {url}");
     println!();
-    match webbrowser::open(&url) {
+    match open_in_browser("xdg-open", &url) {
         Ok(()) => println!("(opening in your browser...)"),
         Err(_) => {
             println!("(could not open a browser automatically — open the URL above manually)")
@@ -1665,6 +1677,18 @@ mod tests {
         );
         assert_eq!(sync_skipped_line(2, 2), None);
         assert_eq!(sync_summary_line(1, 0, 1), "1 synced, 1 failed");
+    }
+
+    #[test]
+    fn open_in_browser_with_a_missing_program_is_not_found() {
+        let err = open_in_browser("/definitely/not/here/xdg-open", "https://example.com")
+            .expect_err("a missing program cannot start");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn open_in_browser_with_a_startable_program_is_ok() {
+        assert_eq!(open_in_browser("true", "https://example.com").unwrap(), ());
     }
 
     // `pause`/`drop` `--root` disambiguation between identically named series.

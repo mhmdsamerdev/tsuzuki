@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- Leaner build: HTTP client upgraded to ureq 3 (~45 fewer crates); `sync login` opens the browser with `xdg-open`.
 - TLS now uses rustls instead of a vendored OpenSSL, so builds are much faster.
 - `tsuzuki` and `start` refuse to launch mpv until the mpv script is installed (an empty script counts as not installed).
 - New `[mpv] install` setting (`auto`, `native`, `flatpak`, `custom`) picks the mpv to use; `custom` takes `command` and `script_path`. `command_override` still works.

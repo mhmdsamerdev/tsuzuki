@@ -385,7 +385,7 @@ pub struct UreqClient;
 impl MalHttpClient for UreqClient {
     fn post_form(&self, url: &str, params: &[(&str, &str)]) -> Result<HttpResponse, HttpError> {
         let agent = build_agent()?;
-        map_ureq_result(agent.post(url).send_form(params))
+        map_ureq_result(agent.post(url).send_form(params.iter().copied()))
     }
 
     fn get(
@@ -397,7 +397,7 @@ impl MalHttpClient for UreqClient {
         let agent = build_agent()?;
         let mut req = agent
             .get(url)
-            .set("Authorization", &format!("Bearer {bearer_token}"));
+            .header("Authorization", format!("Bearer {bearer_token}"));
         for (key, value) in query {
             req = req.query(key, value);
         }
@@ -413,8 +413,8 @@ impl MalHttpClient for UreqClient {
         let agent = build_agent()?;
         let req = agent
             .patch(url)
-            .set("Authorization", &format!("Bearer {bearer_token}"));
-        map_ureq_result(req.send_form(params))
+            .header("Authorization", format!("Bearer {bearer_token}"));
+        map_ureq_result(req.send_form(params.iter().copied()))
     }
 }
 

@@ -150,7 +150,7 @@ fn fetch_latest_release(repo: &GithubRepo) -> Result<HttpResponse, UpdateCheckEr
     let agent = build_agent().map_err(|e| UpdateCheckError::Transport(e.to_string()))?;
     let req = agent
         .get(&repo.latest_release_api_url())
-        .set("User-Agent", &user_agent());
+        .header("User-Agent", user_agent());
     map_ureq_result(req.call()).map_err(|e| UpdateCheckError::Transport(e.to_string()))
 }
 
