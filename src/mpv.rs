@@ -417,7 +417,6 @@ mod tests {
             install: Install::Custom,
             command: "/opt/mpv/mpv  --profile=anime".to_string(),
             script_path: "~/mpv/scripts/tsuzuki.lua".to_string(),
-            command_override: String::new(),
         };
         for installed in [NONE, NATIVE, FLATPAK, BOTH] {
             assert_eq!(

@@ -1402,7 +1402,6 @@ fn doctor_command(
         installed,
         custom_resolves,
     ));
-    results.extend(doctor::check_legacy_command_override(&config.mpv));
 
     let entry_mtimes: Vec<std::time::SystemTime> =
         script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)

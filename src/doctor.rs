@@ -11,7 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::config::{Config, Install, Mpv};
+use crate::config::Config;
 use crate::mpv::{self, ChosenBy, Installed, Kind, ResolveError, Target};
 use crate::roots;
 use crate::series;
@@ -192,26 +192,6 @@ pub fn custom_command_resolves(program: &str) -> bool {
     } else {
         mpv::program_on_path(program)
     }
-}
-
-// --- 1b. legacy config key ---
-
-/// Warns while the legacy `[mpv] command_override` key is still in config.toml.
-pub fn check_legacy_command_override(config: &Mpv) -> Option<CheckResult> {
-    if config.command_override.is_empty() {
-        return None;
-    }
-    let result = CheckResult::warn("config", "[mpv] command_override is deprecated");
-    Some(
-        if config.install == Install::Custom && config.command == config.command_override {
-            result.with_action(format!(
-                "replace it with install = \"custom\" and command = \"{}\"",
-                config.command_override
-            ))
-        } else {
-            result.with_action("remove it from config.toml; [mpv] install is used instead")
-        },
-    )
 }
 
 // --- 1c. entry timestamps ---
@@ -699,64 +679,6 @@ mod tests {
 
         assert!(custom_command_resolves(&fake.to_string_lossy()));
         assert!(!custom_command_resolves("/definitely/not/here/mpv"));
-    }
-
-    // --- 1b: legacy config key ---
-
-    #[test]
-    fn legacy_command_override_absent_reports_nothing() {
-        assert_eq!(check_legacy_command_override(&Mpv::default()), None);
-    }
-
-    #[test]
-    fn legacy_command_override_migrated_suggests_the_new_keys() {
-        let config = Mpv {
-            install: Install::Custom,
-            command: "mpv --fs".to_string(),
-            script_path: String::new(),
-            command_override: "mpv --fs".to_string(),
-        };
-        assert_eq!(
-            check_legacy_command_override(&config),
-            Some(
-                CheckResult::warn("config", "[mpv] command_override is deprecated")
-                    .with_action("replace it with install = \"custom\" and command = \"mpv --fs\"")
-            )
-        );
-    }
-
-    #[test]
-    fn legacy_command_override_next_to_a_different_custom_command_says_to_remove_it() {
-        let config = Mpv {
-            install: Install::Custom,
-            command: "/opt/mpv/mpv".to_string(),
-            script_path: String::new(),
-            command_override: "mpv".to_string(),
-        };
-        assert_eq!(
-            check_legacy_command_override(&config),
-            Some(
-                CheckResult::warn("config", "[mpv] command_override is deprecated")
-                    .with_action("remove it from config.toml; [mpv] install is used instead")
-            )
-        );
-    }
-
-    #[test]
-    fn legacy_command_override_overridden_by_new_keys_says_to_remove_it() {
-        let config = Mpv {
-            install: Install::Flatpak,
-            command: String::new(),
-            script_path: String::new(),
-            command_override: "mpv".to_string(),
-        };
-        assert_eq!(
-            check_legacy_command_override(&config),
-            Some(
-                CheckResult::warn("config", "[mpv] command_override is deprecated")
-                    .with_action("remove it from config.toml; [mpv] install is used instead")
-            )
-        );
     }
 
     // --- 1d: Flatpak filesystem-permission gap ---

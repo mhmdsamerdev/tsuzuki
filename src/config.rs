@@ -111,10 +111,6 @@ pub struct Mpv {
     /// The `tsuzuki.lua` the `custom` mpv loads. Empty means it isn't checked.
     #[serde(default)]
     pub script_path: String,
-    /// Legacy key, read but never written. A non-empty value maps to
-    /// `custom` + `command` (see [`migrate_command_override`]).
-    #[serde(default, skip_serializing)]
-    pub command_override: String,
 }
 
 /// `8734`: the local OAuth-callback listener port for `tsuzuki sync login`.
@@ -198,18 +194,7 @@ pub fn read(path: &Path) -> io::Result<Config> {
         Err(e) => return Err(e),
     };
     normalize_video_extensions(&mut config);
-    migrate_command_override(&mut config.mpv);
     Ok(config)
-}
-
-/// Maps a legacy `command_override` to `install = "custom"` + `command`, unless
-/// the new keys are already set. In-memory only; `command_override` is kept
-/// so `doctor` can suggest the new keys, and the next write drops it.
-fn migrate_command_override(mpv: &mut Mpv) {
-    if !mpv.command_override.is_empty() && mpv.install == Install::Auto && mpv.command.is_empty() {
-        mpv.install = Install::Custom;
-        mpv.command = mpv.command_override.clone();
-    }
 }
 
 /// Strips a leading `.` from each `video_extensions` entry so `.mkv` and `mkv`
@@ -340,7 +325,6 @@ mod tests {
                 install: Install::Auto,
                 command: String::new(),
                 script_path: String::new(),
-                command_override: String::new(),
             }
         );
         assert_eq!(config.mal.client_id, "");
@@ -528,7 +512,7 @@ client_id = ""
     }
 
     #[test]
-    fn old_config_ignores_watch_later_dir_and_maps_command_override_to_custom() {
+    fn old_config_ignores_watch_later_dir() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -545,7 +529,6 @@ video_extensions = ["mkv"]
 
 [mpv]
 watch_later_dir = "~/old"
-command_override = "mpv"
 
 [mal]
 client_id = ""
@@ -557,10 +540,9 @@ client_id = ""
         assert_eq!(
             config.mpv,
             Mpv {
-                install: Install::Custom,
-                command: "mpv".to_string(),
+                install: Install::Auto,
+                command: String::new(),
                 script_path: String::new(),
-                command_override: "mpv".to_string(),
             }
         );
     }
@@ -597,62 +579,6 @@ client_id = ""
     }
 
     #[test]
-    fn legacy_empty_command_override_is_ignored() {
-        assert_eq!(
-            read_mpv_table("command_override = \"\"\n").unwrap(),
-            Mpv::default()
-        );
-    }
-
-    #[test]
-    fn legacy_command_override_is_ignored_when_install_is_pinned() {
-        assert_eq!(
-            read_mpv_table("install = \"flatpak\"\ncommand_override = \"mpv\"\n").unwrap(),
-            Mpv {
-                install: Install::Flatpak,
-                command: String::new(),
-                script_path: String::new(),
-                command_override: "mpv".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn legacy_command_override_is_ignored_when_command_is_already_set() {
-        assert_eq!(
-            read_mpv_table("command = \"/opt/mpv\"\ncommand_override = \"mpv\"\n").unwrap(),
-            Mpv {
-                install: Install::Auto,
-                command: "/opt/mpv".to_string(),
-                script_path: String::new(),
-                command_override: "mpv".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn migrated_config_is_written_with_the_new_keys_and_without_command_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "[mpv]\ncommand_override = \"mpv --fs\"\n").unwrap();
-
-        let config = read(&path).unwrap();
-        write(&path, &config).unwrap();
-
-        let written = fs::read_to_string(&path).unwrap();
-        assert!(!written.contains("command_override"), "{written}");
-        assert_eq!(
-            read(&path).unwrap().mpv,
-            Mpv {
-                install: Install::Custom,
-                command: "mpv --fs".to_string(),
-                script_path: String::new(),
-                command_override: String::new(),
-            }
-        );
-    }
-
-    #[test]
     fn custom_mpv_keys_round_trip_through_write_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -661,7 +587,6 @@ client_id = ""
                 install: Install::Custom,
                 command: "/opt/mpv/mpv --profile=anime".to_string(),
                 script_path: "~/mpv/scripts/tsuzuki.lua".to_string(),
-                command_override: String::new(),
             },
             ..Config::default()
         };

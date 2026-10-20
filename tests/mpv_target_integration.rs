@@ -256,17 +256,6 @@ fn custom_with_a_missing_script_path_is_blocked_naming_that_path() {
 }
 
 #[test]
-fn legacy_command_override_still_launches_as_custom() {
-    let env = Env::new("command_override = \"mpv --fs\"\n");
-
-    let out = env.run(&["start", "Monster"]);
-
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stderr(&out), "");
-    assert_eq!(env.wait_for_launch()[0], "--fs");
-}
-
-#[test]
 fn auto_picks_native_over_flatpak_and_checks_only_the_native_script() {
     let env = Env::new("install = \"auto\"\n");
     env.install_flatpak();
@@ -411,20 +400,6 @@ fn doctor_custom_command_not_found_fails() {
             .contains("✗ mpv — custom command not found\n  → check [mpv] command in config.toml\n"),
         "{}",
         stdout(&out)
-    );
-}
-
-#[test]
-fn doctor_suggests_new_keys_while_the_legacy_command_override_is_present() {
-    let env = Env::new("command_override = \"mpv --fs\"\n");
-
-    let out = stdout(&env.run(&["doctor"]));
-
-    assert!(
-        out.contains(
-            "⚠ config — [mpv] command_override is deprecated\n  → replace it with install = \"custom\" and command = \"mpv --fs\"\n"
-        ),
-        "{out}"
     );
 }
 

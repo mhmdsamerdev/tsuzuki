@@ -39,9 +39,6 @@ auto_pause_days = 0
 paths = []
 video_extensions = ["mkv", "mp4", "avi", "webm", "mov"]
 
-[mpv]
-command_override = ""
-
 [mal]
 client_id = "{client_id}"
 redirect_port = 8734
