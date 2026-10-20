@@ -216,45 +216,41 @@ pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> Option<
 
 // --- 1d. Flatpak filesystem-permission gap ---
 
-/// Best-effort check that Flatpak mpv can reach the tracked roots, from a
-/// substring scan of `flatpak info --show-permissions`. Never fails: sandbox
-/// permissions are the user's call and the scan is not authoritative.
-pub fn check_flatpak_permissions(
-    flatpak_present: bool,
+/// Whether Flatpak mpv can read each tracked root, from `flatpak info
+/// --file-access=<root>` answers (`hidden`, `read-only`, `read-write`) paired
+/// with the probed root; `None` is a failed probe. Never fails: sandbox
+/// permissions are the user's call.
+pub fn check_flatpak_access(
     flatpak_cli_present: bool,
-    permissions_output: Option<&str>,
+    probes: &[(String, Option<String>)],
 ) -> CheckResult {
-    const VERIFY_ACTION: &str = "flatpak info --show-permissions io.mpv.Mpv";
-
-    if !flatpak_present {
-        return CheckResult::warn("mpv permissions", "skipped — Flatpak mpv not detected");
-    }
     if !flatpak_cli_present {
         return CheckResult::warn(
             "mpv permissions",
             "could not verify (flatpak CLI not found)",
         );
     }
-    let Some(output) = permissions_output else {
-        return CheckResult::warn("mpv permissions", "could not verify").with_action(VERIFY_ACTION);
-    };
-    let broad_access = [
-        "filesystem=host",
-        "filesystems=host",
-        "filesystem=home",
-        "filesystems=home",
-    ]
-    .iter()
-    .any(|needle| output.contains(needle));
-    if broad_access {
-        CheckResult::ok("mpv permissions", "tracked directories accessible")
-    } else {
-        CheckResult::warn(
-            "mpv permissions",
-            "tracked directories may not be accessible",
-        )
-        .with_action(VERIFY_ACTION)
+    let mut hidden = Vec::new();
+    for (root, answer) in probes {
+        match answer.as_deref().map(str::trim) {
+            Some("read-only" | "read-write") => {}
+            Some("hidden") => hidden.push(root.as_str()),
+            _ => {
+                return CheckResult::warn("mpv permissions", "could not verify")
+                    .with_action("flatpak info --file-access=<root> io.mpv.Mpv");
+            }
+        }
     }
+    let Some(first) = hidden.first() else {
+        return CheckResult::ok("mpv permissions", "tracked directories accessible");
+    };
+    CheckResult::warn(
+        "mpv permissions",
+        format!("mpv can't see: {}", hidden.join(", ")),
+    )
+    .with_action(format!(
+        "flatpak override --user --filesystem={first}:ro io.mpv.Mpv"
+    ))
 }
 
 // --- 1e. tsuzuki.lua mpv script (required) ---
@@ -507,10 +503,10 @@ mod tests {
             "mpv permissions",
             "tracked directories may not be accessible",
         )
-        .with_action("flatpak info --show-permissions io.mpv.Mpv");
+        .with_action("flatpak override --user --filesystem=/mnt/a:ro io.mpv.Mpv");
         assert_eq!(
             warn.render(),
-            "⚠ mpv permissions — tracked directories may not be accessible\n  → flatpak info --show-permissions io.mpv.Mpv"
+            "⚠ mpv permissions — tracked directories may not be accessible\n  → flatpak override --user --filesystem=/mnt/a:ro io.mpv.Mpv"
         );
 
         let fail = CheckResult::fail("mpv", "not found");
@@ -685,54 +681,77 @@ mod tests {
 
     // --- 1d: Flatpak filesystem-permission gap ---
 
-    #[test]
-    fn flatpak_permissions_skipped_when_flatpak_not_present() {
-        let r = check_flatpak_permissions(false, true, Some("filesystems=host;"));
-        assert_eq!(r.level, Level::Warn);
-        assert!(r.message.contains("skipped"));
+    fn probe(root: &str, answer: Option<&str>) -> (String, Option<String>) {
+        (root.to_string(), answer.map(str::to_string))
     }
 
     #[test]
-    fn flatpak_permissions_warns_when_cli_missing() {
-        let r = check_flatpak_permissions(true, false, None);
-        assert_eq!(r.level, Level::Warn);
+    fn flatpak_access_ok_when_every_root_is_readable() {
+        let r = check_flatpak_access(
+            true,
+            &[
+                probe("/mnt/a", Some("read-only")),
+                probe("/mnt/b", Some("read-write\n")),
+            ],
+        );
+        assert_eq!(
+            r,
+            CheckResult::ok("mpv permissions", "tracked directories accessible")
+        );
     }
 
     #[test]
-    fn flatpak_permissions_warns_when_output_unavailable() {
-        let r = check_flatpak_permissions(true, true, None);
-        assert_eq!(r.level, Level::Warn);
+    fn flatpak_access_ok_with_no_roots() {
+        let r = check_flatpak_access(true, &[]);
+        assert_eq!(
+            r,
+            CheckResult::ok("mpv permissions", "tracked directories accessible")
+        );
     }
 
     #[test]
-    fn flatpak_permissions_ok_on_broad_host_access() {
-        let r = check_flatpak_permissions(true, true, Some("[Context]\nfilesystems=host;\n"));
-        assert_eq!(r.level, Level::Ok);
+    fn flatpak_access_names_only_the_hidden_roots() {
+        let r = check_flatpak_access(
+            true,
+            &[
+                probe("/mnt/a", Some("read-only")),
+                probe("/mnt/b", Some("hidden")),
+                probe("/mnt/c", Some("hidden")),
+            ],
+        );
+        assert_eq!(
+            r,
+            CheckResult::warn("mpv permissions", "mpv can't see: /mnt/b, /mnt/c")
+                .with_action("flatpak override --user --filesystem=/mnt/b:ro io.mpv.Mpv")
+        );
     }
 
     #[test]
-    fn flatpak_permissions_warns_on_narrow_access() {
-        let r =
-            check_flatpak_permissions(true, true, Some("[Context]\nfilesystems=xdg-download;\n"));
-        assert_eq!(r.level, Level::Warn);
-    }
-
-    #[test]
-    fn flatpak_permissions_never_fails_regardless_of_input() {
-        // Never escalates to FAIL.
-        for output in [
-            None,
-            Some(""),
-            Some("filesystems=xdg-download;"),
-            Some("garbage"),
-        ] {
-            for cli in [true, false] {
-                assert_ne!(
-                    check_flatpak_permissions(true, cli, output).level,
-                    Level::Fail
-                );
-            }
+    fn flatpak_access_warns_could_not_verify_on_unknown_answer() {
+        for answer in [Some(""), Some("garbage"), None] {
+            let r = check_flatpak_access(
+                true,
+                &[probe("/mnt/a", Some("hidden")), probe("/mnt/b", answer)],
+            );
+            assert_eq!(
+                r,
+                CheckResult::warn("mpv permissions", "could not verify")
+                    .with_action("flatpak info --file-access=<root> io.mpv.Mpv"),
+                "answer {answer:?}"
+            );
         }
+    }
+
+    #[test]
+    fn flatpak_access_warns_when_cli_missing() {
+        let r = check_flatpak_access(false, &[probe("/mnt/a", Some("read-only"))]);
+        assert_eq!(
+            r,
+            CheckResult::warn(
+                "mpv permissions",
+                "could not verify (flatpak CLI not found)"
+            )
+        );
     }
 
     // --- 1e: tsuzuki.lua mpv script ---

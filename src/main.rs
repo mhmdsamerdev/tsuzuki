@@ -1416,21 +1416,29 @@ fn doctor_command(
     if let Ok(target) = &target {
         if target.kind == mpv::Kind::Flatpak {
             let flatpak_cli_present = mpv::program_on_path("flatpak");
-            let permissions_output = if flatpak_cli_present {
-                std::process::Command::new("flatpak")
-                    .args(["info", "--show-permissions", "io.mpv.Mpv"])
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            let probes: Vec<(String, Option<String>)> = if flatpak_cli_present {
+                config
+                    .roots
+                    .paths
+                    .iter()
+                    .map(|root| {
+                        let expanded = roots::expand_tilde(Path::new(root), home);
+                        let probed = expanded.canonicalize().unwrap_or(expanded);
+                        let answer = std::process::Command::new("flatpak")
+                            .arg("info")
+                            .arg(format!("--file-access={}", probed.display()))
+                            .arg("io.mpv.Mpv")
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                        (probed.display().to_string(), answer)
+                    })
+                    .collect()
             } else {
-                None
+                Vec::new()
             };
-            results.push(doctor::check_flatpak_permissions(
-                true,
-                flatpak_cli_present,
-                permissions_output.as_deref(),
-            ));
+            results.push(doctor::check_flatpak_access(flatpak_cli_present, &probes));
         }
 
         let mut outcome = doctor::check_tsuzuki_lua(target);

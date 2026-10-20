@@ -658,3 +658,95 @@ fn doctor_fix_with_a_dangling_script_symlink_fails_and_leaves_the_link() {
     assert_eq!(fs::read_link(env.native_script()).unwrap(), missing);
     assert!(!missing.exists());
 }
+
+// --- doctor: Flatpak access per tracked root ---
+
+fn permissions_lines(out: &Output) -> Vec<String> {
+    let text = stdout(out);
+    let mut lines = text.lines().peekable();
+    let mut found = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.contains("mpv permissions") {
+            found.push(line.to_string());
+            while let Some(next) = lines.peek().filter(|l| l.starts_with("  →")) {
+                found.push(next.to_string());
+                lines.next();
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn doctor_flatpak_names_a_symlinked_root_whose_target_is_hidden() {
+    let env = Env::new("install = \"flatpak\"\n");
+    env.install_flatpak();
+    let hidden = env.home.join("Hidden/Anime");
+    fs::create_dir_all(&hidden).unwrap();
+    let link = env.home.join("Linked");
+    std::os::unix::fs::symlink(&hidden, &link).unwrap();
+    let hidden = hidden.canonicalize().unwrap();
+    env.write_config("install = \"flatpak\"\n");
+    let config = env.home.join(".config/tsuzuki/config.toml");
+    fs::write(
+        &config,
+        format!(
+            "[roots]\npaths = [\"{}\", \"{}\"]\n\n[mpv]\ninstall = \"flatpak\"\n",
+            env.home.join("Anime").display(),
+            link.display()
+        ),
+    )
+    .unwrap();
+    // Answers per probed path, so only the symlink's real target is hidden.
+    write_executable(
+        &env.bin.join("flatpak"),
+        &format!(
+            "#!/bin/sh\ncase \"$2\" in\n  --file-access={0}) echo hidden;;\n  *) echo read-only;;\nesac\n",
+            hidden.display()
+        ),
+    );
+
+    let out = env.run(&["doctor"]);
+
+    assert_eq!(
+        permissions_lines(&out),
+        vec![
+            format!("⚠ mpv permissions — mpv can't see: {}", hidden.display()),
+            format!(
+                "  → flatpak override --user --filesystem={}:ro io.mpv.Mpv",
+                hidden.display()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn doctor_flatpak_with_host_read_only_access_reports_accessible() {
+    let env = Env::new("install = \"flatpak\"\n");
+    env.install_flatpak();
+    write_executable(&env.bin.join("flatpak"), "#!/bin/sh\necho read-only\n");
+
+    let out = env.run(&["doctor"]);
+
+    assert_eq!(
+        permissions_lines(&out),
+        vec!["✓ mpv permissions — tracked directories accessible"]
+    );
+}
+
+#[test]
+fn doctor_flatpak_with_an_unusable_flatpak_cli_could_not_verify() {
+    let env = Env::new("install = \"flatpak\"\n");
+    env.install_flatpak();
+    write_executable(&env.bin.join("flatpak"), "#!/bin/sh\nexit 1\n");
+
+    let out = env.run(&["doctor"]);
+
+    assert_eq!(
+        permissions_lines(&out),
+        vec![
+            "⚠ mpv permissions — could not verify",
+            "  → flatpak info --file-access=<root> io.mpv.Mpv"
+        ]
+    );
+}
