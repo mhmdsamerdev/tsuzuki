@@ -2,26 +2,18 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.5]
 
-- Leaner build: HTTP client upgraded to ureq 3 (~45 fewer crates); `sync login` opens the browser with `xdg-open`.
-- TLS now uses rustls instead of a vendored OpenSSL, so builds are much faster.
-- `tsuzuki` and `start` refuse to launch mpv until the mpv script is installed (an empty script counts as not installed).
-- New `[mpv] install` setting (`auto`, `native`, `flatpak`, `custom`) picks the mpv to use; `custom` takes `command` and `script_path`. `command_override` still works.
-- `doctor` checks and fixes only the mpv in use, and says why it was chosen.
-- Snap mpv is no longer mistaken for native mpv.
-- Flatpak mpv now counts as installed only when the `flatpak` command is on `PATH`.
-- Native mpv honors `MPV_HOME` when `doctor` and launch look for the mpv script.
-- `doctor --fix` updates a symlinked mpv script in place instead of replacing the link.
-- mpv's output now goes to `mpv-launch.log` next to `state.toml` (overwritten each launch), and the launch line starts with `→` instead of `✓` since Tsuzuki can't know mpv succeeded.
-- Breaking: mpv's `watch_later` data is no longer read. Install the mpv script with `tsuzuki doctor --fix`; without it nothing is tracked.
-- Removed the `[mpv] watch_later_dir` setting (old configs still load) and the mpv.conf check from `doctor`.
-- Dropped video-header probing; completion now comes only from the script's `eof` and recorded duration.
-- `doctor` warns when mpv entries are dated in the future.
-- Watching a dropped or completed series again now reactivates it, including finishing an episode.
-- `sync exclude <series|root>` keeps a series, or every series under a root, out of MAL sync.
-- `sync` refreshes the MAL token and retries when MAL answers 401 instead of failing every series.
-- `sync` stops with one short message when MyAnimeList is unreachable instead of repeating a long error per series.
+- Breaking: mpv's `watch_later` data support is dropped, the mpv script is required. Install it with `tsuzuki doctor --fix`; `tsuzuki`/`start` refuse to launch without it.
+- New `[mpv] install` setting (`auto`, `native`, `flatpak`, `custom`) picks which mpv to use; `custom` takes `command` and `script_path`.
+- `doctor` checks and fixes only the mpv in use, explains why it was chosen, and warns about future-dated mpv entries.
+- mpv's output goes to `mpv-launch.log` next to `state.toml`; the launch line starts with `→` instead of `✓`.
+- Watching a dropped or completed series again reactivates it.
+- `sync exclude <series|root>` keeps a series, or a whole root, out of MAL sync.
+- `sync` refreshes the MAL token on 401, and stops with one short message when MAL is unreachable.
+- `doctor` asks Flatpak whether mpv can see each tracked root, fixing a false permissions warning (e.g. with `host:ro`).
+- `doctor` reports moved or deleted series as a `⚠ stale records` warning with one name per line (first 3, then "… and N more"); `--forget-orphans` lists every record it removes.
+- Faster, leaner build: rustls instead of OpenSSL, ureq 3 (~45 fewer crates); `sync login` opens the browser with `xdg-open`.
 
 ## [v0.1.4]
 
