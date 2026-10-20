@@ -37,6 +37,8 @@ pub struct CheckResult {
     pub label: String,
     pub level: Level,
     pub message: String,
+    /// Extra lines (e.g. one name per item), printed indented under the row.
+    pub details: Vec<String>,
     pub action: Option<String>,
 }
 
@@ -46,6 +48,7 @@ impl CheckResult {
             label: label.into(),
             level: Level::Ok,
             message: message.into(),
+            details: Vec::new(),
             action: None,
         }
     }
@@ -54,6 +57,7 @@ impl CheckResult {
             label: label.into(),
             level: Level::Warn,
             message: message.into(),
+            details: Vec::new(),
             action: None,
         }
     }
@@ -62,6 +66,7 @@ impl CheckResult {
             label: label.into(),
             level: Level::Fail,
             message: message.into(),
+            details: Vec::new(),
             action: None,
         }
     }
@@ -72,17 +77,30 @@ impl CheckResult {
         self
     }
 
-    /// `✓ label — message`, plus an indented `→ action` line when set.
+    /// Attaches indented lines shown under the row.
+    pub fn with_details(mut self, details: Vec<String>) -> Self {
+        self.details = details;
+        self
+    }
+
+    /// `✓ label — message`, then any indented detail lines, then an indented
+    /// `→ action` line when set.
     pub fn render(&self) -> String {
         let symbol = match self.level {
             Level::Ok => "✓",
             Level::Warn => "⚠",
             Level::Fail => "✗",
         };
-        match &self.action {
-            Some(action) => format!("{symbol} {} — {}\n  → {action}", self.label, self.message),
-            None => format!("{symbol} {} — {}", self.label, self.message),
+        let mut out = format!("{symbol} {} — {}", self.label, self.message);
+        for line in &self.details {
+            out.push_str("\n    ");
+            out.push_str(line);
         }
+        if let Some(action) = &self.action {
+            out.push_str("\n  → ");
+            out.push_str(action);
+        }
+        out
     }
 }
 
@@ -96,6 +114,7 @@ pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResul
             label,
             level: Level::Fail,
             message: worst.message.clone(),
+            details: worst.details.clone(),
             action: worst.action.clone(),
         };
     }
@@ -104,6 +123,7 @@ pub fn combine(label: impl Into<String>, ok_message: &str, results: &[CheckResul
             label,
             level: Level::Warn,
             message: worst.message.clone(),
+            details: worst.details.clone(),
             action: worst.action.clone(),
         };
     }
@@ -436,16 +456,29 @@ pub fn find_orphans(
     orphans
 }
 
+/// Orphan names shown in the report before the rest collapse to "… and N more".
+pub const ORPHAN_LIST_CAP: usize = 3;
+
+/// One name per line, at most `cap` of them, then `… and N more`.
+pub fn name_lines(names: &[&str], cap: usize) -> Vec<String> {
+    let mut lines: Vec<String> = names.iter().take(cap).map(|n| n.to_string()).collect();
+    if names.len() > cap {
+        lines.push(format!("… and {} more", names.len() - cap));
+    }
+    lines
+}
+
 pub fn orphan_check_result(orphans: &[Orphan]) -> CheckResult {
     if orphans.is_empty() {
-        return CheckResult::ok("orphaned records", "none found");
+        return CheckResult::ok("stale records", "none found");
     }
 
     let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
-    CheckResult::fail(
-        "orphaned records",
-        format!("{} found: {}", orphans.len(), names.join(", ")),
+    CheckResult::warn(
+        "stale records",
+        format!("{} (series folder moved or deleted)", orphans.len()),
     )
+    .with_details(name_lines(&names, ORPHAN_LIST_CAP))
     .with_action(FORGET_ORPHANS_COMMAND)
 }
 
@@ -1123,13 +1156,54 @@ mod tests {
             },
         ];
         let r = orphan_check_result(&orphans);
-        assert_eq!(r.level, Level::Fail);
-        assert!(r.message.contains("Monster"));
-        assert!(r.message.contains("One Piece"));
         assert_eq!(
-            r.action.as_deref(),
-            Some("tsuzuki doctor --fix --forget-orphans")
+            r.render(),
+            "⚠ stale records — 2 (series folder moved or deleted)\n    Monster\n    One Piece\n  → tsuzuki doctor --fix --forget-orphans"
         );
+    }
+
+    #[test]
+    fn orphan_check_result_collapses_names_past_the_cap() {
+        let orphans: Vec<Orphan> = ["A", "B", "C", "D", "E"]
+            .iter()
+            .map(|n| Orphan {
+                root: "~/Anime".to_string(),
+                name: n.to_string(),
+            })
+            .collect();
+        assert_eq!(
+            orphan_check_result(&orphans).render(),
+            "⚠ stale records — 5 (series folder moved or deleted)\n    A\n    B\n    C\n    … and 2 more\n  → tsuzuki doctor --fix --forget-orphans"
+        );
+    }
+
+    #[test]
+    fn name_lines_caps_at_the_boundary() {
+        assert_eq!(name_lines(&[], 3), Vec::<String>::new());
+        assert_eq!(name_lines(&["a", "b", "c"], 3), vec!["a", "b", "c"]);
+        assert_eq!(
+            name_lines(&["a", "b", "c", "d"], 3),
+            vec!["a", "b", "c", "… and 1 more"]
+        );
+        assert_eq!(name_lines(&["a", "b"], 0), vec!["… and 2 more"]);
+    }
+
+    #[test]
+    fn render_prints_details_between_message_and_action() {
+        let r = CheckResult::warn("x", "m")
+            .with_details(vec!["one".to_string(), "two".to_string()])
+            .with_action("do it");
+        assert_eq!(r.render(), "⚠ x — m\n    one\n    two\n  → do it");
+    }
+
+    #[test]
+    fn combine_keeps_the_worst_results_details() {
+        let r = combine(
+            "g",
+            "ok",
+            &[CheckResult::warn("x", "m").with_details(vec!["d".to_string()])],
+        );
+        assert_eq!(r.details, vec!["d".to_string()]);
     }
 
     #[test]

@@ -58,16 +58,12 @@ updated_at = 1
     let stdout = String::from_utf8_lossy(&doctor.stdout);
 
     assert!(
-        !doctor.status.success(),
-        "a deliberately broken setup must exit non-zero, got stdout:\n{stdout}"
-    );
-    assert!(
         !stdout.contains("watch-later") && !stdout.contains("mpv config"),
         "mpv.conf and watch_later are no longer checked, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("✗") && stdout.contains("orphaned records"),
-        "must report the orphaned records check as failing, got:\n{stdout}"
+        stdout.contains("⚠ stale records — 1 (series folder moved or deleted)\n    GoneSeries\n"),
+        "must report the stale records check as a warning, got:\n{stdout}"
     );
     assert!(
         stdout.contains("GoneSeries"),
@@ -94,8 +90,13 @@ updated_at = 1
     let fix = run(home, &["doctor", "--fix", "--forget-orphans"]);
     let fix_stdout = String::from_utf8_lossy(&fix.stdout);
     assert!(
-        fix_stdout.contains("GoneSeries"),
+        fix_stdout.contains("✓ removed 1 stale record\n    GoneSeries\n"),
         "must print what it's about to delete, got:\n{fix_stdout}"
+    );
+
+    assert!(
+        !fix_stdout.contains("⚠ stale records"),
+        "a cleared record must not be reported as still stale, got:\n{fix_stdout}"
     );
 
     let state_contents = fs::read_to_string(&state_path).unwrap();
