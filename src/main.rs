@@ -409,20 +409,20 @@ fn reconcile_state(
 }
 
 /// Resolves the mpv `resume`/`start` launch and refuses when its
-/// `tsuzuki.lua` is missing, since nothing watched would be tracked. A script
-/// that differs from the bundled one still launches; `doctor` reports it.
-fn launch_target(config: &Config, home: Option<&Path>) -> Result<mpv::Target, ExitCode> {
+/// `tsuzuki.lua` is missing or blank, since nothing watched would be tracked.
+/// A script that differs from the bundled one still launches; `doctor`
+/// reports it.
+fn launch_target(
+    config: &Config,
+    state_path: &Path,
+    home: Option<&Path>,
+) -> Result<launch::Launch, ExitCode> {
     let target = mpv::resolve_here(&config.mpv, home).map_err(|e| fail(&e.to_string()))?;
-    if let Some(script) = &target.script_path
-        && !script.is_file()
-    {
-        return Err(fail(&format!(
-            "mpv script not installed for {} mpv at {} — run: tsuzuki doctor --fix",
-            target.kind.label(),
-            script.display()
-        )));
-    }
-    Ok(target)
+    mpv::require_script(&target).map_err(|e| fail(&e.to_string()))?;
+    Ok(launch::Launch {
+        target,
+        log_path: launch::log_path(state_path),
+    })
 }
 
 /// The resolved file, starting position, and episode number to play.
@@ -504,7 +504,7 @@ fn format_timestamp(seconds: f64) -> String {
 fn play_series(
     config: &Config,
     state: &State,
-    mpv: &mpv::Target,
+    mpv: &launch::Launch,
     root: &str,
     name: &str,
     home: Option<&Path>,
@@ -515,7 +515,7 @@ fn play_series(
         Some(target) => match launch::resume_playback(mpv, &target.file, target.position_seconds) {
             Ok(()) => {
                 println!(
-                    "✓ {verb} \"{name}\" — {} ({})",
+                    "→ {verb} \"{name}\" — {} ({})",
                     anitomy::episode_phrase(target.season, target.episode_number),
                     format_timestamp(target.position_seconds),
                 );
@@ -536,7 +536,7 @@ fn explicit_play(
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
-    mpv: &mpv::Target,
+    mpv: &launch::Launch,
     home: Option<&Path>,
     command_name: &str,
     verb: &str,
@@ -557,7 +557,7 @@ fn resolve_scope(
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
-    mpv: &mpv::Target,
+    mpv: &launch::Launch,
     home: Option<&Path>,
     command_name: &str,
     verb: &str,
@@ -672,7 +672,7 @@ fn resume_command(
         Ok(v) => v,
         Err(code) => return code,
     };
-    let mpv = match launch_target(config, home) {
+    let mpv = match launch_target(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -854,7 +854,7 @@ fn start_command(
         Ok(v) => v,
         Err(code) => return code,
     };
-    let mpv = match launch_target(config, home) {
+    let mpv = match launch_target(config, state_path, home) {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -1376,7 +1376,12 @@ fn doctor_command(
     let mut results = Vec::new();
 
     let installed = mpv::detect(home);
-    let target = mpv::resolve(&config.mpv, installed, dirs::config_dir().as_deref(), home);
+    let target = mpv::resolve(
+        &config.mpv,
+        installed,
+        mpv::native_config_dir().as_deref(),
+        home,
+    );
     let custom_resolves = target
         .as_ref()
         .is_ok_and(|t| doctor::custom_command_resolves(&t.program));
@@ -1574,14 +1579,17 @@ mod tests {
         config
     }
 
-    /// The target `tracked_config` resolves to.
-    fn true_target() -> mpv::Target {
-        mpv::Target {
-            kind: mpv::Kind::Custom,
-            chosen_by: mpv::ChosenBy::Pinned,
-            program: "true".to_string(),
-            base_args: Vec::new(),
-            script_path: None,
+    /// The launch `tracked_config` resolves to, logging under `dir`.
+    fn true_launch(dir: &Path) -> launch::Launch {
+        launch::Launch {
+            target: mpv::Target {
+                kind: mpv::Kind::Custom,
+                chosen_by: mpv::ChosenBy::Pinned,
+                program: "true".to_string(),
+                base_args: Vec::new(),
+                script_path: None,
+            },
+            log_path: dir.join("mpv-launch.log"),
         }
     }
 
@@ -1843,7 +1851,7 @@ mod tests {
             Some(&root_a),
             &config,
             &state,
-            &true_target(),
+            &true_launch(dir.path()),
             None,
             "resume",
             "Resuming",
@@ -1859,7 +1867,7 @@ mod tests {
             Some(&root_b),
             &config,
             &state,
-            &true_target(),
+            &true_launch(dir.path()),
             None,
             "resume",
             "Resuming",

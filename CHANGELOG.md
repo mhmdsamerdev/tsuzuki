@@ -5,10 +5,14 @@ All notable changes to Tsuzuki are documented here.
 ## [Unreleased]
 
 - TLS now uses rustls instead of a vendored OpenSSL, so builds are much faster.
-- `tsuzuki` and `start` refuse to launch mpv until the mpv script is installed.
+- `tsuzuki` and `start` refuse to launch mpv until the mpv script is installed (an empty script counts as not installed).
 - New `[mpv] install` setting (`auto`, `native`, `flatpak`, `custom`) picks the mpv to use; `custom` takes `command` and `script_path`. `command_override` still works.
 - `doctor` checks and fixes only the mpv in use, and says why it was chosen.
 - Snap mpv is no longer mistaken for native mpv.
+- Flatpak mpv now counts as installed only when the `flatpak` command is on `PATH`.
+- Native mpv honors `MPV_HOME` when `doctor` and launch look for the mpv script.
+- `doctor --fix` updates a symlinked mpv script in place instead of replacing the link.
+- mpv's output now goes to `mpv-launch.log` next to `state.toml` (overwritten each launch), and the launch line starts with `→` instead of `✓` since Tsuzuki can't know mpv succeeded.
 - Breaking: mpv's `watch_later` data is no longer read. Install the mpv script with `tsuzuki doctor --fix`; without it nothing is tracked.
 - Removed the `[mpv] watch_later_dir` setting (old configs still load) and the mpv.conf check from `doctor`.
 - Dropped video-header probing; completion now comes only from the script's `eof` and recorded duration.

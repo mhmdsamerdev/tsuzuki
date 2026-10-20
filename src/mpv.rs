@@ -9,7 +9,7 @@
 //! snap's own wrapper, so they can't be known without guessing. Snap users
 //! use `install = "custom"`.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -93,19 +93,71 @@ impl fmt::Display for ResolveError {
     }
 }
 
+/// Why the target's script blocks a launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptError {
+    /// A native or Flatpak target whose script dir can't be located.
+    Unlocatable(Kind),
+    /// The script file is missing, empty or whitespace-only.
+    NotInstalled { kind: Kind, path: PathBuf },
+}
+
+impl fmt::Display for ScriptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScriptError::Unlocatable(kind) => write!(
+                f,
+                "cannot locate the mpv script directory for {} mpv — set [mpv] install = \"custom\" with command and script_path in config.toml",
+                kind.label()
+            ),
+            ScriptError::NotInstalled { kind, path } => write!(
+                f,
+                "mpv script not installed for {} mpv at {} — run: tsuzuki doctor --fix",
+                kind.label(),
+                path.display()
+            ),
+        }
+    }
+}
+
+/// True for a script file with no content, which tracks nothing.
+pub fn is_blank_script(bytes: &[u8]) -> bool {
+    bytes.trim_ascii().is_empty()
+}
+
+/// Checks the target's script is installed. Only `custom` may have no known
+/// script path (then nothing is checked); a differing script passes, since
+/// `doctor` owns "out of date".
+pub fn require_script(target: &Target) -> Result<(), ScriptError> {
+    let Some(path) = &target.script_path else {
+        return match target.kind {
+            Kind::Custom => Ok(()),
+            kind => Err(ScriptError::Unlocatable(kind)),
+        };
+    };
+    match std::fs::read(path) {
+        Ok(bytes) if !is_blank_script(&bytes) => Ok(()),
+        _ => Err(ScriptError::NotInstalled {
+            kind: target.kind,
+            path: path.clone(),
+        }),
+    }
+}
+
 /// Resolves `[mpv]` to the target. `auto` tries native, then Flatpak; a pinned
-/// kind that isn't installed is an error, never a fallback.
+/// kind that isn't installed is an error, never a fallback. `native_config_dir`
+/// is native mpv's config dir (see [`native_config_dir`]).
 pub fn resolve(
     mpv: &Mpv,
     installed: Installed,
-    config_dir: Option<&Path>,
+    native_config_dir: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<Target, ResolveError> {
     match mpv.install {
-        Install::Auto if installed.native => Ok(native(ChosenBy::Auto, config_dir)),
+        Install::Auto if installed.native => Ok(native(ChosenBy::Auto, native_config_dir)),
         Install::Auto if installed.flatpak => Ok(flatpak(ChosenBy::Auto, home)),
         Install::Auto => Err(ResolveError::NotFound),
-        Install::Native if installed.native => Ok(native(ChosenBy::Pinned, config_dir)),
+        Install::Native if installed.native => Ok(native(ChosenBy::Pinned, native_config_dir)),
         Install::Native => Err(ResolveError::NotInstalled(Kind::Native)),
         Install::Flatpak if installed.flatpak => Ok(flatpak(ChosenBy::Pinned, home)),
         Install::Flatpak => Err(ResolveError::NotInstalled(Kind::Flatpak)),
@@ -113,9 +165,22 @@ pub fn resolve(
     }
 }
 
-/// [`resolve`] against the real `PATH`, Flatpak dirs and XDG config dir.
+/// [`resolve`] against the real `PATH`, Flatpak dirs and native config dir.
 pub fn resolve_here(mpv: &Mpv, home: Option<&Path>) -> Result<Target, ResolveError> {
-    resolve(mpv, detect(home), dirs::config_dir().as_deref(), home)
+    resolve(mpv, detect(home), native_config_dir().as_deref(), home)
+}
+
+/// Native mpv's config dir: `$MPV_HOME` when set and non-empty, else `mpv`
+/// under the XDG config dir.
+pub fn native_config_dir() -> Option<PathBuf> {
+    config_dir_from(std::env::var_os("MPV_HOME"), dirs::config_dir())
+}
+
+fn config_dir_from(mpv_home: Option<OsString>, xdg_config_dir: Option<PathBuf>) -> Option<PathBuf> {
+    match mpv_home {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => xdg_config_dir.map(|d| d.join("mpv")),
+    }
 }
 
 fn native(chosen_by: ChosenBy, config_dir: Option<&Path>) -> Target {
@@ -124,7 +189,7 @@ fn native(chosen_by: ChosenBy, config_dir: Option<&Path>) -> Target {
         chosen_by,
         program: "mpv".to_string(),
         base_args: Vec::new(),
-        script_path: config_dir.map(|d| d.join("mpv/scripts/tsuzuki.lua")),
+        script_path: config_dir.map(|d| d.join("scripts/tsuzuki.lua")),
     }
 }
 
@@ -152,12 +217,13 @@ fn custom(mpv: &Mpv, home: Option<&Path>) -> Result<Target, ResolveError> {
     })
 }
 
-/// Which installs exist on this machine. Cheap: a `PATH` scan and two
+/// Which installs exist on this machine. Cheap: `PATH` scans and two
 /// directory checks, no spawn.
 pub fn detect(home: Option<&Path>) -> Installed {
+    let path_var = std::env::var_os("PATH");
     Installed {
-        native: std::env::var_os("PATH").is_some_and(|p| native_mpv_on(&p)),
-        flatpak: flatpak_mpv_installed(home),
+        native: path_var.as_deref().is_some_and(native_mpv_on),
+        flatpak: flatpak_installed(Path::new("/var/lib/flatpak"), home, path_var.as_deref()),
     }
 }
 
@@ -182,10 +248,11 @@ fn resolves_to_snap(candidate: &Path) -> bool {
 
 /// True if an executable named `name` exists on `$PATH`.
 pub fn program_on_path(name: &str) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| is_executable_file(&dir.join(name)))
+    std::env::var_os("PATH").is_some_and(|path_var| program_on(name, &path_var))
+}
+
+fn program_on(name: &str, path_var: &OsStr) -> bool {
+    std::env::split_paths(path_var).any(|dir| is_executable_file(&dir.join(name)))
 }
 
 /// True for a regular file with an execute bit set, so a non-executable file
@@ -203,16 +270,13 @@ pub fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// True if `io.mpv.Mpv` is installed system-wide or under `home`, checked by
-/// directory existence.
-fn flatpak_mpv_installed(home: Option<&Path>) -> bool {
-    flatpak_mpv_installed_in(Path::new("/var/lib/flatpak"), home)
-}
-
-/// [`flatpak_mpv_installed`] with the system install root injected for tests.
-fn flatpak_mpv_installed_in(system_root: &Path, home: Option<&Path>) -> bool {
-    system_root.join("app/io.mpv.Mpv").is_dir()
-        || home.is_some_and(|h| h.join(".local/share/flatpak/app/io.mpv.Mpv").is_dir())
+/// True if `io.mpv.Mpv` is installed system-wide (`system_root`) or under
+/// `home`, by directory existence, and the `flatpak` CLI that launches it is on
+/// `path_var`. The folder alone can't run anything.
+fn flatpak_installed(system_root: &Path, home: Option<&Path>, path_var: Option<&OsStr>) -> bool {
+    let app_dir = system_root.join("app/io.mpv.Mpv").is_dir()
+        || home.is_some_and(|h| h.join(".local/share/flatpak/app/io.mpv.Mpv").is_dir());
+    app_dir && path_var.is_some_and(|p| program_on("flatpak", p))
 }
 
 #[cfg(test)]
@@ -250,7 +314,7 @@ mod tests {
             chosen_by,
             program: "mpv".to_string(),
             base_args: Vec::new(),
-            script_path: Some(PathBuf::from("/cfg/mpv/scripts/tsuzuki.lua")),
+            script_path: Some(PathBuf::from("/cfg/scripts/tsuzuki.lua")),
         }
     }
 
@@ -474,20 +538,141 @@ mod tests {
     }
 
     #[test]
-    fn flatpak_detection_needs_a_system_or_user_install_dir() {
+    fn flatpak_detection_needs_a_system_or_user_install_dir_and_the_flatpak_cli() {
         let dir = tempfile::tempdir().unwrap();
         let system = dir.path().join("system");
         let home = dir.path().join("home");
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let with_cli = bin.as_os_str();
 
-        assert!(!flatpak_mpv_installed_in(&system, Some(&home)));
-        assert!(!flatpak_mpv_installed_in(&system, None));
+        // No install dir anywhere, with or without the CLI.
+        assert!(!flatpak_installed(&system, Some(&home), Some(with_cli)));
+        assert!(!flatpak_installed(&system, None, Some(with_cli)));
 
         fs::create_dir_all(home.join(".local/share/flatpak/app/io.mpv.Mpv")).unwrap();
-        assert!(flatpak_mpv_installed_in(&system, Some(&home)));
-        assert!(!flatpak_mpv_installed_in(&system, None));
-
         fs::create_dir_all(system.join("app/io.mpv.Mpv")).unwrap();
-        assert!(flatpak_mpv_installed_in(&system, None));
+        // Both install dirs exist but the CLI doesn't: not installed.
+        assert!(!flatpak_installed(&system, Some(&home), Some(with_cli)));
+        assert!(!flatpak_installed(&system, Some(&home), None));
+
+        #[cfg(unix)]
+        {
+            executable(&bin.join("flatpak"));
+            assert!(flatpak_installed(&system, Some(&home), Some(with_cli)));
+            assert!(flatpak_installed(&system, None, Some(with_cli)));
+            fs::remove_dir_all(system.join("app/io.mpv.Mpv")).unwrap();
+            assert!(flatpak_installed(&system, Some(&home), Some(with_cli)));
+            assert!(!flatpak_installed(&system, None, Some(with_cli)));
+        }
+    }
+
+    #[test]
+    fn native_config_dir_prefers_a_non_empty_mpv_home_over_the_xdg_dir() {
+        let xdg = || Some(PathBuf::from("/xdg"));
+        assert_eq!(
+            config_dir_from(Some(OsString::from("/portable")), xdg()),
+            Some(PathBuf::from("/portable"))
+        );
+        assert_eq!(
+            config_dir_from(Some(OsString::new()), xdg()),
+            Some(PathBuf::from("/xdg/mpv"))
+        );
+        assert_eq!(
+            config_dir_from(None, xdg()),
+            Some(PathBuf::from("/xdg/mpv"))
+        );
+        assert_eq!(config_dir_from(None, None), None);
+        assert_eq!(
+            config_dir_from(Some(OsString::from("/portable")), None),
+            Some(PathBuf::from("/portable"))
+        );
+    }
+
+    fn target_with_script(kind: Kind, script_path: Option<PathBuf>) -> Target {
+        Target {
+            kind,
+            chosen_by: ChosenBy::Pinned,
+            program: "mpv".to_string(),
+            base_args: Vec::new(),
+            script_path,
+        }
+    }
+
+    #[test]
+    fn require_script_accepts_any_script_with_content_even_a_differing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        for contents in ["-- an older tsuzuki.lua\n", "x"] {
+            fs::write(&script, contents).unwrap();
+            assert_eq!(
+                require_script(&target_with_script(Kind::Native, Some(script.clone()))),
+                Ok(())
+            );
+        }
+    }
+
+    #[test]
+    fn require_script_rejects_a_missing_empty_or_whitespace_only_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        let target = target_with_script(Kind::Flatpak, Some(script.clone()));
+        let expected = Err(ScriptError::NotInstalled {
+            kind: Kind::Flatpak,
+            path: script.clone(),
+        });
+
+        assert_eq!(require_script(&target), expected);
+        for contents in ["", " \n\t\r\n"] {
+            fs::write(&script, contents).unwrap();
+            assert_eq!(require_script(&target), expected, "{contents:?}");
+        }
+    }
+
+    #[test]
+    fn require_script_rejects_a_directory_in_place_of_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        fs::create_dir(&script).unwrap();
+        assert_eq!(
+            require_script(&target_with_script(Kind::Native, Some(script.clone()))),
+            Err(ScriptError::NotInstalled {
+                kind: Kind::Native,
+                path: script
+            })
+        );
+    }
+
+    #[test]
+    fn require_script_without_a_known_path_blocks_native_and_flatpak_but_not_custom() {
+        assert_eq!(
+            require_script(&target_with_script(Kind::Native, None)),
+            Err(ScriptError::Unlocatable(Kind::Native))
+        );
+        assert_eq!(
+            require_script(&target_with_script(Kind::Flatpak, None)),
+            Err(ScriptError::Unlocatable(Kind::Flatpak))
+        );
+        assert_eq!(
+            require_script(&target_with_script(Kind::Custom, None)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn script_error_messages_name_the_next_step() {
+        assert_eq!(
+            ScriptError::NotInstalled {
+                kind: Kind::Native,
+                path: PathBuf::from("/c/mpv/scripts/tsuzuki.lua")
+            }
+            .to_string(),
+            "mpv script not installed for native mpv at /c/mpv/scripts/tsuzuki.lua — run: tsuzuki doctor --fix"
+        );
+        assert_eq!(
+            ScriptError::Unlocatable(Kind::Flatpak).to_string(),
+            "cannot locate the mpv script directory for Flatpak mpv — set [mpv] install = \"custom\" with command and script_path in config.toml"
+        );
     }
 
     #[test]

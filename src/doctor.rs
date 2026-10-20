@@ -283,18 +283,23 @@ pub struct ScriptCheckOutcome {
     pub needs_fix: Option<PathBuf>,
 }
 
-/// Compares the target's `tsuzuki.lua` byte-for-byte with the bundled copy.
-/// A target without a known script path can't be verified.
+/// Compares the target's `tsuzuki.lua` byte-for-byte with the bundled copy; a
+/// blank file counts as not installed. Only a `custom` target may lack a
+/// script path (warned, not verified); native and Flatpak without one fail.
 pub fn check_tsuzuki_lua(target: &Target) -> ScriptCheckOutcome {
     let label = target.kind.label();
     let Some(script_path) = &target.script_path else {
-        let result = CheckResult::warn("mpv script", format!("not verified ({label})"));
+        let result = if target.kind == Kind::Custom {
+            CheckResult::warn("mpv script", format!("not verified ({label})"))
+                .with_action("set [mpv] script_path in config.toml")
+        } else {
+            CheckResult::fail("mpv script", format!("script directory unknown ({label})"))
+                .with_action(
+                    "set [mpv] install = \"custom\" with command and script_path in config.toml",
+                )
+        };
         return ScriptCheckOutcome {
-            result: if target.kind == Kind::Custom {
-                result.with_action("set [mpv] script_path in config.toml")
-            } else {
-                result
-            },
+            result,
             needs_fix: None,
         };
     };
@@ -304,12 +309,12 @@ pub fn check_tsuzuki_lua(target: &Target) -> ScriptCheckOutcome {
             result: CheckResult::ok("mpv script", format!("up to date ({label})")),
             needs_fix: None,
         },
-        Ok(_) => ScriptCheckOutcome {
+        Ok(bytes) if !mpv::is_blank_script(&bytes) => ScriptCheckOutcome {
             result: CheckResult::fail("mpv script", format!("out of date ({label})"))
                 .with_action("tsuzuki doctor --fix"),
             needs_fix: Some(script_path.clone()),
         },
-        Err(_) => ScriptCheckOutcome {
+        _ => ScriptCheckOutcome {
             result: CheckResult::fail("mpv script", format!("not installed ({label})"))
                 .with_action("tsuzuki doctor --fix"),
             needs_fix: Some(script_path.clone()),
@@ -318,8 +323,13 @@ pub fn check_tsuzuki_lua(target: &Target) -> ScriptCheckOutcome {
 }
 
 /// Installs or updates the script at `script_path` atomically (temp file in
-/// the same directory, then rename).
+/// the same directory, then rename). A symlinked script is written through, so
+/// the user's link survives; a dangling link is an error.
 pub fn install_script(script_path: &Path) -> io::Result<()> {
+    let script_path = &match fs::symlink_metadata(script_path) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(script_path)?,
+        _ => script_path.to_path_buf(),
+    };
     let dir = script_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -862,13 +872,38 @@ mod tests {
     }
 
     #[test]
-    fn tsuzuki_lua_native_with_unknown_path_warns_without_a_custom_action() {
-        let outcome = check_tsuzuki_lua(&target(Kind::Native, ChosenBy::Auto, None));
-        assert_eq!(
-            outcome.result,
-            CheckResult::warn("mpv script", "not verified (native)")
-        );
-        assert_eq!(outcome.needs_fix, None);
+    fn tsuzuki_lua_native_or_flatpak_with_unknown_path_fails_and_needs_no_fix() {
+        for (kind, label) in [(Kind::Native, "native"), (Kind::Flatpak, "Flatpak")] {
+            let outcome = check_tsuzuki_lua(&target(kind, ChosenBy::Auto, None));
+            assert_eq!(
+                outcome.result,
+                CheckResult::fail("mpv script", format!("script directory unknown ({label})"))
+                    .with_action(
+                        "set [mpv] install = \"custom\" with command and script_path in config.toml"
+                    )
+            );
+            assert_eq!(outcome.needs_fix, None);
+        }
+    }
+
+    #[test]
+    fn tsuzuki_lua_blank_content_is_not_installed_and_needs_fix() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("tsuzuki.lua");
+        for contents in ["", " \n\t\n"] {
+            std_fs::write(&script, contents).unwrap();
+
+            let outcome =
+                check_tsuzuki_lua(&target(Kind::Native, ChosenBy::Auto, Some(script.clone())));
+
+            assert_eq!(
+                outcome.result,
+                CheckResult::fail("mpv script", "not installed (native)")
+                    .with_action("tsuzuki doctor --fix"),
+                "{contents:?}"
+            );
+            assert_eq!(outcome.needs_fix, Some(script.clone()), "{contents:?}");
+        }
     }
 
     #[test]
@@ -900,6 +935,35 @@ mod tests {
         install_script(&script).unwrap();
 
         assert_eq!(std_fs::read_to_string(&script).unwrap(), BUNDLED_SCRIPT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_script_through_a_symlink_updates_the_linked_file_and_keeps_the_link() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("dotfiles.lua");
+        let link = dir.path().join("tsuzuki.lua");
+        std_fs::write(&real, "-- stale\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        install_script(&link).unwrap();
+
+        assert_eq!(std_fs::read_link(&link).unwrap(), real);
+        assert_eq!(std_fs::read_to_string(&real).unwrap(), BUNDLED_SCRIPT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_script_through_a_dangling_symlink_errors_and_leaves_the_link() {
+        let dir = tempdir().unwrap();
+        let gone = dir.path().join("gone.lua");
+        let link = dir.path().join("tsuzuki.lua");
+        std::os::unix::fs::symlink(&gone, &link).unwrap();
+
+        assert!(install_script(&link).is_err());
+
+        assert_eq!(std_fs::read_link(&link).unwrap(), gone);
+        assert!(!gone.exists());
     }
 
     #[cfg(unix)]

@@ -29,6 +29,10 @@ cargo nextest run --run-ignored ignored-only   # live-network tests
 ./target/debug/tsuzuki status   # run the dev build
 ```
 
+## Debugging a launch
+
+`tsuzuki` and `start` spawn mpv and don't wait for it. Its command line and output are in `mpv-launch.log` next to `state.toml` (`~/.local/share/tsuzuki/` by default), overwritten on each launch. Attach it to bug reports.
+
 ## Sending a change
 
 Add a line to [`CHANGELOG.md`](../CHANGELOG.md) under `[Unreleased]` for anything user-visible. Open a PR once tests, fmt and clippy pass.

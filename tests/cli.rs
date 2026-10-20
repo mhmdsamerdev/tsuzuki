@@ -1686,7 +1686,7 @@ fn start_with_series_name_and_no_root_of_that_name_still_plays_the_series() {
     assert_eq!(
         stdout_of(&out),
         format!(
-            "✓ Starting \"Bleach\" — episode 1 (00:00)\n  → {}/Bleach/ep01.mkv\n",
+            "→ Starting \"Bleach\" — episode 1 (00:00)\n  → {}/Bleach/ep01.mkv\n",
             roots[1]
         )
     );
@@ -1705,7 +1705,7 @@ fn start_with_series_and_root_flag_behaves_as_before() {
     assert_eq!(
         stdout_of(&out),
         format!(
-            "✓ Starting \"Monster\" — episode 1 (00:00)\n  → {}/Monster/ep01.mkv\n",
+            "→ Starting \"Monster\" — episode 1 (00:00)\n  → {}/Monster/ep01.mkv\n",
             roots[1]
         )
     );
@@ -1743,7 +1743,7 @@ fn start_with_name_that_is_both_a_series_and_a_root_errors_and_runs_nothing() {
     assert_eq!(
         stdout_of(&series),
         format!(
-            "✓ Starting \"re\" — episode 1 (00:00)\n  → {}/re/ep01.mkv\n",
+            "→ Starting \"re\" — episode 1 (00:00)\n  → {}/re/ep01.mkv\n",
             roots[0]
         )
     );
@@ -1842,7 +1842,7 @@ fn resume_with_root_having_exactly_one_in_progress_series_plays_it_without_a_pro
     assert_eq!(
         stdout_of(&out),
         format!(
-            "✓ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
+            "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
             roots[1]
         )
     );
@@ -1863,7 +1863,7 @@ fn resume_root_flag_without_series_scopes_to_that_root() {
     assert_eq!(
         stdout_of(&out),
         format!(
-            "✓ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
+            "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
             roots[1]
         )
     );
@@ -1925,7 +1925,7 @@ fn season_two_episode_shows_season_in_status_list_and_resume() {
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
         format!(
-            "✓ Resuming \"Bakuman\" — Season 2, Episode 1 (03:44)\n  → {}\n",
+            "→ Resuming \"Bakuman\" — Season 2, Episode 1 (03:44)\n  → {}\n",
             path.display()
         )
     );
@@ -1941,7 +1941,7 @@ fn season_one_episode_output_is_unchanged() {
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
         format!(
-            "✓ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
+            "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
             path.display()
         )
     );
@@ -1957,7 +1957,7 @@ fn episode_without_a_detected_season_output_is_unchanged() {
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
         format!(
-            "✓ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
+            "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
             path.display()
         )
     );

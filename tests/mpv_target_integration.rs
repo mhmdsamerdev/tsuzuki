@@ -63,12 +63,18 @@ impl Env {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_env(args, &[])
+    }
+
+    fn run_with_env(&self, args: &[&str], vars: &[(&str, &Path)]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tsuzuki"))
             .args(args)
             .env("HOME", &self.home)
             .env("PATH", &self.bin)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME")
+            .env_remove("MPV_HOME")
+            .envs(vars.iter().copied())
             .output()
             .unwrap()
     }
@@ -82,9 +88,31 @@ impl Env {
             .join(".var/app/io.mpv.Mpv/config/mpv/scripts/tsuzuki.lua")
     }
 
-    /// Makes Flatpak mpv count as installed, via the per-user install dir.
+    /// Makes Flatpak mpv count as installed: the per-user install dir plus a
+    /// `flatpak` on `PATH`.
     fn install_flatpak(&self) {
+        self.install_flatpak_dir_only();
+        write_executable(&self.bin.join("flatpak"), "#!/bin/sh\n");
+    }
+
+    /// The per-user install dir alone, with no `flatpak` CLI on `PATH`.
+    fn install_flatpak_dir_only(&self) {
         fs::create_dir_all(self.home.join(".local/share/flatpak/app/io.mpv.Mpv")).unwrap();
+    }
+
+    /// Replaces the fake `mpv` with `body`, run after it records its argv.
+    fn set_mpv_body(&self, body: &str) {
+        write_executable(
+            &self.bin.join("mpv"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {0}.args\n{body}\n: > {0}\n",
+                self.launched.display()
+            ),
+        );
+    }
+
+    fn launch_log(&self) -> PathBuf {
+        self.home.join(".local/share/tsuzuki/mpv-launch.log")
     }
 
     /// Polls with a deadline for the fake mpv child, then returns its argv.
@@ -435,4 +463,223 @@ fn entries_from_native_and_flatpak_log_dirs_both_reconcile_whatever_the_target()
             "{mpv_table}"
         );
     }
+}
+
+// --- launch output and neutral launch line ---
+
+#[test]
+fn launch_prints_a_neutral_line_because_tsuzuki_cannot_know_mpv_succeeded() {
+    let env = Env::new("install = \"native\"\n");
+    write_file(&env.native_script(), BUNDLED_SCRIPT);
+
+    let out = env.run(&["start", "Monster"]);
+
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "→ Starting \"Monster\" — episode 1 (00:00)\n  → {}\n",
+            env.episode().display()
+        )
+    );
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn launch_log_holds_the_command_line_then_what_mpv_wrote_to_stdout_and_stderr() {
+    let env = Env::new("install = \"native\"\n");
+    write_file(&env.native_script(), BUNDLED_SCRIPT);
+    env.set_mpv_body("echo out-line\necho err-line >&2");
+
+    let out = env.run(&["start", "Monster"]);
+    env.wait_for_launch();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(env.launch_log()).unwrap(),
+        format!(
+            "# mpv --{{ --start=0 {} --}}\nout-line\nerr-line\n",
+            env.episode().display()
+        )
+    );
+}
+
+#[test]
+fn launch_log_is_overwritten_by_the_next_launch() {
+    let env = Env::new("install = \"native\"\n");
+    write_file(&env.native_script(), BUNDLED_SCRIPT);
+    env.set_mpv_body("echo first-launch");
+    env.run(&["start", "Monster"]);
+    env.wait_for_launch();
+    fs::remove_file(&env.launched).unwrap();
+
+    env.set_mpv_body("echo second-launch");
+    env.run(&["start", "Monster"]);
+    env.wait_for_launch();
+
+    assert_eq!(
+        fs::read_to_string(env.launch_log()).unwrap(),
+        format!(
+            "# mpv --{{ --start=0 {} --}}\nsecond-launch\n",
+            env.episode().display()
+        )
+    );
+}
+
+#[test]
+fn launch_with_an_unwritable_launch_log_still_spawns_mpv_without_any_message() {
+    let env = Env::new("install = \"native\"\n");
+    write_file(&env.native_script(), BUNDLED_SCRIPT);
+    fs::create_dir_all(env.launch_log()).unwrap();
+
+    let out = env.run(&["start", "Monster"]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    assert_eq!(env.wait_for_launch().len(), 4);
+}
+
+// --- a blank script is not installed ---
+
+#[test]
+fn start_with_an_empty_or_whitespace_only_script_is_blocked_and_never_launches() {
+    for contents in ["", "  \n\t\n"] {
+        let env = Env::new("install = \"native\"\n");
+        write_file(&env.native_script(), contents);
+
+        let out = env.run(&["start", "Monster"]);
+
+        assert!(!out.status.success(), "{contents:?}");
+        assert_eq!(stdout(&out), "", "{contents:?}");
+        assert_eq!(
+            stderr(&out),
+            format!(
+                "error: mpv script not installed for native mpv at {} — run: tsuzuki doctor --fix\n",
+                env.native_script().display()
+            ),
+            "{contents:?}"
+        );
+        assert!(!env.launched.exists(), "{contents:?}");
+    }
+}
+
+#[test]
+fn doctor_reports_a_blank_script_as_not_installed_and_fix_replaces_it() {
+    let env = Env::new("install = \"native\"\n");
+    write_file(&env.native_script(), "\n  \n");
+
+    let before = stdout(&env.run(&["doctor"]));
+    env.run(&["doctor", "--fix"]);
+
+    assert!(
+        before.contains("✗ mpv script — not installed (native)\n  → tsuzuki doctor --fix\n"),
+        "{before}"
+    );
+    assert_eq!(
+        fs::read_to_string(env.native_script()).unwrap(),
+        BUNDLED_SCRIPT
+    );
+}
+
+// --- MPV_HOME ---
+
+#[test]
+fn native_script_lives_under_mpv_home_when_it_is_set() {
+    let env = Env::new("install = \"native\"\n");
+    let mpv_home = env.home.join("portable-mpv");
+    let expected = mpv_home.join("scripts/tsuzuki.lua");
+
+    let blocked = env.run_with_env(&["start", "Monster"], &[("MPV_HOME", &mpv_home)]);
+    let fix = env.run_with_env(&["doctor", "--fix"], &[("MPV_HOME", &mpv_home)]);
+    let launched = env.run_with_env(&["start", "Monster"], &[("MPV_HOME", &mpv_home)]);
+
+    assert_eq!(
+        stderr(&blocked),
+        format!(
+            "error: mpv script not installed for native mpv at {} — run: tsuzuki doctor --fix\n",
+            expected.display()
+        )
+    );
+    assert!(stdout(&fix).contains("✓ fixed: mpv script installed for native mpv\n"));
+    assert_eq!(fs::read_to_string(&expected).unwrap(), BUNDLED_SCRIPT);
+    assert!(
+        !env.native_script().exists(),
+        "XDG path must stay untouched"
+    );
+    assert!(launched.status.success(), "{}", stderr(&launched));
+}
+
+#[test]
+fn an_empty_mpv_home_is_ignored() {
+    let env = Env::new("install = \"native\"\n");
+
+    let out = env.run_with_env(&["start", "Monster"], &[("MPV_HOME", Path::new(""))]);
+
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "error: mpv script not installed for native mpv at {} — run: tsuzuki doctor --fix\n",
+            env.native_script().display()
+        )
+    );
+}
+
+// --- Flatpak needs its CLI ---
+
+#[test]
+fn flatpak_install_dir_without_the_flatpak_cli_is_not_installed() {
+    let env = Env::new("install = \"flatpak\"\n");
+    env.install_flatpak_dir_only();
+
+    let out = env.run(&["start", "Monster"]);
+
+    assert!(!out.status.success());
+    assert_eq!(
+        stderr(&out),
+        "error: [mpv] install is \"flatpak\" but Flatpak mpv is not installed — install it, or change [mpv] install in config.toml\n"
+    );
+}
+
+#[test]
+fn auto_with_only_a_flatpak_install_dir_and_no_cli_finds_no_mpv() {
+    let env = Env::new("install = \"auto\"\n");
+    fs::remove_file(env.bin.join("mpv")).unwrap();
+    env.install_flatpak_dir_only();
+
+    let out = env.run(&["start", "Monster"]);
+
+    assert_eq!(
+        stderr(&out),
+        "error: could not find mpv — install it, or set [mpv] install = \"custom\" and command in config.toml\n"
+    );
+}
+
+// --- doctor --fix keeps a symlinked script ---
+
+#[test]
+fn doctor_fix_writes_through_a_symlinked_script_and_keeps_the_link() {
+    let env = Env::new("install = \"native\"\n");
+    let real = env.home.join("dotfiles/tsuzuki.lua");
+    write_file(&real, "-- an older tsuzuki.lua\n");
+    fs::create_dir_all(env.native_script().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, env.native_script()).unwrap();
+
+    let out = env.run(&["doctor", "--fix"]);
+
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(fs::read_link(env.native_script()).unwrap(), real);
+    assert_eq!(fs::read_to_string(&real).unwrap(), BUNDLED_SCRIPT);
+}
+
+#[test]
+fn doctor_fix_with_a_dangling_script_symlink_fails_and_leaves_the_link() {
+    let env = Env::new("install = \"native\"\n");
+    let missing = env.home.join("dotfiles/gone.lua");
+    fs::create_dir_all(env.native_script().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&missing, env.native_script()).unwrap();
+
+    let out = env.run(&["doctor", "--fix"]);
+
+    assert!(!out.status.success());
+    assert_eq!(fs::read_link(env.native_script()).unwrap(), missing);
+    assert!(!missing.exists());
 }
