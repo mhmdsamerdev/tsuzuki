@@ -196,20 +196,22 @@ pub fn custom_command_resolves(program: &str) -> bool {
 
 // --- 1c. entry timestamps ---
 
-/// Warns when any tracked-root script-log entry (`mtimes`) is dated after `now`.
-/// Report only: reconcile treats such an entry like any other, so a clock that
+/// Warns when any tracked-root script-log entry (`mtimes`) is dated after `now`;
+/// `None` when none is. Report only: reconcile treats such an entry like any other, so a clock that
 /// ran ahead can make a `drop` look undone until the clock catches up.
-pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> CheckResult {
+pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> Option<CheckResult> {
     let future = mtimes.iter().filter(|&&mtime| mtime > now).count();
     if future == 0 {
-        return CheckResult::ok("mpv timestamps", "none dated in the future");
+        return None;
     }
     let noun = if future == 1 { "entry" } else { "entries" };
-    CheckResult::warn(
-        "mpv timestamps",
-        format!("{future} {noun} dated in the future, which can reactivate dropped series"),
+    Some(
+        CheckResult::warn(
+            "mpv timestamps",
+            format!("{future} {noun} dated in the future, which can reactivate dropped series"),
+        )
+        .with_action("check the system clock"),
     )
-    .with_action("check the system clock")
 }
 
 // --- 1d. Flatpak filesystem-permission gap ---
@@ -1227,24 +1229,16 @@ mod tests {
     // --- 1c-bis: entry timestamps ---
 
     #[test]
-    fn entry_timestamps_with_no_entries_is_ok() {
+    fn entry_timestamps_with_no_entries_is_silent() {
         let now = SystemTime::now();
-        let r = check_entry_timestamps(&[], now);
-        assert_eq!(
-            r,
-            CheckResult::ok("mpv timestamps", "none dated in the future")
-        );
+        assert_eq!(check_entry_timestamps(&[], now), None);
     }
 
     #[test]
-    fn entry_timestamps_at_or_before_now_is_ok() {
+    fn entry_timestamps_at_or_before_now_is_silent() {
         let now = SystemTime::now();
         let past = now - Duration::from_secs(1);
-        let r = check_entry_timestamps(&[past, now], now);
-        assert_eq!(
-            r,
-            CheckResult::ok("mpv timestamps", "none dated in the future")
-        );
+        assert_eq!(check_entry_timestamps(&[past, now], now), None);
     }
 
     #[test]
@@ -1253,11 +1247,13 @@ mod tests {
         let r = check_entry_timestamps(&[now + Duration::from_secs(1)], now);
         assert_eq!(
             r,
-            CheckResult::warn(
-                "mpv timestamps",
-                "1 entry dated in the future, which can reactivate dropped series"
+            Some(
+                CheckResult::warn(
+                    "mpv timestamps",
+                    "1 entry dated in the future, which can reactivate dropped series"
+                )
+                .with_action("check the system clock")
             )
-            .with_action("check the system clock")
         );
     }
 
@@ -1272,11 +1268,13 @@ mod tests {
         let r = check_entry_timestamps(&mtimes, now);
         assert_eq!(
             r,
-            CheckResult::warn(
-                "mpv timestamps",
-                "2 entries dated in the future, which can reactivate dropped series"
+            Some(
+                CheckResult::warn(
+                    "mpv timestamps",
+                    "2 entries dated in the future, which can reactivate dropped series"
+                )
+                .with_action("check the system clock")
             )
-            .with_action("check the system clock")
         );
     }
 }

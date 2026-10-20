@@ -1408,7 +1408,7 @@ fn doctor_command(
             .iter()
             .map(|e| e.mtime)
             .collect();
-    results.push(doctor::check_entry_timestamps(
+    results.extend(doctor::check_entry_timestamps(
         &entry_mtimes,
         std::time::SystemTime::now(),
     ));

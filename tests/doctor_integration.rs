@@ -211,7 +211,7 @@ fn doctor_warns_about_a_future_dated_entry_without_touching_state() {
 }
 
 #[test]
-fn doctor_reports_timestamps_ok_when_no_entry_is_in_the_future() {
+fn doctor_omits_timestamps_line_when_no_entry_is_in_the_future() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
     home_with_a_script_log_entry(home, -60);
@@ -219,8 +219,5 @@ fn doctor_reports_timestamps_ok_when_no_entry_is_in_the_future() {
     let doctor = run(home, &["doctor"]);
     let stdout = String::from_utf8_lossy(&doctor.stdout);
 
-    assert!(
-        stdout.contains("✓ mpv timestamps — none dated in the future"),
-        "got:\n{stdout}"
-    );
+    assert!(!stdout.contains("mpv timestamps"), "got:\n{stdout}");
 }
