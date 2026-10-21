@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- Faster commands with a large mpv-log.
+
 ## [v0.1.5]
 
 - Breaking: mpv's `watch_later` data support is dropped, the mpv script is required. Install it with `tsuzuki doctor --fix`; `tsuzuki`/`start` refuse to launch without it.

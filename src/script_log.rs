@@ -153,9 +153,48 @@ pub fn scan_script_log(
         }
     }
 
+    let resolved = resolve_roots(tracked_roots, home);
     merge_freshest_wins(raw, home)
         .into_iter()
-        .filter(|entry| is_under_a_tracked_root(&entry.source_path, tracked_roots, home))
+        .filter(|entry| is_under_a_tracked_root(&entry.source_path, &resolved, home))
+        .collect()
+}
+
+/// A tracked root resolved once per run: its canonical path and each series
+/// folder's canonical path, so matching log entries never rescans the root.
+pub(crate) struct ResolvedRoot {
+    /// The root as stored in `config.toml`.
+    pub root: String,
+    pub real_root: PathBuf,
+    /// `(series name, canonical series path)`; empty when the root can't be read.
+    pub children: Vec<(String, PathBuf)>,
+}
+
+/// Resolves every tracked root and its series folders.
+pub(crate) fn resolve_roots(tracked_roots: &[String], home: Option<&Path>) -> Vec<ResolvedRoot> {
+    let tracked_root_real_paths: Vec<_> = tracked_roots
+        .iter()
+        .map(|r| normalize(Path::new(r), home))
+        .collect();
+
+    tracked_roots
+        .iter()
+        .zip(&tracked_root_real_paths)
+        .map(|(root, real_root)| {
+            let expanded_root = expand_tilde(Path::new(root), home);
+            let children = series::series_in_root(&expanded_root, &tracked_root_real_paths)
+                .map(|list| {
+                    list.into_iter()
+                        .map(|child| (child.name, normalize(&child.path, home)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ResolvedRoot {
+                root: root.clone(),
+                real_root: real_root.clone(),
+                children,
+            }
+        })
         .collect()
 }
 
@@ -165,29 +204,15 @@ pub fn scan_script_log(
 /// the root, so the prefix match alone would never see its entries.
 pub(crate) fn is_under_a_tracked_root(
     source_path: &Path,
-    tracked_roots: &[String],
+    resolved: &[ResolvedRoot],
     home: Option<&Path>,
 ) -> bool {
     let real_source = normalize(source_path, home);
-    let tracked_root_real_paths: Vec<_> = tracked_roots
-        .iter()
-        .map(|r| normalize(Path::new(r), home))
-        .collect();
-
-    tracked_roots.iter().any(|root| {
-        let real_root = normalize(Path::new(root), home);
-        if real_source.starts_with(&real_root) {
-            return true;
-        }
-
-        let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(children) = series::series_in_root(&expanded_root, &tracked_root_real_paths) else {
-            return false;
-        };
-        children.into_iter().any(|child| {
-            let real_child = normalize(&child.path, home);
-            real_source == real_child || real_source.starts_with(&real_child)
-        })
+    resolved.iter().any(|r| {
+        real_source.starts_with(&r.real_root)
+            || r.children
+                .iter()
+                .any(|(_, real_child)| real_source.starts_with(real_child))
     })
 }
 
@@ -362,12 +387,12 @@ mod tests {
 
         assert!(is_under_a_tracked_root(
             &root.join("Show").join("ep01.mkv"),
-            &tracked,
+            &resolve_roots(&tracked, None),
             None
         ));
         assert!(!is_under_a_tracked_root(
             &dir.path().join("Anime2").join("Show").join("ep01.mkv"),
-            &tracked,
+            &resolve_roots(&tracked, None),
             None
         ));
     }
@@ -380,7 +405,7 @@ mod tests {
 
         assert!(is_under_a_tracked_root(
             &root.join("Show").join("ep01.mkv"),
-            &tracked,
+            &resolve_roots(&tracked, None),
             None
         ));
     }
@@ -402,7 +427,7 @@ mod tests {
 
         assert!(is_under_a_tracked_root(
             &root.join("Dungeon Meshi").join("ep01.mkv"),
-            &tracked,
+            &resolve_roots(&tracked, None),
             None
         ));
     }
@@ -551,6 +576,52 @@ mod tests {
             y_entry.position,
             Some(20.0),
             "dir_a's undisputed Y must survive even though dir_a also lost its X"
+        );
+    }
+
+    #[test]
+    fn scan_with_many_untracked_entries_keeps_exactly_the_tracked_one() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let log_dir = dir.path().join("mpv-log");
+        for i in 0..5 {
+            touch(&root.join(format!("Show {i}")).join("ep01.mkv"));
+        }
+        for n in 0..200 {
+            write_entry(
+                &log_dir.join(format!("u{n}")),
+                &format!(
+                    "# {}\nduration=\nposition=300.0\nreason=quit\n",
+                    dir.path()
+                        .join("Downloads")
+                        .join(format!("clip{n}.mkv"))
+                        .display()
+                ),
+            );
+        }
+        let tracked = root.join("Show 3").join("ep01.mkv");
+        write_entry(
+            &log_dir.join("t"),
+            &format!(
+                "# {}\nduration=1400.0\nposition=300.0\nreason=quit\n",
+                tracked.display()
+            ),
+        );
+        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_mtime(&log_dir.join("t"), mtime);
+
+        let tracked_roots = vec![root.to_string_lossy().into_owned()];
+        let entries = scan_script_log(std::slice::from_ref(&log_dir), &tracked_roots, None);
+
+        assert_eq!(
+            entries,
+            vec![ScriptLogEntry {
+                source_path: tracked,
+                duration: Some(1400.0),
+                position: Some(300.0),
+                reason: "quit".to_string(),
+                mtime,
+            }]
         );
     }
 }

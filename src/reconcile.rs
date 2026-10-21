@@ -90,6 +90,7 @@ fn reconcile_with_script_log_dirs(
             .map(|entry| (normalize(&entry.source_path, home), entry))
             .collect();
 
+    let resolved = script_log::resolve_roots(&config.roots.paths, home);
     let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
     for record in &state.series {
         pairs.insert((record.root.clone(), record.name.clone()));
@@ -98,7 +99,7 @@ fn reconcile_with_script_log_dirs(
         if classify_entry(candidate, resume_seconds, completion_remaining_seconds).is_none() {
             continue;
         }
-        if let Some(pair) = classify_root_and_series(config, &candidate.source_path, home) {
+        if let Some(pair) = classify_root_and_series(&resolved, &candidate.source_path, home) {
             pairs.insert(pair);
         }
     }
@@ -145,38 +146,26 @@ fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
 /// depth-1 child's own normalized path, because `normalize` resolves a
 /// symlinked series folder to a location outside the root.
 fn classify_root_and_series(
-    config: &Config,
+    resolved: &[script_log::ResolvedRoot],
     source_path: &Path,
     home: Option<&Path>,
 ) -> Option<(String, String)> {
     let real_source = normalize(source_path, home);
-    let tracked_root_real_paths: Vec<_> = config
-        .roots
-        .paths
-        .iter()
-        .map(|r| normalize(Path::new(r), home))
-        .collect();
 
     let mut best: Option<(PathBuf, String, String)> = None;
-    for root in &config.roots.paths {
-        let real_root = normalize(Path::new(root), home);
-        if let Ok(rel) = real_source.strip_prefix(&real_root) {
+    for r in resolved {
+        if let Ok(rel) = real_source.strip_prefix(&r.real_root) {
             if let Some(first) = rel.components().next() {
                 let name = first.as_os_str().to_string_lossy().into_owned();
-                consider_match(&mut best, real_root, root, &name);
+                consider_match(&mut best, r.real_root.clone(), &r.root, &name);
             }
             // The child fallback below only applies when the prefix match fails.
             continue;
         }
 
-        let expanded_root = expand_tilde(Path::new(root), home);
-        let Ok(children) = series::series_in_root(&expanded_root, &tracked_root_real_paths) else {
-            continue;
-        };
-        for child in children {
-            let real_child = normalize(&child.path, home);
-            if real_source == real_child || real_source.starts_with(&real_child) {
-                consider_match(&mut best, real_child, root, &child.name);
+        for (name, real_child) in &r.children {
+            if real_source.starts_with(real_child) {
+                consider_match(&mut best, real_child.clone(), &r.root, name);
             }
         }
     }
@@ -3090,5 +3079,94 @@ mod tests {
         run_reconcile(&config, &mut state, &log_dir);
 
         assert_eq!(state.series, vec![original]);
+    }
+
+    /// `(root, name)` as `classify_root_and_series` returns it.
+    fn pair(root: &Path, name: &str) -> Option<(String, String)> {
+        Some((root.to_string_lossy().into_owned(), name.to_string()))
+    }
+
+    fn roots_of(paths: &[&Path]) -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn classify_root_and_series_picks_the_most_specific_of_nested_roots() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatches = anime.join("Rewatches");
+        touch(&anime.join("Monster").join("ep01.mkv"));
+        touch(&rewatches.join("Monster").join("ep01.mkv"));
+        let resolved = script_log::resolve_roots(&roots_of(&[&anime, &rewatches]), None);
+
+        assert_eq!(
+            classify_root_and_series(&resolved, &rewatches.join("Monster/ep01.mkv"), None),
+            pair(&rewatches, "Monster")
+        );
+        assert_eq!(
+            classify_root_and_series(&resolved, &anime.join("Monster/ep01.mkv"), None),
+            pair(&anime, "Monster")
+        );
+    }
+
+    #[test]
+    fn classify_root_and_series_keeps_same_named_sibling_roots_apart() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("A").join("Anime");
+        let b = dir.path().join("B").join("Anime");
+        touch(&a.join("Show").join("ep01.mkv"));
+        touch(&b.join("Show").join("ep01.mkv"));
+        let resolved = script_log::resolve_roots(&roots_of(&[&a, &b]), None);
+
+        assert_eq!(
+            classify_root_and_series(&resolved, &b.join("Show/ep01.mkv"), None),
+            pair(&b, "Show")
+        );
+        assert_eq!(
+            classify_root_and_series(&resolved, &a.join("Show/ep01.mkv"), None),
+            pair(&a, "Show")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_root_and_series_matches_a_symlinked_series_folder_under_a_nested_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatches = anime.join("Rewatches");
+        fs::create_dir_all(&rewatches).unwrap();
+        let storage = dir.path().join("storage").join("Monster");
+        touch(&storage.join("ep01.mkv"));
+        symlink(&storage, rewatches.join("Monster")).unwrap();
+        let resolved = script_log::resolve_roots(&roots_of(&[&anime, &rewatches]), None);
+
+        assert_eq!(
+            classify_root_and_series(&resolved, &rewatches.join("Monster/ep01.mkv"), None),
+            pair(&rewatches, "Monster")
+        );
+    }
+
+    #[test]
+    fn classify_root_and_series_is_none_outside_every_root_and_matches_a_missing_root_by_prefix() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let missing = dir.path().join("Unmounted");
+        touch(&anime.join("Show").join("ep01.mkv"));
+        touch(&dir.path().join("Downloads").join("clip.mkv"));
+        let resolved = script_log::resolve_roots(&roots_of(&[&anime, &missing]), None);
+
+        assert_eq!(
+            classify_root_and_series(&resolved, &dir.path().join("Downloads/clip.mkv"), None),
+            None
+        );
+        assert_eq!(
+            classify_root_and_series(&resolved, &missing.join("Show/ep01.mkv"), None),
+            pair(&missing, "Show")
+        );
     }
 }
