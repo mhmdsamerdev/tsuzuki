@@ -1405,7 +1405,7 @@ fn doctor_command(
 
     let entry_mtimes: Vec<std::time::SystemTime> =
         script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)
-            .iter()
+            .values()
             .map(|e| e.mtime)
             .collect();
     results.extend(doctor::check_entry_timestamps(

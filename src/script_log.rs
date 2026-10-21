@@ -13,7 +13,7 @@
 //!
 //! The comment-line path is the identity check; the hash is never trusted.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -131,12 +131,22 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
 
 /// Parses every entry file in `dirs`, drops redirects and malformed files,
 /// keeps the freshest entry per source path, and filters to entries under
-/// `tracked_roots`. Missing directories are skipped.
+/// `tracked_roots`. Keyed by the source path's canonical form, resolved once
+/// here. Missing directories are skipped.
 pub fn scan_script_log(
     dirs: &[PathBuf],
     tracked_roots: &[String],
     home: Option<&Path>,
-) -> Vec<ScriptLogEntry> {
+) -> BTreeMap<PathBuf, ScriptLogEntry> {
+    scan_script_log_resolved(dirs, &resolve_roots(tracked_roots, home), home)
+}
+
+/// [`scan_script_log`] against roots the caller already resolved.
+pub(crate) fn scan_script_log_resolved(
+    dirs: &[PathBuf],
+    resolved: &[ResolvedRoot],
+    home: Option<&Path>,
+) -> BTreeMap<PathBuf, ScriptLogEntry> {
     let mut raw = Vec::new();
     for dir in dirs {
         let Ok(read_dir) = fs::read_dir(dir) else {
@@ -153,21 +163,21 @@ pub fn scan_script_log(
         }
     }
 
-    let resolved = resolve_roots(tracked_roots, home);
-    merge_freshest_wins(raw, home)
-        .into_iter()
-        .filter(|entry| is_under_a_tracked_root(&entry.source_path, &resolved, home))
-        .collect()
+    let mut by_path = merge_freshest_wins(raw, home);
+    by_path.retain(|real_source, _| is_under_a_tracked_root(real_source, resolved));
+    by_path
 }
 
-/// A tracked root resolved once per run: its canonical path and each series
-/// folder's canonical path, so matching log entries never rescans the root.
+/// A tracked root resolved once per run, so matching log entries never
+/// rescans the root.
 pub(crate) struct ResolvedRoot {
     /// The root as stored in `config.toml`.
     pub root: String,
     pub real_root: PathBuf,
-    /// `(series name, canonical series path)`; empty when the root can't be read.
-    pub children: Vec<(String, PathBuf)>,
+    /// `(series name, canonical series path)` for series folders that resolve
+    /// outside `real_root` (symlinked out): the only ones a prefix match on
+    /// `real_root` can't see. Empty when the root can't be read.
+    pub outside_children: Vec<(String, PathBuf)>,
 }
 
 /// Resolves every tracked root and its series folders.
@@ -182,43 +192,42 @@ pub(crate) fn resolve_roots(tracked_roots: &[String], home: Option<&Path>) -> Ve
         .zip(&tracked_root_real_paths)
         .map(|(root, real_root)| {
             let expanded_root = expand_tilde(Path::new(root), home);
-            let children = series::series_in_root(&expanded_root, &tracked_root_real_paths)
+            let outside_children = series::series_in_root(&expanded_root, &tracked_root_real_paths)
                 .map(|list| {
                     list.into_iter()
                         .map(|child| (child.name, normalize(&child.path, home)))
+                        .filter(|(_, real_child)| !real_child.starts_with(real_root))
                         .collect()
                 })
                 .unwrap_or_default();
             ResolvedRoot {
                 root: root.clone(),
                 real_root: real_root.clone(),
-                children,
+                outside_children,
             }
         })
         .collect()
 }
 
-/// True if `source_path` resolves under any tracked root. Tries a whole-root
-/// prefix match first, then falls back to each depth-1 series folder
-/// individually: a symlinked series folder canonicalizes to a path outside
-/// the root, so the prefix match alone would never see its entries.
-pub(crate) fn is_under_a_tracked_root(
-    source_path: &Path,
-    resolved: &[ResolvedRoot],
-    home: Option<&Path>,
-) -> bool {
-    let real_source = normalize(source_path, home);
+/// True if the canonical `real_source` is under any tracked root. Tries a
+/// whole-root prefix match first, then falls back to the series folders
+/// symlinked outside the root, whose entries the prefix match never sees.
+pub(crate) fn is_under_a_tracked_root(real_source: &Path, resolved: &[ResolvedRoot]) -> bool {
     resolved.iter().any(|r| {
         real_source.starts_with(&r.real_root)
-            || r.children
+            || r.outside_children
                 .iter()
                 .any(|(_, real_child)| real_source.starts_with(real_child))
     })
 }
 
-/// Keeps one entry per source path: the one whose file has the newest mtime.
-fn merge_freshest_wins(entries: Vec<ScriptLogEntry>, home: Option<&Path>) -> Vec<ScriptLogEntry> {
-    let mut by_path: HashMap<PathBuf, ScriptLogEntry> = HashMap::new();
+/// Keeps one entry per canonical source path: the one whose file has the
+/// newest mtime.
+fn merge_freshest_wins(
+    entries: Vec<ScriptLogEntry>,
+    home: Option<&Path>,
+) -> BTreeMap<PathBuf, ScriptLogEntry> {
+    let mut by_path: BTreeMap<PathBuf, ScriptLogEntry> = BTreeMap::new();
     for entry in entries {
         let key = normalize(&entry.source_path, home);
         match by_path.get(&key) {
@@ -228,7 +237,7 @@ fn merge_freshest_wins(entries: Vec<ScriptLogEntry>, home: Option<&Path>) -> Vec
             }
         }
     }
-    by_path.into_values().collect()
+    by_path
 }
 
 #[cfg(test)]
@@ -252,6 +261,11 @@ mod tests {
             std_fs::create_dir_all(parent).unwrap();
         }
         File::create(path).unwrap();
+    }
+
+    /// An exact, second-aligned mtime for whole-value entry comparisons.
+    fn fixed_mtime() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
     #[test]
@@ -349,12 +363,26 @@ mod tests {
             ),
         );
         write_entry(&log_dir.join("malformed"), "garbage, no comment line\n");
+        let mtime = fixed_mtime();
+        set_mtime(&log_dir.join("valid"), mtime);
 
         let tracked_roots = vec![root.to_string_lossy().into_owned()];
         let entries = scan_script_log(std::slice::from_ref(&log_dir), &tracked_roots, None);
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].reason, "eof");
+        let source = root.join("Show").join("ep01.mkv");
+        assert_eq!(
+            entries,
+            BTreeMap::from([(
+                std_fs::canonicalize(&source).unwrap(),
+                ScriptLogEntry {
+                    source_path: source,
+                    duration: Some(1000.0),
+                    position: Some(990.0),
+                    reason: "eof".to_string(),
+                    mtime,
+                }
+            )])
+        );
     }
 
     #[test]
@@ -386,14 +414,15 @@ mod tests {
         touch(&dir.path().join("Anime2").join("Show").join("ep01.mkv"));
 
         assert!(is_under_a_tracked_root(
-            &root.join("Show").join("ep01.mkv"),
+            &normalize(&root.join("Show").join("ep01.mkv"), None),
             &resolve_roots(&tracked, None),
-            None
         ));
         assert!(!is_under_a_tracked_root(
-            &dir.path().join("Anime2").join("Show").join("ep01.mkv"),
+            &normalize(
+                &dir.path().join("Anime2").join("Show").join("ep01.mkv"),
+                None
+            ),
             &resolve_roots(&tracked, None),
-            None
         ));
     }
 
@@ -404,9 +433,8 @@ mod tests {
         let tracked = vec![root.to_string_lossy().into_owned()];
 
         assert!(is_under_a_tracked_root(
-            &root.join("Show").join("ep01.mkv"),
+            &normalize(&root.join("Show").join("ep01.mkv"), None),
             &resolve_roots(&tracked, None),
-            None
         ));
     }
 
@@ -426,9 +454,8 @@ mod tests {
         let tracked = vec![root.to_string_lossy().into_owned()];
 
         assert!(is_under_a_tracked_root(
-            &root.join("Dungeon Meshi").join("ep01.mkv"),
+            &normalize(&root.join("Dungeon Meshi").join("ep01.mkv"), None),
             &resolve_roots(&tracked, None),
-            None
         ));
     }
 
@@ -522,15 +549,26 @@ mod tests {
             ),
         );
 
-        let now = SystemTime::now();
+        let now = fixed_mtime();
         set_mtime(&native_dir.join("entry"), now - Duration::from_secs(60));
         set_mtime(&flatpak_dir.join("entry"), now);
 
         let tracked_roots = vec![root.to_string_lossy().into_owned()];
         let entries = scan_script_log(&[native_dir, flatpak_dir], &tracked_roots, None);
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].position, Some(200.0));
+        assert_eq!(
+            entries,
+            BTreeMap::from([(
+                std_fs::canonicalize(&source).unwrap(),
+                ScriptLogEntry {
+                    source_path: source,
+                    duration: None,
+                    position: Some(200.0),
+                    reason: "quit".to_string(),
+                    mtime: now,
+                }
+            )])
+        );
     }
 
     #[test]
@@ -560,22 +598,40 @@ mod tests {
             &format!("# {}\nduration=\nposition=99.0\nreason=quit\n", x.display()),
         );
 
-        let now = SystemTime::now();
-        set_mtime(&dir_a.join("x-entry"), now - Duration::from_secs(120));
-        set_mtime(&dir_a.join("y-entry"), now - Duration::from_secs(120));
+        let now = fixed_mtime();
+        let earlier = now - Duration::from_secs(120);
+        set_mtime(&dir_a.join("x-entry"), earlier);
+        set_mtime(&dir_a.join("y-entry"), earlier);
         set_mtime(&dir_b.join("x-entry"), now);
 
         let tracked_roots = vec![root.to_string_lossy().into_owned()];
         let entries = scan_script_log(&[dir_a, dir_b], &tracked_roots, None);
 
-        assert_eq!(entries.len(), 2);
-        let x_entry = entries.iter().find(|e| e.source_path == x).unwrap();
-        let y_entry = entries.iter().find(|e| e.source_path == y).unwrap();
-        assert_eq!(x_entry.position, Some(99.0), "dir_b's fresher X must win");
+        // dir_b's fresher X wins; dir_a's undisputed Y survives.
         assert_eq!(
-            y_entry.position,
-            Some(20.0),
-            "dir_a's undisputed Y must survive even though dir_a also lost its X"
+            entries,
+            BTreeMap::from([
+                (
+                    std_fs::canonicalize(&x).unwrap(),
+                    ScriptLogEntry {
+                        source_path: x,
+                        duration: None,
+                        position: Some(99.0),
+                        reason: "quit".to_string(),
+                        mtime: now,
+                    }
+                ),
+                (
+                    std_fs::canonicalize(&y).unwrap(),
+                    ScriptLogEntry {
+                        source_path: y,
+                        duration: None,
+                        position: Some(20.0),
+                        reason: "quit".to_string(),
+                        mtime: earlier,
+                    }
+                ),
+            ])
         );
     }
 
@@ -607,7 +663,7 @@ mod tests {
                 tracked.display()
             ),
         );
-        let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mtime = fixed_mtime();
         set_mtime(&log_dir.join("t"), mtime);
 
         let tracked_roots = vec![root.to_string_lossy().into_owned()];
@@ -615,13 +671,67 @@ mod tests {
 
         assert_eq!(
             entries,
-            vec![ScriptLogEntry {
-                source_path: tracked,
-                duration: Some(1400.0),
-                position: Some(300.0),
-                reason: "quit".to_string(),
-                mtime,
-            }]
+            BTreeMap::from([(
+                std_fs::canonicalize(&tracked).unwrap(),
+                ScriptLogEntry {
+                    source_path: tracked,
+                    duration: Some(1400.0),
+                    position: Some(300.0),
+                    reason: "quit".to_string(),
+                    mtime,
+                }
+            )])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_keys_one_file_spelled_through_a_symlinked_root_and_its_real_path_once() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real_root = dir.path().join("disk").join("Anime");
+        touch(&real_root.join("Show").join("ep01.mkv"));
+        let linked_root = dir.path().join("Anime");
+        symlink(&real_root, &linked_root).unwrap();
+
+        let native_dir = dir.path().join("native-log");
+        let flatpak_dir = dir.path().join("flatpak-log");
+        let via_link = linked_root.join("Show").join("ep01.mkv");
+        let via_real = real_root.join("Show").join("ep01.mkv");
+        write_entry(
+            &native_dir.join("entry"),
+            &format!(
+                "# {}\nduration=\nposition=100.0\nreason=quit\n",
+                via_real.display()
+            ),
+        );
+        write_entry(
+            &flatpak_dir.join("entry"),
+            &format!(
+                "# {}\nduration=\nposition=200.0\nreason=quit\n",
+                via_link.display()
+            ),
+        );
+        let now = fixed_mtime();
+        set_mtime(&native_dir.join("entry"), now - Duration::from_secs(60));
+        set_mtime(&flatpak_dir.join("entry"), now);
+
+        let tracked_roots = vec![linked_root.to_string_lossy().into_owned()];
+        let entries = scan_script_log(&[native_dir, flatpak_dir], &tracked_roots, None);
+
+        assert_eq!(
+            entries,
+            BTreeMap::from([(
+                std_fs::canonicalize(&via_real).unwrap(),
+                ScriptLogEntry {
+                    source_path: via_link,
+                    duration: None,
+                    position: Some(200.0),
+                    reason: "quit".to_string(),
+                    mtime: now,
+                }
+            )])
         );
     }
 }

@@ -2,7 +2,7 @@
 //! command runs it first. Readings below `resume_seconds` are noise, and
 //! absence of an entry is never evidence.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -51,7 +51,7 @@ fn classify_entry(
 /// The reading for `key`. With a `cutoff` (unix seconds), a reading whose
 /// entry file is not strictly newer is a leftover and counts as absent.
 fn fresh_candidate<'a>(
-    candidates: &'a HashMap<PathBuf, ScriptLogEntry>,
+    candidates: &'a BTreeMap<PathBuf, ScriptLogEntry>,
     key: &Path,
     cutoff: Option<u64>,
 ) -> Option<&'a ScriptLogEntry> {
@@ -84,22 +84,18 @@ fn reconcile_with_script_log_dirs(
     let resume_seconds = config.thresholds.resume_seconds;
     let completion_remaining_seconds = config.thresholds.completion_remaining_seconds;
 
-    let candidates: HashMap<PathBuf, ScriptLogEntry> =
-        script_log::scan_script_log(script_log_dirs, &config.roots.paths, home)
-            .into_iter()
-            .map(|entry| (normalize(&entry.source_path, home), entry))
-            .collect();
-
     let resolved = script_log::resolve_roots(&config.roots.paths, home);
+    let candidates = script_log::scan_script_log_resolved(script_log_dirs, &resolved, home);
+
     let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
     for record in &state.series {
         pairs.insert((record.root.clone(), record.name.clone()));
     }
-    for candidate in candidates.values() {
+    for (real_source, candidate) in &candidates {
         if classify_entry(candidate, resume_seconds, completion_remaining_seconds).is_none() {
             continue;
         }
-        if let Some(pair) = classify_root_and_series(&resolved, &candidate.source_path, home) {
+        if let Some(pair) = classify_root_and_series(&resolved, real_source) {
             pairs.insert(pair);
         }
     }
@@ -138,20 +134,17 @@ fn apply_idle_auto_pause(state: &mut State, auto_pause_days: u64, now: u64) {
     }
 }
 
-/// Finds the tracked root `source_path` falls under and its series name (the
-/// root's depth-1 directory). With nested roots (`~/Anime` and
+/// Finds the tracked root the canonical `real_source` falls under and its
+/// series name (the root's depth-1 directory). With nested roots (`~/Anime` and
 /// `~/Anime/Rewatches`) the most specific match wins.
 ///
-/// Tries a whole-root prefix match first. If that fails, matches against each
-/// depth-1 child's own normalized path, because `normalize` resolves a
-/// symlinked series folder to a location outside the root.
+/// Tries a whole-root prefix match first. If that fails, matches against the
+/// series folders symlinked outside the root, since `normalize` resolves their
+/// files to a location outside it.
 fn classify_root_and_series(
     resolved: &[script_log::ResolvedRoot],
-    source_path: &Path,
-    home: Option<&Path>,
+    real_source: &Path,
 ) -> Option<(String, String)> {
-    let real_source = normalize(source_path, home);
-
     let mut best: Option<(PathBuf, String, String)> = None;
     for r in resolved {
         if let Ok(rel) = real_source.strip_prefix(&r.real_root) {
@@ -163,7 +156,7 @@ fn classify_root_and_series(
             continue;
         }
 
-        for (name, real_child) in &r.children {
+        for (name, real_child) in &r.outside_children {
             if real_source.starts_with(real_child) {
                 consider_match(&mut best, real_child.clone(), &r.root, name);
             }
@@ -197,7 +190,7 @@ fn reconcile_one_series(
     state: &mut State,
     root: &str,
     name: &str,
-    candidates: &HashMap<PathBuf, ScriptLogEntry>,
+    candidates: &BTreeMap<PathBuf, ScriptLogEntry>,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
     home: Option<&Path>,
@@ -392,7 +385,7 @@ fn apply_completion_advance(
     name: &str,
     expanded_root: &Path,
     ordered: &[PathBuf],
-    candidates: &HashMap<PathBuf, ScriptLogEntry>,
+    candidates: &BTreeMap<PathBuf, ScriptLogEntry>,
     start_index: usize,
     cutoff: Option<u64>,
     resume_seconds: u64,
@@ -3103,11 +3096,14 @@ mod tests {
         let resolved = script_log::resolve_roots(&roots_of(&[&anime, &rewatches]), None);
 
         assert_eq!(
-            classify_root_and_series(&resolved, &rewatches.join("Monster/ep01.mkv"), None),
+            classify_root_and_series(
+                &resolved,
+                &normalize(&rewatches.join("Monster/ep01.mkv"), None)
+            ),
             pair(&rewatches, "Monster")
         );
         assert_eq!(
-            classify_root_and_series(&resolved, &anime.join("Monster/ep01.mkv"), None),
+            classify_root_and_series(&resolved, &normalize(&anime.join("Monster/ep01.mkv"), None)),
             pair(&anime, "Monster")
         );
     }
@@ -3122,11 +3118,11 @@ mod tests {
         let resolved = script_log::resolve_roots(&roots_of(&[&a, &b]), None);
 
         assert_eq!(
-            classify_root_and_series(&resolved, &b.join("Show/ep01.mkv"), None),
+            classify_root_and_series(&resolved, &normalize(&b.join("Show/ep01.mkv"), None)),
             pair(&b, "Show")
         );
         assert_eq!(
-            classify_root_and_series(&resolved, &a.join("Show/ep01.mkv"), None),
+            classify_root_and_series(&resolved, &normalize(&a.join("Show/ep01.mkv"), None)),
             pair(&a, "Show")
         );
     }
@@ -3146,7 +3142,10 @@ mod tests {
         let resolved = script_log::resolve_roots(&roots_of(&[&anime, &rewatches]), None);
 
         assert_eq!(
-            classify_root_and_series(&resolved, &rewatches.join("Monster/ep01.mkv"), None),
+            classify_root_and_series(
+                &resolved,
+                &normalize(&rewatches.join("Monster/ep01.mkv"), None)
+            ),
             pair(&rewatches, "Monster")
         );
     }
@@ -3161,11 +3160,14 @@ mod tests {
         let resolved = script_log::resolve_roots(&roots_of(&[&anime, &missing]), None);
 
         assert_eq!(
-            classify_root_and_series(&resolved, &dir.path().join("Downloads/clip.mkv"), None),
+            classify_root_and_series(
+                &resolved,
+                &normalize(&dir.path().join("Downloads/clip.mkv"), None)
+            ),
             None
         );
         assert_eq!(
-            classify_root_and_series(&resolved, &missing.join("Show/ep01.mkv"), None),
+            classify_root_and_series(&resolved, &normalize(&missing.join("Show/ep01.mkv"), None)),
             pair(&missing, "Show")
         );
     }
