@@ -29,6 +29,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - mpv is read-only: the only input is the `contrib/mpv/tsuzuki.lua` script's log (required; freshest entry per file wins). No IPC. Resuming spawns mpv fire-and-forget.
 - One resolver (`mpv::resolve`, from `[mpv] install`) picks the mpv target. Launch, the script check, `doctor` and `--fix` use only it; nothing else detects mpv. Log reading deliberately merges every known log dir (native, Flatpak) regardless of target.
 - The mpv script is enforced only by `tsuzuki`/`start` (refuse to launch when the target's script file is missing) and `doctor`. No runtime warnings anywhere else. Snap isn't supported (its paths can't be known); Snap users use `custom`.
+- Commands must feel instant, and their cost must not grow with history or library size. Do each filesystem lookup or scan once per command and reuse it. Don't trade correctness or the invariants above for speed, and don't add caches or dependencies for it.
 - Pure Rust only, no C/C++ dependencies. `vendor/anitomy` is read-only (edit only for a reproduced, blocking parsing bug). Distribution is prebuilt binaries via cargo-dist only.
 
 ## Architecture
