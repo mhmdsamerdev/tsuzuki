@@ -13,6 +13,6 @@ installers = ["shell"]
 # Linux only; macOS/Windows mpv-log paths are unverified.
 targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Where installers place binaries
-install-path = "CARGO_HOME"
+install-path = "~/.local/bin"
 # No bundled updater
 install-updater = false
