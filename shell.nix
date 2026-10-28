@@ -2,8 +2,11 @@
 
 pkgs.mkShell {
   buildInputs = [
-    # Toolchain manager; the compiler comes from rustup, not nixpkgs.
-    pkgs.rustup
+    # Rust toolchain from nixpkgs.
+    pkgs.cargo
+    pkgs.rustc
+    pkgs.clippy
+    pkgs.rustfmt
 
     # Linker (`cc`) for Rust, and the C/asm part of ring.
     pkgs.gcc
@@ -19,9 +22,8 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    # Install the stable toolchain plus clippy and rustfmt on first entry.
-    rustup default stable >/dev/null 2>&1
-    rustup component add clippy rustfmt >/dev/null 2>&1
+    # Keep the registry cache in the project (gitignored), not in $HOME.
+    export CARGO_HOME="$PWD/.cargo-home"
 
     echo "tsuzuki dev shell ready — $(rustc --version)"
   '';

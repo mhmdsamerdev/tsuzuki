@@ -1,5 +1,6 @@
 # --- Rust / Cargo ---
 /target/
+/.cargo-home/
 **/*.rs.bk
 *.pdb
 
