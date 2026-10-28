@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.6]
 
 - Faster commands with a large mpv-log.
 - The install script now installs to `~/.local/bin` instead of `~/.cargo/bin`.
