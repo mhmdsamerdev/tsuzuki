@@ -196,10 +196,16 @@ mod tests {
                 .timeout_recv_response(Some(std::time::Duration::from_millis(100)))
                 .build(),
         );
-        // The listener accepts into its backlog but never answers.
-        let err = map_ureq_result(agent.get(&url).call())
-            .err()
-            .expect("should time out");
+        // The listener accepts into its backlog but never answers. A stray EINTR
+        // under parallel test load surfaces as "connection interrupted"; retry it.
+        let err = (0..5)
+            .map(|_| {
+                map_ureq_result(agent.get(&url).call())
+                    .err()
+                    .expect("should time out")
+            })
+            .find(|e| e.0 != "connection interrupted")
+            .expect("every attempt was interrupted");
         drop(listener);
         assert_eq!(err.0, "timed out");
     }

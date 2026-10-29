@@ -1469,7 +1469,7 @@ fn doctor_command(
     results.push(doctor::summarize_tracked_roots(&root_checks));
 
     let orphans = doctor::find_orphans(config, &state, &valid_roots, home);
-    if !(forget_orphans && !orphans.is_empty()) {
+    if !forget_orphans || orphans.is_empty() {
         results.push(doctor::orphan_check_result(&orphans));
     }
 
