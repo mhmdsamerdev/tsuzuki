@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- `status` shows the saved position when it is past 0:00.
+
 ## [v0.1.6]
 
 - Faster commands with a large mpv-log.

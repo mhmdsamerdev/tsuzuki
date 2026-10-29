@@ -1917,7 +1917,7 @@ fn season_two_episode_shows_season_in_status_list_and_resume() {
     let home = home_dir.path();
     let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S02E01.mkv", 224.0);
 
-    assert_eq!(run_ok(home, &["status"]), "Bakuman — S02E01\n");
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — S02E01 (03:44)\n");
     assert_eq!(
         run_ok(home, &["list"]),
         "In progress:\n  Bakuman — S02E01 (1 files)\n"
@@ -1937,7 +1937,7 @@ fn season_one_episode_output_is_unchanged() {
     let home = home_dir.path();
     let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S01E01.mkv", 224.0);
 
-    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1\n");
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1 (03:44)\n");
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
         format!(
@@ -1953,7 +1953,7 @@ fn episode_without_a_detected_season_output_is_unchanged() {
     let home = home_dir.path();
     let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - 01.mkv", 224.0);
 
-    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1\n");
+    assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1 (03:44)\n");
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
         format!(

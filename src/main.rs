@@ -753,6 +753,21 @@ fn resume_command(
     }
 }
 
+/// `Name — ep. 9`, plus ` (mm:ss)` when the saved position is past 0:00.
+fn status_line(o: &overview::SeriesOverview) -> String {
+    let ep = o
+        .episode_label()
+        .unwrap_or_else(|| "unknown episode".to_string());
+    let mut line = format!("{} — {ep}", o.name);
+    if let Some(position) = o.position_seconds {
+        let ts = format_timestamp(position);
+        if ts != "00:00" {
+            line.push_str(&format!(" ({ts})"));
+        }
+    }
+    line
+}
+
 /// `tsuzuki status`: every `in_progress` series.
 fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> ExitCode {
     let state = match reconcile_state(config, state_path, home) {
@@ -773,10 +788,7 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
     }
 
     for o in &in_progress {
-        let ep = o
-            .episode_label()
-            .unwrap_or_else(|| "unknown episode".to_string());
-        println!("{} — {ep}", o.name);
+        println!("{}", status_line(o));
     }
     if in_progress.len() > 1 {
         println!();
@@ -1582,6 +1594,52 @@ mod tests {
                 start_verb(None),
             ],
             ["Resuming", "Rewatching", "Rewatching", "Starting"]
+        );
+    }
+
+    fn status_overview(episode: Option<u32>, position: Option<f64>) -> overview::SeriesOverview {
+        overview::SeriesOverview {
+            root: "/anime".to_string(),
+            name: "Monster".to_string(),
+            status: Some(Status::InProgress),
+            episode_number: episode,
+            season_number: None,
+            position_seconds: position,
+            file_count: 74,
+        }
+    }
+
+    #[test]
+    fn status_line_appends_position_only_when_past_zero() {
+        let lines: Vec<String> = [
+            Some(0.0),
+            Some(0.4),
+            Some(0.5),
+            Some(400.0),
+            Some(3725.0),
+            None,
+        ]
+        .into_iter()
+        .map(|p| status_line(&status_overview(Some(9), p)))
+        .collect();
+        assert_eq!(
+            lines,
+            [
+                "Monster — ep. 9",
+                "Monster — ep. 9",
+                "Monster — ep. 9 (00:01)",
+                "Monster — ep. 9 (06:40)",
+                "Monster — ep. 9 (1:02:05)",
+                "Monster — ep. 9",
+            ]
+        );
+    }
+
+    #[test]
+    fn status_line_unknown_episode_still_shows_position() {
+        assert_eq!(
+            status_line(&status_overview(None, Some(90.0))),
+            "Monster — unknown episode (01:30)"
         );
     }
 

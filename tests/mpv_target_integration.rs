@@ -434,7 +434,7 @@ fn entries_from_native_and_flatpak_log_dirs_both_reconcile_whatever_the_target()
 
         assert_eq!(
             stdout(&out),
-            "Monster — ep. 1\nNaruto — ep. 1\n\nRunning `tsuzuki` bare will prompt among these.\n",
+            "Monster — ep. 1 (05:00)\nNaruto — ep. 1 (06:40)\n\nRunning `tsuzuki` bare will prompt among these.\n",
             "{mpv_table}"
         );
     }
