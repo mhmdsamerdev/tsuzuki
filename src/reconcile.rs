@@ -130,7 +130,9 @@ fn reconcile_with_inputs(
         if classify_entry(candidate, resume_seconds, completion_remaining_seconds).is_none() {
             continue;
         }
-        if let Some(pair) = classify_root_and_series(&resolved, real_source) {
+        if let Some(pair) = classify_root_and_series(&resolved, real_source)
+            .or_else(|| script_log::logged_series(&resolved, &candidate.source_path))
+        {
             pairs.insert(pair);
         }
     }
@@ -3317,6 +3319,96 @@ mod tests {
             ),
             pair(&rewatches, "Monster")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_record_reacts_to_a_fresh_reading_through_a_symlinked_season_inside_a_real_series() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let tv = dir.path().join("tv");
+        fs::create_dir_all(tv.join("Lupin")).unwrap();
+        let s2 = dir.path().join("storage").join("Lupin S02");
+        touch(&s2.join("ep01.mkv"));
+        touch(&s2.join("ep02.mkv"));
+        symlink(&s2, tv.join("Lupin/Lupin S02")).unwrap();
+        let config = default_config(&tv);
+        let log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&log_dir).unwrap();
+        script_entry_at(
+            &log_dir,
+            "e1",
+            &tv.join("Lupin/Lupin S02/ep01.mkv"),
+            Some(2400.0),
+            Some(172.0),
+            "quit",
+            CUTOFF + 60,
+        );
+        let mut state = State {
+            series: vec![record_at(
+                &tv,
+                "Lupin",
+                Status::Dropped,
+                "Lupin/Lupin S02/ep02.mkv",
+                1967.0,
+                2,
+            )],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(
+            state.series[0].current_relative_path,
+            "Lupin/Lupin S02/ep01.mkv"
+        );
+        assert_eq!(state.series[0].position_seconds, 172.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_record_reacts_to_a_fresh_reading_through_a_symlinked_episode_file() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let tv = dir.path().join("tv");
+        fs::create_dir_all(tv.join("Show")).unwrap();
+        let storage = dir.path().join("storage");
+        touch(&storage.join("ep01.mkv"));
+        touch(&storage.join("ep02.mkv"));
+        symlink(storage.join("ep01.mkv"), tv.join("Show/ep01.mkv")).unwrap();
+        symlink(storage.join("ep02.mkv"), tv.join("Show/ep02.mkv")).unwrap();
+        let config = default_config(&tv);
+        let log_dir = dir.path().join("mpv-log");
+        fs::create_dir_all(&log_dir).unwrap();
+        script_entry_at(
+            &log_dir,
+            "e2",
+            &tv.join("Show/ep02.mkv"),
+            Some(2400.0),
+            Some(500.0),
+            "quit",
+            CUTOFF + 60,
+        );
+        let mut state = State {
+            series: vec![record_at(
+                &tv,
+                "Show",
+                Status::Dropped,
+                "Show/ep01.mkv",
+                10.0,
+                1,
+            )],
+            mal_links: Vec::new(),
+        };
+
+        run_reconcile(&config, &mut state, &log_dir);
+
+        assert_eq!(state.series[0].status, Status::InProgress);
+        assert_eq!(state.series[0].current_relative_path, "Show/ep02.mkv");
+        assert_eq!(state.series[0].position_seconds, 500.0);
     }
 
     #[test]

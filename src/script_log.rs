@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::roots::{expand_tilde, normalize};
@@ -187,7 +187,10 @@ pub(crate) fn scan_script_log_full(
     }
 
     let mut files = merge_freshest_wins(files, home);
-    files.retain(|real_source, _| is_under_a_tracked_root(real_source, resolved));
+    files.retain(|real_source, entry| {
+        is_under_a_tracked_root(real_source, resolved)
+            || logged_series(resolved, &entry.source_path).is_some()
+    });
     ScriptLogScan {
         files,
         streams: merge_streams_freshest_wins(streams),
@@ -199,6 +202,9 @@ pub(crate) fn scan_script_log_full(
 pub(crate) struct ResolvedRoot {
     /// The root as stored in `config.toml`.
     pub root: String,
+    /// The root with `~` expanded, symlinks not resolved: the prefix a logged
+    /// path carries.
+    pub expanded_root: PathBuf,
     pub real_root: PathBuf,
     /// `(series name, canonical series path)` for series folders that resolve
     /// outside `real_root` (symlinked out): the only ones a prefix match on
@@ -228,11 +234,40 @@ pub(crate) fn resolve_roots(tracked_roots: &[String], home: Option<&Path>) -> Ve
                 .unwrap_or_default();
             ResolvedRoot {
                 root: root.clone(),
+                expanded_root,
                 real_root: real_root.clone(),
                 outside_children,
             }
         })
         .collect()
+}
+
+/// The `(root, series name)` a logged path belongs to by where it sits under a
+/// tracked root as typed, before symlinks resolve. It catches files reached
+/// through symlinks below the series folder, which resolve outside every root.
+/// The series name is the depth-1 directory; the match is a claim only, since
+/// reconcile still requires the file in that series' own walk. The most
+/// specific root wins. Paths with `..` or no directory under the root never
+/// match.
+pub(crate) fn logged_series(resolved: &[ResolvedRoot], logged: &Path) -> Option<(String, String)> {
+    let mut best: Option<(&ResolvedRoot, String)> = None;
+    for r in resolved {
+        let Ok(rel) = logged.strip_prefix(&r.expanded_root) else {
+            continue;
+        };
+        let parts: Vec<_> = rel.components().collect();
+        if parts.len() < 2 || !parts.iter().all(|c| matches!(c, Component::Normal(_))) {
+            continue;
+        }
+        let name = parts[0].as_os_str().to_string_lossy().into_owned();
+        let more_specific = best.as_ref().is_none_or(|(b, _)| {
+            r.expanded_root.as_os_str().len() > b.expanded_root.as_os_str().len()
+        });
+        if more_specific {
+            best = Some((r, name));
+        }
+    }
+    best.map(|(r, name)| (r.root.clone(), name))
 }
 
 /// True if the canonical `real_source` is under any tracked root. Tries a
@@ -554,6 +589,137 @@ mod tests {
             &normalize(&root.join("Dungeon Meshi").join("ep01.mkv"), None),
             &resolve_roots(&tracked, None),
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_keeps_entries_logged_through_symlinked_seasons_and_episode_files_inside_a_real_series()
+    {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("tv");
+        let log_dir = dir.path().join("mpv-log");
+        let storage = dir.path().join("storage");
+        touch(&storage.join("Lupin S02").join("ep01.mkv"));
+        touch(&storage.join("ep02.mkv"));
+        touch(&storage.join("stray.mkv"));
+        std_fs::create_dir_all(root.join("Lupin")).unwrap();
+        symlink(
+            storage.join("Lupin S02"),
+            root.join("Lupin").join("Lupin S02"),
+        )
+        .unwrap();
+        std_fs::create_dir_all(root.join("Show")).unwrap();
+        symlink(storage.join("ep02.mkv"), root.join("Show").join("ep02.mkv")).unwrap();
+
+        let logged = [
+            ("a", root.join("Lupin/Lupin S02/ep01.mkv")),
+            ("b", root.join("Show/ep02.mkv")),
+            ("c", storage.join("stray.mkv")),
+        ];
+        for (name, path) in &logged {
+            write_entry(
+                &log_dir.join(name),
+                &format!(
+                    "# {}\nduration=2400.0\nposition=500.0\nreason=quit\n",
+                    path.display()
+                ),
+            );
+        }
+
+        let tracked = vec![root.to_string_lossy().into_owned()];
+        let kept: Vec<PathBuf> = scan_script_log(std::slice::from_ref(&log_dir), &tracked, None)
+            .into_values()
+            .map(|e| e.source_path)
+            .collect();
+        let mut kept = kept;
+        kept.sort();
+        let mut expected = vec![logged[0].1.clone(), logged[1].1.clone()];
+        expected.sort();
+        assert_eq!(kept, expected);
+    }
+
+    fn resolved_for(roots: &[&Path]) -> Vec<ResolvedRoot> {
+        let tracked: Vec<String> = roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect();
+        resolve_roots(&tracked, None)
+    }
+
+    #[test]
+    fn logged_series_names_the_depth_one_directory_under_the_most_specific_root() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let rewatches = anime.join("Rewatches");
+        let resolved = resolved_for(&[&anime, &rewatches]);
+
+        assert_eq!(
+            logged_series(&resolved, &anime.join("Lupin/S02/ep01.mkv")),
+            Some((anime.to_string_lossy().into_owned(), "Lupin".to_string()))
+        );
+        assert_eq!(
+            logged_series(&resolved, &rewatches.join("Monster/ep01.mkv")),
+            Some((
+                rewatches.to_string_lossy().into_owned(),
+                "Monster".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn logged_series_rejects_loose_files_parent_traversal_and_outside_paths() {
+        let dir = tempdir().unwrap();
+        let anime = dir.path().join("Anime");
+        let resolved = resolved_for(&[&anime]);
+
+        // A file directly in the root names no series.
+        assert_eq!(logged_series(&resolved, &anime.join("loose.mkv")), None);
+        assert_eq!(logged_series(&resolved, &anime), None);
+        // `..` could name the root's parent as a series.
+        assert_eq!(
+            logged_series(&resolved, &anime.join("../Other/ep01.mkv")),
+            None
+        );
+        assert_eq!(
+            logged_series(&resolved, &anime.join("Show/../ep01.mkv")),
+            None
+        );
+        // Textually outside the root, including a sibling that shares its name prefix.
+        assert_eq!(
+            logged_series(&resolved, &dir.path().join("Anime2/Show/ep01.mkv")),
+            None
+        );
+        assert_eq!(
+            logged_series(&resolved, &dir.path().join("Downloads/clip.mkv")),
+            None
+        );
+    }
+
+    #[test]
+    fn logged_series_with_two_spellings_of_one_root_picks_the_first_listed() {
+        let home = Path::new("/home/u");
+        let resolved = resolve_roots(
+            &["~/Anime".to_string(), "/home/u/Anime".to_string()],
+            Some(home),
+        );
+
+        assert_eq!(
+            logged_series(&resolved, Path::new("/home/u/Anime/Show/ep01.mkv")),
+            Some(("~/Anime".to_string(), "Show".to_string()))
+        );
+    }
+
+    #[test]
+    fn logged_series_expands_a_tilde_root_and_ignores_a_trailing_slash() {
+        let home = Path::new("/home/u");
+        let resolved = resolve_roots(&["~/Anime/".to_string()], Some(home));
+
+        assert_eq!(
+            logged_series(&resolved, Path::new("/home/u/Anime/Show/ep01.mkv")),
+            Some(("~/Anime/".to_string(), "Show".to_string()))
+        );
     }
 
     #[test]

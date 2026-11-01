@@ -142,3 +142,102 @@ fn an_entry_only_at_the_flatpak_remapped_path_is_still_found() {
         "persisted state.toml contents:\n{state_contents}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn quit_entry_through_a_symlinked_season_inside_a_real_series_folder_is_recorded() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    // `Anime/Lupin` is a real folder; its season folder is a symlink to storage.
+    let storage = home.join("storage").join("Lupin S02");
+    fs::create_dir_all(&storage).unwrap();
+    fs::File::create(storage.join("ep01.mkv")).unwrap();
+    fs::File::create(storage.join("ep02.mkv")).unwrap();
+    fs::create_dir_all(home.join("Anime").join("Lupin")).unwrap();
+    std::os::unix::fs::symlink(&storage, home.join("Anime/Lupin/Lupin S02")).unwrap();
+
+    let add = run(home, &["add", "~/Anime"]);
+    assert!(
+        add.status.success(),
+        "add failed: stderr={}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let script_log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&script_log_dir).unwrap();
+    fs::write(
+        script_log_dir.join("deadbeef"),
+        format!(
+            "# {}\nduration=2400.000000\nposition=500.000000\nreason=quit\n",
+            home.join("Anime/Lupin/Lupin S02/ep02.mkv").display()
+        ),
+    )
+    .unwrap();
+
+    let list = run(home, &["list"]);
+    assert!(
+        list.status.success(),
+        "list failed: stderr={}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+
+    let state = fs::read_to_string(home.join(".local/share/tsuzuki/state.toml")).unwrap();
+    assert!(
+        state.contains("name = \"Lupin\"")
+            && state.contains("status = \"in_progress\"")
+            && state.contains("current_relative_path = \"Lupin/Lupin S02/ep02.mkv\"")
+            && state.contains("position_seconds = 500.0"),
+        "the reading through the symlinked season must be recorded:\n{state}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn quit_entry_through_a_symlinked_episode_file_is_recorded() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let storage = home.join("storage");
+    fs::create_dir_all(&storage).unwrap();
+    fs::File::create(storage.join("ep01.mkv")).unwrap();
+    fs::File::create(storage.join("ep02.mkv")).unwrap();
+    fs::create_dir_all(home.join("Anime/Show")).unwrap();
+    for ep in ["ep01.mkv", "ep02.mkv"] {
+        std::os::unix::fs::symlink(storage.join(ep), home.join("Anime/Show").join(ep)).unwrap();
+    }
+
+    let add = run(home, &["add", "~/Anime"]);
+    assert!(
+        add.status.success(),
+        "add failed: stderr={}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let script_log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&script_log_dir).unwrap();
+    fs::write(
+        script_log_dir.join("deadbeef"),
+        format!(
+            "# {}\nduration=2400.000000\nposition=500.000000\nreason=quit\n",
+            home.join("Anime/Show/ep02.mkv").display()
+        ),
+    )
+    .unwrap();
+
+    let list = run(home, &["list"]);
+    assert!(
+        list.status.success(),
+        "list failed: stderr={}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+
+    let state = fs::read_to_string(home.join(".local/share/tsuzuki/state.toml")).unwrap();
+    assert!(
+        state.contains("name = \"Show\"")
+            && state.contains("status = \"in_progress\"")
+            && state.contains("current_relative_path = \"Show/ep02.mkv\"")
+            && state.contains("position_seconds = 500.0"),
+        "the reading through the symlinked episode file must be recorded:\n{state}"
+    );
+}
