@@ -5,14 +5,7 @@ All notable changes to Tsuzuki are documented here.
 ## [Unreleased]
 
 - `status` shows the saved position when it is past 0:00.
-- The mpv script now logs the title of streams; update it with `tsuzuki doctor --fix`.
-- `tsuzuki add ani-cli` turns on the ani-cli source (new `[ani_cli]` config).
-- Streams watched through ani-cli in mpv are recorded as series once `ani-cli` is added.
-- `list`, `status`, `pause` and `drop` work on ani-cli series (`--root ani-cli` picks one when a folder series shares the title); `start` never offers them.
-- `tsuzuki` resumes ani-cli series by running ani-cli on the saved episode and second, or the next episode once finished.
-- `sync` saves MAL's episode count; an ani-cli show becomes completed when its last episode is finished.
-- `sync`, `sync link` and `sync exclude` work on ani-cli series.
-- `doctor` checks ani-cli (program, menu, history, stale shows) once `ani-cli` is added; `--forget-orphans` clears shows that left its history.
+- ani-cli support: `tsuzuki add ani-cli`, then `tsuzuki` resumes what you watched through ani-cli. Update the mpv script with `tsuzuki doctor --fix`.
 
 ## [v0.1.6]
 

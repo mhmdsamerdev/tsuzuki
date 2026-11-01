@@ -115,6 +115,19 @@ entry in `config.toml`.
 Entirely optional. Everything above works with no account, no internet
 connection, and no setup beyond pointing Tsuzuki at your files.
 
+## Optional: ani-cli
+
+Watch with [ani-cli](https://github.com/pystardust/ani-cli) instead of local
+files? Turn it on once:
+
+```
+tsuzuki add ani-cli
+```
+
+Then keep watching through ani-cli in mpv. Next time, `tsuzuki` picks up
+those shows too, right where you stopped. `list`, `pause`, `drop` and
+`sync` work on them like on any other series.
+
 ## Philosophy
 
 - **Local-first.** Your machine is the source of truth. Nothing about
