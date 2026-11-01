@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod ani_cli;
 mod anitomy;
 mod cli;

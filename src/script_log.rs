@@ -137,6 +137,14 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
     })
 }
 
+/// What one pass over the script-log directories yields.
+pub(crate) struct ScriptLogScan {
+    /// Local-file entries under a tracked root, keyed by canonical path.
+    pub files: BTreeMap<PathBuf, ScriptLogEntry>,
+    /// Stream entries (those with a `title=` line), the freshest per title.
+    pub streams: Vec<ScriptLogEntry>,
+}
+
 /// Parses every entry file in `dirs`, drops redirects and malformed files,
 /// keeps the freshest entry per source path, and filters to entries under
 /// `tracked_roots`. Keyed by the source path's canonical form, resolved once
@@ -146,16 +154,18 @@ pub fn scan_script_log(
     tracked_roots: &[String],
     home: Option<&Path>,
 ) -> BTreeMap<PathBuf, ScriptLogEntry> {
-    scan_script_log_resolved(dirs, &resolve_roots(tracked_roots, home), home)
+    scan_script_log_full(dirs, &resolve_roots(tracked_roots, home), home).files
 }
 
-/// [`scan_script_log`] against roots the caller already resolved.
-pub(crate) fn scan_script_log_resolved(
+/// [`scan_script_log`] against roots the caller already resolved, also
+/// returning the stream entries.
+pub(crate) fn scan_script_log_full(
     dirs: &[PathBuf],
     resolved: &[ResolvedRoot],
     home: Option<&Path>,
-) -> BTreeMap<PathBuf, ScriptLogEntry> {
-    let mut raw = Vec::new();
+) -> ScriptLogScan {
+    let mut files = Vec::new();
+    let mut streams = Vec::new();
     for dir in dirs {
         let Ok(read_dir) = fs::read_dir(dir) else {
             continue;
@@ -166,14 +176,21 @@ pub(crate) fn scan_script_log_resolved(
                 continue;
             }
             if let Some(parsed) = parse_entry_file(&path) {
-                raw.push(parsed);
+                if parsed.title.is_some() {
+                    streams.push(parsed);
+                } else {
+                    files.push(parsed);
+                }
             }
         }
     }
 
-    let mut by_path = merge_freshest_wins(raw, home);
-    by_path.retain(|real_source, _| is_under_a_tracked_root(real_source, resolved));
-    by_path
+    let mut files = merge_freshest_wins(files, home);
+    files.retain(|real_source, _| is_under_a_tracked_root(real_source, resolved));
+    ScriptLogScan {
+        files,
+        streams: merge_streams_freshest_wins(streams),
+    }
 }
 
 /// A tracked root resolved once per run, so matching log entries never
@@ -246,6 +263,23 @@ fn merge_freshest_wins(
         }
     }
     by_path
+}
+
+/// Keeps one stream entry per title: the one whose file has the newest mtime.
+fn merge_streams_freshest_wins(entries: Vec<ScriptLogEntry>) -> Vec<ScriptLogEntry> {
+    let mut by_title: BTreeMap<String, ScriptLogEntry> = BTreeMap::new();
+    for entry in entries {
+        let Some(title) = entry.title.clone() else {
+            continue;
+        };
+        match by_title.get(&title) {
+            Some(existing) if existing.mtime >= entry.mtime => {}
+            _ => {
+                by_title.insert(title, entry);
+            }
+        }
+    }
+    by_title.into_values().collect()
 }
 
 #[cfg(test)]
@@ -793,6 +827,74 @@ mod tests {
                     mtime: now,
                 }
             )])
+        );
+    }
+
+    #[test]
+    fn scan_separates_stream_entries_and_keeps_the_freshest_per_title_across_dirs() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        touch(&root.join("Show").join("ep01.mkv"));
+        let native = dir.path().join("native-log");
+        let flatpak = dir.path().join("flatpak-log");
+        write_entry(
+            &native.join("local"),
+            &format!(
+                "# {}\nduration=\nposition=\nreason=eof\n",
+                root.join("Show").join("ep01.mkv").display()
+            ),
+        );
+        write_entry(
+            &native.join("stream"),
+            "# https://cdn.example/old\ntitle=Blue Lock Episode 9\nduration=1400.0\nposition=100.0\nreason=quit\n",
+        );
+        write_entry(
+            &flatpak.join("stream"),
+            "# https://cdn.example/new\ntitle=Blue Lock Episode 9\nduration=1400.0\nposition=900.0\nreason=quit\n",
+        );
+        write_entry(
+            &flatpak.join("other"),
+            "# https://cdn.example/o\ntitle=Blue Lock Episode 10\nduration=\nposition=\nreason=eof\n",
+        );
+        let older = fixed_mtime();
+        let newer = older + Duration::from_secs(60);
+        set_mtime(&native.join("stream"), older);
+        set_mtime(&flatpak.join("stream"), newer);
+        set_mtime(&flatpak.join("other"), older);
+        let tracked_roots = vec![root.to_string_lossy().into_owned()];
+
+        // Whichever directory is read first, the newer entry must win.
+        for dirs in [[flatpak.clone(), native.clone()], [native, flatpak]] {
+            let scan = scan_script_log_full(&dirs, &resolve_roots(&tracked_roots, None), None);
+            check_scan(&scan, &root);
+        }
+    }
+
+    fn check_scan(scan: &ScriptLogScan, root: &Path) {
+        assert_eq!(
+            scan.files
+                .values()
+                .map(|e| e.source_path.clone())
+                .collect::<Vec<_>>(),
+            vec![root.join("Show").join("ep01.mkv")]
+        );
+        assert_eq!(
+            scan.streams
+                .iter()
+                .map(|e| (e.title.clone().unwrap(), e.position, e.source_path.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Blue Lock Episode 10".to_string(),
+                    None,
+                    PathBuf::from("https://cdn.example/o")
+                ),
+                (
+                    "Blue Lock Episode 9".to_string(),
+                    Some(900.0),
+                    PathBuf::from("https://cdn.example/new")
+                ),
+            ]
         );
     }
 }

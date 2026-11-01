@@ -158,6 +158,7 @@ fn split_title(media_title: &str) -> Option<Result<(&str, u32), ()>> {
 /// Decides whether `entry` is ani-cli playback. All of these must hold: a
 /// stream URL source, a `title=` ending in ` Episode <n>`, and the rest equal
 /// to exactly one history title.
+#[cfg(test)]
 pub fn claim(entry: &ScriptLogEntry, history: &History) -> Verdict {
     classify(entry, &history.title_counts())
 }

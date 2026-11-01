@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::ani_cli;
 use crate::anitomy;
 use crate::config::Config;
 use crate::exclude;
@@ -56,39 +57,73 @@ fn fresh_candidate<'a>(
     cutoff: Option<u64>,
 ) -> Option<&'a ScriptLogEntry> {
     let candidate = candidates.get(key)?;
+    is_newer_than(candidate, cutoff).then_some(candidate)
+}
+
+/// True without a `cutoff`, else when the entry file's mtime is strictly
+/// newer than it (unix seconds).
+fn is_newer_than(entry: &ScriptLogEntry, cutoff: Option<u64>) -> bool {
     let Some(cutoff) = cutoff else {
-        return Some(candidate);
+        return true;
     };
-    let mtime_seconds = candidate
+    let mtime_seconds = entry
         .mtime
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    (mtime_seconds > cutoff).then_some(candidate)
+    mtime_seconds > cutoff
 }
 
 /// Reconciles every series that has a record or real activity under a tracked
 /// root. Mutates `state` in place; persisting it is the caller's job.
 pub fn reconcile(config: &Config, state: &mut State, home: Option<&Path>) {
     let script_log_dirs = script_log::mpv_log_dirs(home);
-    reconcile_with_script_log_dirs(config, state, home, &script_log_dirs);
+    // An unreadable history claims nothing; ani-cli records stay as they are.
+    let history = if config.ani_cli.enabled {
+        ani_cli::history_path_here(&config.ani_cli, home)
+            .and_then(|path| ani_cli::read_history(&path).ok())
+            .unwrap_or_default()
+    } else {
+        ani_cli::History::default()
+    };
+    reconcile_with_inputs(config, state, home, &script_log_dirs, &history);
 }
 
-/// [`reconcile`] with the script-log directories injected, since they have no
-/// config field for tests to override.
+/// [`reconcile_with_inputs`] with no ani-cli history, for the local-folder
+/// tests.
+#[cfg(test)]
 fn reconcile_with_script_log_dirs(
     config: &Config,
     state: &mut State,
     home: Option<&Path>,
     script_log_dirs: &[PathBuf],
 ) {
+    reconcile_with_inputs(
+        config,
+        state,
+        home,
+        script_log_dirs,
+        &ani_cli::History::default(),
+    );
+}
+
+/// [`reconcile`] with the script-log directories and ani-cli history
+/// injected, since they have no config field for tests to override.
+fn reconcile_with_inputs(
+    config: &Config,
+    state: &mut State,
+    home: Option<&Path>,
+    script_log_dirs: &[PathBuf],
+    history: &ani_cli::History,
+) {
     let resume_seconds = config.thresholds.resume_seconds;
     let completion_remaining_seconds = config.thresholds.completion_remaining_seconds;
 
     let resolved = script_log::resolve_roots(&config.roots.paths, home);
-    let candidates = script_log::scan_script_log_resolved(script_log_dirs, &resolved, home);
+    let scan = script_log::scan_script_log_full(script_log_dirs, &resolved, home);
+    let candidates = scan.files;
 
     let mut pairs: BTreeSet<(String, String)> = BTreeSet::new();
-    for record in &state.series {
+    for record in state.series.iter().filter(|r| r.root != ani_cli::ROOT) {
         pairs.insert((record.root.clone(), record.name.clone()));
     }
     for (real_source, candidate) in &candidates {
@@ -113,7 +148,118 @@ fn reconcile_with_script_log_dirs(
         );
     }
 
+    if config.ani_cli.enabled {
+        let claims = ani_cli::claim_all(&scan.streams, history);
+        reconcile_ani_cli(state, &claims, resume_seconds, completion_remaining_seconds);
+    }
+
     apply_idle_auto_pause(state, config.thresholds.auto_pause_days, now_unix());
+}
+
+/// Reconciles every ani-cli show that has a claimed reading. A show without
+/// one is untouched: absence proves nothing.
+fn reconcile_ani_cli(
+    state: &mut State,
+    claims: &ani_cli::Claims,
+    resume_seconds: u64,
+    completion_remaining_seconds: u64,
+) {
+    let mut by_title: BTreeMap<&str, BTreeMap<u32, &ScriptLogEntry>> = BTreeMap::new();
+    for (claim, entry) in &claims.claimed {
+        by_title
+            .entry(&claim.title)
+            .or_default()
+            .insert(claim.episode, entry);
+    }
+    for (title, episodes) in by_title {
+        reconcile_ani_cli_title(
+            state,
+            title,
+            &episodes,
+            resume_seconds,
+            completion_remaining_seconds,
+        );
+    }
+}
+
+/// Reconciles one show from its readings, keyed by episode number. The
+/// furthest episode with a usable reading decides: a `Resume` lands on that
+/// episode at that position, a `Completed` lands on the next episode at 0.
+/// Like a folder series, a dropped or completed record reacts only to readings
+/// newer than it, and an active one ignores episodes before its cursor.
+fn reconcile_ani_cli_title(
+    state: &mut State,
+    title: &str,
+    episodes: &BTreeMap<u32, &ScriptLogEntry>,
+    resume_seconds: u64,
+    completion_remaining_seconds: u64,
+) {
+    let existing = state
+        .series
+        .iter()
+        .position(|r| r.root == ani_cli::ROOT && r.name == title);
+
+    let (cutoff, start_episode) = match existing.map(|i| &state.series[i]) {
+        Some(r) if matches!(r.status, Status::Dropped | Status::Completed) => {
+            (Some(r.updated_at), 0)
+        }
+        Some(r) => (None, r.episode_number.unwrap_or(0)),
+        None => (None, 0),
+    };
+
+    let mut furthest: Option<(u32, PlaybackAction)> = None;
+    for (&episode, entry) in episodes.range(start_episode..) {
+        if !is_newer_than(entry, cutoff) {
+            continue;
+        }
+        if let Some(action) = classify_entry(entry, resume_seconds, completion_remaining_seconds) {
+            furthest = Some((episode, action));
+        }
+    }
+    let Some((episode, action)) = furthest else {
+        return;
+    };
+    let (episode, position) = match action {
+        PlaybackAction::Resume(position) => (episode, position),
+        PlaybackAction::Completed => (episode.saturating_add(1), 0.0),
+    };
+
+    // Readings that pass the cutoff are newer than the record, so even an
+    // identical one is new watching.
+    let changed = match existing.map(|i| &state.series[i]) {
+        Some(r) => {
+            cutoff.is_some()
+                || r.episode_number != Some(episode)
+                || (r.position_seconds - position).abs() > f64::EPSILON
+        }
+        None => true,
+    };
+    if !changed {
+        return;
+    }
+
+    let now = now_unix();
+    match existing {
+        Some(i) => {
+            let record = &mut state.series[i];
+            record.status = Status::InProgress;
+            record.position_seconds = position;
+            record.episode_number = Some(episode);
+            record.season_number = None;
+            record.updated_at = now;
+        }
+        None => state.series.push(SeriesRecord {
+            root: ani_cli::ROOT.to_string(),
+            name: title.to_string(),
+            status: Status::InProgress,
+            current_relative_path: String::new(),
+            position_seconds: position,
+            episode_number: Some(episode),
+            updated_at: now,
+            mal_episode_awareness: None,
+            season_number: None,
+        }),
+    }
 }
 
 /// Auto-pauses every `in_progress` record idle for at least `auto_pause_days`
@@ -3170,6 +3316,579 @@ mod tests {
         assert_eq!(
             classify_root_and_series(&resolved, &normalize(&missing.join("Show/ep01.mkv"), None)),
             pair(&missing, "Show")
+        );
+    }
+
+    // --- ani-cli ---
+
+    fn ani_config() -> Config {
+        let mut config = Config::default();
+        config.ani_cli.enabled = true;
+        config
+    }
+
+    fn history_of(titles: &[&str]) -> ani_cli::History {
+        ani_cli::History::parse(
+            &titles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("1\tid-{i}\t{t}\n"))
+                .collect::<String>(),
+        )
+    }
+
+    /// Writes a stream entry for `title` ("<show> Episode <n>"), named by the
+    /// title like the script does, with its file mtime set to `mtime`.
+    fn write_stream(
+        log_dir: &Path,
+        title: &str,
+        duration: Option<f64>,
+        position: Option<f64>,
+        reason: &str,
+        mtime: SystemTime,
+    ) {
+        fs::create_dir_all(log_dir).unwrap();
+        let path = log_dir.join(title.replace(' ', "_"));
+        fs::write(
+            &path,
+            format!(
+                "# https://cdn.example/{}/index.m3u8?token=abc\ntitle={title}\nduration={}\nposition={}\nreason={reason}\n",
+                title.replace(' ', "-"),
+                duration.map(|d| d.to_string()).unwrap_or_default(),
+                position.map(|p| p.to_string()).unwrap_or_default(),
+            ),
+        )
+        .unwrap();
+        set_mtime(&path, mtime);
+    }
+
+    fn quit_at(log_dir: &Path, title: &str, position: f64, mtime: SystemTime) {
+        write_stream(log_dir, title, Some(1400.0), Some(position), "quit", mtime);
+    }
+
+    fn run_ani(config: &Config, state: &mut State, log_dir: &Path, history: &ani_cli::History) {
+        reconcile_with_inputs(
+            config,
+            state,
+            None,
+            std::slice::from_ref(&log_dir.to_path_buf()),
+            history,
+        );
+    }
+
+    /// The record with its volatile `updated_at` blanked, for whole-value comparison.
+    fn ani_record(
+        status: Status,
+        title: &str,
+        position_seconds: f64,
+        episode_number: u32,
+        updated_at: u64,
+    ) -> SeriesRecord {
+        SeriesRecord {
+            root: ani_cli::ROOT.to_string(),
+            name: title.to_string(),
+            status,
+            current_relative_path: String::new(),
+            position_seconds,
+            episode_number: Some(episode_number),
+            updated_at,
+            mal_episode_awareness: None,
+            season_number: None,
+        }
+    }
+
+    /// `state.series` with every `updated_at` replaced by `stamp`.
+    fn stamped(state: &State, stamp: u64) -> Vec<SeriesRecord> {
+        state
+            .series
+            .iter()
+            .map(|r| SeriesRecord {
+                updated_at: stamp,
+                ..r.clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ani_cli_resume_reading_creates_a_record_at_that_episode_and_position() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 9", 300.0, at(CUTOFF));
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 9, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_reading_below_resume_seconds_creates_nothing_at_the_boundary() {
+        for (position, creates) in [
+            (0.0, false),
+            (119.0, false),
+            (119.9, false),
+            (120.0, true),
+            (121.0, true),
+        ] {
+            let dir = tempdir().unwrap();
+            let log = dir.path().join("mpv-log");
+            quit_at(&log, "Blue Lock Episode 9", position, at(CUTOFF));
+            let mut state = State::default();
+
+            run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+            assert_eq!(
+                state.series.len(),
+                usize::from(creates),
+                "position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn ani_cli_eof_moves_the_cursor_to_the_next_episode_at_zero() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        write_stream(
+            &log,
+            "Blue Lock Episode 9",
+            Some(1400.0),
+            Some(1399.0),
+            "eof",
+            at(CUTOFF),
+        );
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 10, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_stop_within_the_completion_window_counts_as_finished() {
+        // Duration 1400: remaining 180 is completed, remaining 181 is a resume.
+        for (position, expected_episode, expected_position) in
+            [(1220.0, 10, 0.0), (1219.0, 9, 1219.0)]
+        {
+            let dir = tempdir().unwrap();
+            let log = dir.path().join("mpv-log");
+            quit_at(&log, "Blue Lock Episode 9", position, at(CUTOFF));
+            let mut state = State::default();
+
+            run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+            assert_eq!(
+                stamped(&state, 0),
+                vec![ani_record(
+                    Status::InProgress,
+                    "Blue Lock",
+                    expected_position,
+                    expected_episode,
+                    0
+                )],
+                "position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn ani_cli_short_stream_below_resume_seconds_is_not_completed_by_the_window() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        // 60s total, stopped at 45s: remaining 15s is inside the window, but
+        // the position check wins.
+        write_stream(
+            &log,
+            "Blue Lock Episode 9",
+            Some(60.0),
+            Some(45.0),
+            "quit",
+            at(CUTOFF),
+        );
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(state.series, Vec::new());
+    }
+
+    #[test]
+    fn ani_cli_reading_for_a_title_missing_from_history_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Some Video Episode 3", 500.0, at(CUTOFF));
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(state.series, Vec::new());
+    }
+
+    #[test]
+    fn ani_cli_reading_creates_nothing_when_the_source_is_not_enabled() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 9", 300.0, at(CUTOFF));
+        let mut state = State::default();
+
+        run_ani(
+            &Config::default(),
+            &mut state,
+            &log,
+            &history_of(&["Blue Lock"]),
+        );
+
+        assert_eq!(state.series, Vec::new());
+    }
+
+    #[test]
+    fn ani_cli_reading_for_an_ambiguous_or_fractional_episode_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Twin Episode 2", 500.0, at(CUTOFF));
+        quit_at(&log, "Blue Lock Episode 12.5", 500.0, at(CUTOFF));
+        let mut state = State::default();
+
+        run_ani(
+            &ani_config(),
+            &mut state,
+            &log,
+            &history_of(&["Twin", "Twin", "Blue Lock"]),
+        );
+
+        assert_eq!(state.series, Vec::new());
+    }
+
+    #[test]
+    fn ani_cli_unchanged_reading_does_not_bump_updated_at() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 9", 300.0, at(CUTOFF));
+        let history = history_of(&["Blue Lock"]);
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].updated_at = 5;
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            state.series,
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 9, 5)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_furthest_episode_with_a_usable_reading_wins() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 3", 300.0, at(CUTOFF));
+        quit_at(&log, "Blue Lock Episode 5", 700.0, at(CUTOFF));
+        quit_at(&log, "Blue Lock Episode 4", 200.0, at(CUTOFF));
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 700.0, 5, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_consecutive_finished_episodes_skip_to_the_one_after_the_last() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        for ep in 1..=3 {
+            write_stream(
+                &log,
+                &format!("Blue Lock Episode {ep}"),
+                Some(1400.0),
+                Some(1399.0),
+                "eof",
+                at(CUTOFF),
+            );
+        }
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 4, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_gap_before_a_finished_episode_does_not_block_the_advance() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        write_stream(
+            &log,
+            "Blue Lock Episode 7",
+            Some(1400.0),
+            Some(1399.0),
+            "eof",
+            at(CUTOFF),
+        );
+        let mut state = State::default();
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 8, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_active_record_ignores_readings_for_episodes_before_its_cursor() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF));
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].updated_at = 5;
+        quit_at(&log, "Blue Lock Episode 3", 900.0, at(CUTOFF + 1000));
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            state.series,
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 5, 5)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_each_status_reacts_to_a_reading_older_than_the_record_as_for_folders() {
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Completed,
+            Status::Dropped,
+        ] {
+            let dir = tempdir().unwrap();
+            let log = dir.path().join("mpv-log");
+            let history = history_of(&["Blue Lock"]);
+            quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF - 100));
+            let mut state = State::default();
+            run_ani(&ani_config(), &mut state, &log, &history);
+            state.series[0].status = status;
+            state.series[0].updated_at = CUTOFF;
+            // A different position for the same episode, still older than the record.
+            quit_at(&log, "Blue Lock Episode 5", 900.0, at(CUTOFF - 50));
+
+            run_ani(&ani_config(), &mut state, &log, &history);
+
+            let expected = match status {
+                // Active records take the reading and become InProgress.
+                Status::InProgress | Status::Paused => {
+                    ani_record(Status::InProgress, "Blue Lock", 900.0, 5, 0)
+                }
+                // Dropped and completed records ignore leftovers.
+                Status::Completed | Status::Dropped => ani_record(status, "Blue Lock", 300.0, 5, 0),
+            };
+            assert_eq!(stamped(&state, 0), vec![expected], "{status:?}");
+        }
+    }
+
+    #[test]
+    fn ani_cli_dropped_or_completed_record_reactivates_only_on_a_strictly_newer_reading() {
+        for status in [Status::Completed, Status::Dropped] {
+            for (mtime, reactivates) in [(CUTOFF - 1, false), (CUTOFF, false), (CUTOFF + 1, true)] {
+                let dir = tempdir().unwrap();
+                let log = dir.path().join("mpv-log");
+                let history = history_of(&["Blue Lock"]);
+                quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF - 100));
+                let mut state = State::default();
+                run_ani(&ani_config(), &mut state, &log, &history);
+                state.series[0].status = status;
+                state.series[0].updated_at = CUTOFF;
+                quit_at(&log, "Blue Lock Episode 2", 400.0, at(mtime));
+
+                run_ani(&ani_config(), &mut state, &log, &history);
+
+                let expected = if reactivates {
+                    ani_record(Status::InProgress, "Blue Lock", 400.0, 2, 0)
+                } else {
+                    ani_record(status, "Blue Lock", 300.0, 5, 0)
+                };
+                assert_eq!(stamped(&state, 0), vec![expected], "{status:?} at {mtime}");
+            }
+        }
+    }
+
+    #[test]
+    fn ani_cli_paused_record_advances_when_its_episode_is_finished() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF));
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].status = Status::Paused;
+        write_stream(
+            &log,
+            "Blue Lock Episode 5",
+            Some(1400.0),
+            Some(1399.0),
+            "eof",
+            at(CUTOFF + 10),
+        );
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 6, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_absence_of_readings_leaves_a_record_untouched_even_when_history_lost_it() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF));
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+        state.series[0].updated_at = 5;
+        fs::remove_dir_all(&log).unwrap();
+
+        run_ani(
+            &ani_config(),
+            &mut state,
+            &log,
+            &ani_cli::History::default(),
+        );
+
+        assert_eq!(
+            state.series,
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 5, 5)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_and_folder_series_with_the_same_name_keep_separate_records() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        let folder_ep = root.join("Blue Lock").join("ep01.mkv");
+        touch(&folder_ep);
+        touch(&root.join("Blue Lock").join("ep02.mkv"));
+        let log = dir.path().join("mpv-log");
+        write_entry(&log, "folder", &folder_ep, 500.0);
+        quit_at(&log, "Blue Lock Episode 9", 300.0, at(CUTOFF));
+        let mut config = default_config(&root);
+        config.ani_cli.enabled = true;
+        let mut state = State::default();
+
+        run_ani(&config, &mut state, &log, &history_of(&["Blue Lock"]));
+
+        let mut records: Vec<(String, String, Option<u32>, f64)> = state
+            .series
+            .iter()
+            .map(|r| {
+                (
+                    r.root.clone(),
+                    r.name.clone(),
+                    r.episode_number,
+                    r.position_seconds,
+                )
+            })
+            .collect();
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            records,
+            vec![
+                (
+                    root.to_string_lossy().into_owned(),
+                    "Blue Lock".to_string(),
+                    Some(1),
+                    500.0
+                ),
+                (
+                    ani_cli::ROOT.to_string(),
+                    "Blue Lock".to_string(),
+                    Some(9),
+                    300.0
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ani_cli_records_are_subject_to_idle_auto_pause() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF));
+        let mut config = ani_config();
+        config.thresholds.auto_pause_days = 1;
+        let mut state = State::default();
+        run_ani(&config, &mut state, &log, &history);
+        state.series[0].updated_at = 1;
+
+        run_ani(&config, &mut state, &log, &history);
+
+        assert_eq!(state.series[0].status, Status::Paused);
+    }
+
+    #[test]
+    fn ani_cli_active_record_updates_when_only_the_episode_or_only_the_position_changes() {
+        // (new episode, new position) against a record at episode 5, position 300.
+        for (episode, position) in [(6, 300.0), (5, 900.0)] {
+            let dir = tempdir().unwrap();
+            let log = dir.path().join("mpv-log");
+            let history = history_of(&["Blue Lock"]);
+            quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF));
+            let mut state = State::default();
+            run_ani(&ani_config(), &mut state, &log, &history);
+            state.series[0].updated_at = 5;
+            quit_at(
+                &log,
+                &format!("Blue Lock Episode {episode}"),
+                position,
+                at(CUTOFF + 10),
+            );
+
+            run_ani(&ani_config(), &mut state, &log, &history);
+
+            assert_eq!(
+                stamped(&state, 0),
+                vec![ani_record(
+                    Status::InProgress,
+                    "Blue Lock",
+                    position,
+                    episode,
+                    0
+                )],
+                "episode {episode} position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn ani_cli_dropped_record_reactivates_on_a_newer_reading_identical_to_the_stored_one() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF - 100));
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].status = Status::Dropped;
+        state.series[0].updated_at = CUTOFF;
+        quit_at(&log, "Blue Lock Episode 5", 300.0, at(CUTOFF + 1));
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 5, 0)]
         );
     }
 }
