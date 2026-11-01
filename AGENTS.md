@@ -2,7 +2,7 @@
 
 # Tsuzuki
 
-Local-first Rust CLI (続き). It remembers what you were watching in mpv and resumes it with `tsuzuki`.
+Local-first Rust CLI (続き). It remembers what you were watching in mpv (local files, and ani-cli streams) and resumes it with `tsuzuki`.
 Not a player, library manager, or MAL replacement. Maintenance mode: fixes, small enhancements, dependency upkeep. Product pitch: `README.md`. Commands and dev setup: `docs/development.md`.
 `README.md` is for general users: don't document niche setups there (custom mpv, Snap).
 
@@ -16,11 +16,11 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 
 ## Hard invariants
 - Never modify or rename user files.
-- filesystem is the library. Never add labels, tags, or a library database; the folder layout on disk is the only source of what exists and how it's grouped.
+- For local files the filesystem is the library. Never add labels, tags, or a library database; the folder layout on disk is the only source of what exists and how it's grouped. ani-cli shows are the one exception (see "ani-cli source").
 - Never guess. Every tracked or excluded path is explicit.
 - Tsuzuki doesn't launch mpv itself or hold an IPC socket to observe playback.
 - MAL sync only ever writes a higher episode number, never a lower one, even on retries or partial failures.
-- Natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.
+- For local files, natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.
 - Absence of an mpv-script log entry proves nothing. Only a real position or a `Completed` reading moves state.
 
 ## Engineering choices
@@ -41,6 +41,15 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Series-ness is decided only by `series::is_series_dir`. No ad-hoc `join(..).is_dir()` for series.
 - Symlinks are followed everywhere, with cycle protection. Roots are stored as the user typed them.
 - `mal::DEFAULT_CLIENT_ID` is public on purpose (PKCE, no secret). Never redact or remove it.
+
+## ani-cli source
+- Opt-in: `tsuzuki add ani-cli` enables `[ani_cli]` in config. Before that nothing is tracked, read or checked.
+- Tsuzuki never starts, lists or imports an ani-cli show. A record exists only because an mpv-script log entry (stream URL, title ending ` Episode <int>`) exactly matched a title in ani-cli's history. History is read-only and never evidence of watching.
+- Series = show title under the reserved root `ani-cli://`. The episode number comes from the logged title: no ordering, no Anitomy.
+- Resume runs ani-cli in the foreground via its search path (`-e`, never `-c`), with `ANI_CLI_PLAYER` from `mpv::resolve` and `--start` via `ANI_CLI_PLAYER_FLAGS`. Unfinished: same episode and position. Finished: the next episode. Tsuzuki never writes ani-cli's history and makes no network requests itself.
+- `Completed` only when the finished episode equals the MAL `total_episodes` saved by `sync`. Unknown or 0 never completes. A `Completed` show isn't offered for resume; new playback reactivates it, as for folders.
+- A record whose title leaves ani-cli's history is inert until `doctor --fix --forget-orphans`.
+- Only mpv is tracked. Other players are out of scope.
 
 ## Code style
 - Match the surrounding code: naming, idiom, comment density.
