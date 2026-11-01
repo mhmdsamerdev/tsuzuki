@@ -230,3 +230,233 @@ fn pausing_an_unknown_ani_cli_show_fails_without_writing_state() {
     assert!(!output.status.success());
     assert_eq!(state_text(home), before);
 }
+
+// --- resume: a fake ani-cli records how it was run ---
+
+#[cfg(unix)]
+mod resume {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A config that runs the fake ani-cli and a custom "mpv" with no script
+    /// to check, so nothing real is spawned.
+    fn write_config(home: &Path, fake: &Path, extra_ani: &str, script_path: &str) {
+        let dir = home.join(".config/tsuzuki");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("config.toml"),
+            format!(
+                "[mpv]\ninstall = \"custom\"\ncommand = \"fake-mpv --profile=anime\"\nscript_path = \"{script_path}\"\n\n[ani_cli]\nenabled = true\ncommand = \"{}\"\n{extra_ani}\n",
+                fake.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Writes a fake ani-cli that dumps argv and the env it was given to
+    /// `<home>/ran.txt`, then runs `after` (shell) and exits with `code`.
+    fn fake_ani_cli(home: &Path, code: i32, after: &str) -> std::path::PathBuf {
+        let fake = home.join("fake-ani-cli");
+        let ran = home.join("ran.txt");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n{{\nprintf 'ARG %s\\n' \"$@\"\nprintf 'EXACT=%s\\n' \"$ANI_CLI_EXACT\"\nprintf 'PLAYER=%s\\n' \"$ANI_CLI_PLAYER\"\nprintf 'FLAGS=%s\\n' \"$ANI_CLI_PLAYER_FLAGS\"\n}} > {}\n{after}\nexit {code}\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    fn ran(home: &Path) -> Option<String> {
+        fs::read_to_string(home.join("ran.txt")).ok()
+    }
+
+    fn watch(home: &Path, reason: &str, position: f64) {
+        write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+        write_stream(home, "a1", "Blue Lock Episode 9", position, reason);
+    }
+
+    fn resume(home: &Path) -> Output {
+        run(home, &["resume"])
+    }
+
+    fn resume_with_flags(home: &Path, flags: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_tsuzuki"))
+            .env("HOME", home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("ANI_CLI_HIST_DIR")
+            .env("ANI_CLI_PLAYER_FLAGS", flags)
+            .arg("resume")
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn resuming_an_unfinished_episode_replays_it_from_the_saved_second() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "args = [\"--dub\"]", "");
+        watch(home, "quit", 312.5);
+
+        let output = resume(home);
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout_of(&output),
+            "→ Resuming \"Blue Lock\" — episode 9 (05:13)\n"
+        );
+        assert_eq!(
+            ran(home).unwrap(),
+            "ARG --dub\nARG -S\nARG 1\nARG -e\nARG 9\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nPLAYER=fake-mpv --profile=anime\nFLAGS=--start=312.5\n"
+        );
+    }
+
+    #[test]
+    fn resuming_a_finished_episode_plays_the_next_one_with_no_start_flag() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "", "");
+        watch(home, "eof", 1399.0);
+
+        let output = resume(home);
+
+        assert!(output.status.success());
+        assert_eq!(
+            ran(home).unwrap(),
+            "ARG -S\nARG 1\nARG -e\nARG 10\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nPLAYER=fake-mpv --profile=anime\nFLAGS=\n"
+        );
+    }
+
+    #[test]
+    fn resuming_keeps_the_users_own_player_flags_after_start() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        assert!(resume_with_flags(home, "--fs").status.success());
+
+        assert!(ran(home).unwrap().ends_with("FLAGS=--start=300 --fs\n"));
+    }
+
+    #[test]
+    fn resume_refuses_without_running_ani_cli_when_history_is_missing_or_ambiguous() {
+        for (history, expected) in [
+            (None, "could not read ani-cli history"),
+            (
+                Some("1\ta-1\tOther\n"),
+                "\"Blue Lock\" is no longer in ani-cli's history",
+            ),
+            (
+                Some("9\ta-1\tBlue Lock\n1\tb-2\tBlue Lock\n"),
+                "\"Blue Lock\" is in ani-cli's history 2 times",
+            ),
+        ] {
+            let home_dir = tempfile::tempdir().unwrap();
+            let home = home_dir.path();
+            let fake = fake_ani_cli(home, 0, "");
+            write_config(home, &fake, "", "");
+            // Record the show while history is still fine, then break history.
+            watch(home, "quit", 300.0);
+            assert!(run(home, &["status"]).status.success());
+            let hist = home.join(".local/state/ani-cli/ani-hsts");
+            match history {
+                Some(text) => fs::write(&hist, text).unwrap(),
+                None => fs::remove_file(&hist).unwrap(),
+            }
+
+            let output = resume(home);
+
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(expected),
+                "{expected}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(ran(home), None, "ani-cli must not run: {expected}");
+        }
+    }
+
+    #[test]
+    fn resume_is_blocked_by_a_missing_mpv_script_before_ani_cli_runs() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        let missing = home.join("no-such-dir/tsuzuki.lua");
+        write_config(home, &fake, "", &missing.display().to_string());
+        watch(home, "quit", 300.0);
+
+        let output = resume(home);
+
+        assert!(!output.status.success());
+        assert_eq!(ran(home), None);
+    }
+
+    #[test]
+    fn a_failing_ani_cli_is_reported_as_a_warning_with_a_failure_exit() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 1, "");
+        write_config(home, &fake, "", "");
+        watch(home, "eof", 1399.0);
+
+        let output = resume(home);
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(
+            "⚠ ani-cli could not play episode 10 — not released, the series ended, or the title didn't match"
+        ));
+    }
+
+    #[test]
+    fn a_different_show_taking_the_title_is_warned_about_after_the_run() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let hist = home.join(".local/state/ani-cli/ani-hsts");
+        let fake = fake_ani_cli(
+            home,
+            0,
+            &format!(
+                "printf '1\\tblue-lock-2\\tBlue Lock\\n' >> {}",
+                hist.display()
+            ),
+        );
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        let output = resume(home);
+
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("⚠ ani-cli may have played a different show titled \"Blue Lock\"")
+        );
+    }
+
+    #[test]
+    fn resume_leaves_ani_cli_history_untouched() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+        let hist = home.join(".local/state/ani-cli/ani-hsts");
+        let before = fs::read_to_string(&hist).unwrap();
+
+        assert!(resume(home).status.success());
+
+        assert_eq!(fs::read_to_string(&hist).unwrap(), before);
+    }
+}

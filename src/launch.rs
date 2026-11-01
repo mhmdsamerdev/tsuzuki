@@ -7,8 +7,9 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
+use crate::config::AniCli;
 use crate::mpv::Target;
 
 /// The mpv to spawn and where its output goes.
@@ -46,6 +47,50 @@ pub fn resume_playback(launch: &Launch, file: &Path, start_seconds: f64) -> io::
     };
     command.spawn()?;
     Ok(())
+}
+
+/// The ani-cli run that plays `episode` of `title` through the mpv in
+/// `launch`: its search path (`-e`, exact title, first result), never `-c`.
+/// A `start_seconds` above 0 reaches mpv as `--start` through
+/// `ANI_CLI_PLAYER_FLAGS`, after any flags already in `existing_flags`.
+/// `--exit-after-play` makes ani-cli run the player in the foreground and
+/// exit with it.
+pub fn ani_cli_command(
+    launch: &Launch,
+    config: &AniCli,
+    title: &str,
+    episode: u32,
+    start_seconds: f64,
+    existing_flags: Option<&str>,
+) -> Command {
+    let player = std::iter::once(launch.target.program.as_str())
+        .chain(launch.target.base_args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut command = Command::new(&config.command);
+    command
+        .args(&config.args)
+        .args(["-S", "1", "-e"])
+        .arg(episode.to_string())
+        .arg("--exit-after-play")
+        .arg(title)
+        .env("ANI_CLI_EXACT", "1")
+        .env("ANI_CLI_PLAYER", player);
+    if start_seconds > 0.0 {
+        let start = format!("--start={start_seconds}");
+        let flags = match existing_flags.filter(|f| !f.trim().is_empty()) {
+            Some(existing) => format!("{start} {existing}"),
+            None => start,
+        };
+        command.env("ANI_CLI_PLAYER_FLAGS", flags);
+    }
+    command
+}
+
+/// Runs `command` with the terminal's stdio and waits: ani-cli talks to the
+/// user, and its exit status is the only signal Tsuzuki gets from it.
+pub fn run_foreground(mut command: Command) -> io::Result<ExitStatus> {
+    command.status()
 }
 
 /// Truncates the log and writes `command`'s line to it, then returns two
@@ -147,6 +192,159 @@ mod tests {
         assert_eq!(
             args,
             vec!["run", "io.mpv.Mpv", "--{", "--start=42.5", "/x.mkv", "--}"]
+        );
+    }
+
+    // --- ani-cli ---
+
+    fn ani_config(args: &[&str]) -> AniCli {
+        AniCli {
+            enabled: true,
+            history_path: String::new(),
+            command: "ani-cli".to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    type Env = Vec<(String, Option<String>)>;
+
+    fn command_parts(command: &Command) -> (String, Vec<String>, Env) {
+        let mut envs: Env = command
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        envs.sort();
+        (
+            command.get_program().to_string_lossy().into_owned(),
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            envs,
+        )
+    }
+
+    fn env(key: &str, value: &str) -> (String, Option<String>) {
+        (key.to_string(), Some(value.to_string()))
+    }
+
+    #[test]
+    fn ani_cli_command_replays_an_episode_from_a_position_through_the_search_path() {
+        let launch = launch_of(custom_target("mpv", &[]), PathBuf::from("log"));
+
+        let command = ani_cli_command(&launch, &ani_config(&[]), "Blue Lock", 9, 312.5, None);
+
+        assert_eq!(
+            command_parts(&command),
+            (
+                "ani-cli".to_string(),
+                ["-S", "1", "-e", "9", "--exit-after-play", "Blue Lock"]
+                    .map(String::from)
+                    .to_vec(),
+                vec![
+                    env("ANI_CLI_EXACT", "1"),
+                    env("ANI_CLI_PLAYER", "mpv"),
+                    env("ANI_CLI_PLAYER_FLAGS", "--start=312.5"),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn ani_cli_command_from_the_start_sets_no_player_flags_so_the_users_stay_untouched() {
+        let launch = launch_of(custom_target("mpv", &[]), PathBuf::from("log"));
+
+        let command = ani_cli_command(
+            &launch,
+            &ani_config(&[]),
+            "Blue Lock",
+            10,
+            0.0,
+            Some("--fs"),
+        );
+
+        let (_, _, envs) = command_parts(&command);
+        assert_eq!(
+            envs,
+            vec![env("ANI_CLI_EXACT", "1"), env("ANI_CLI_PLAYER", "mpv")]
+        );
+    }
+
+    #[test]
+    fn ani_cli_command_puts_start_before_the_users_existing_player_flags() {
+        let launch = launch_of(custom_target("mpv", &[]), PathBuf::from("log"));
+
+        let with_flags = ani_cli_command(
+            &launch,
+            &ani_config(&[]),
+            "X",
+            1,
+            60.0,
+            Some("--fs --volume=50"),
+        );
+        let blank_flags = ani_cli_command(&launch, &ani_config(&[]), "X", 1, 60.0, Some("  "));
+
+        let flags = |c: &Command| {
+            command_parts(c)
+                .2
+                .into_iter()
+                .find(|(k, _)| k == "ANI_CLI_PLAYER_FLAGS")
+                .and_then(|(_, v)| v)
+        };
+        assert_eq!(
+            flags(&with_flags).as_deref(),
+            Some("--start=60 --fs --volume=50")
+        );
+        assert_eq!(flags(&blank_flags).as_deref(), Some("--start=60"));
+    }
+
+    #[test]
+    fn ani_cli_command_names_the_resolved_mpv_with_its_base_args_as_the_player() {
+        let launch = launch_of(
+            custom_target("flatpak", &["run", "io.mpv.Mpv"]),
+            PathBuf::from("log"),
+        );
+
+        let command = ani_cli_command(&launch, &ani_config(&[]), "X", 1, 0.0, None);
+
+        assert_eq!(
+            command_parts(&command).2,
+            vec![
+                env("ANI_CLI_EXACT", "1"),
+                env("ANI_CLI_PLAYER", "flatpak run io.mpv.Mpv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ani_cli_command_puts_configured_args_first_and_uses_the_configured_program() {
+        let launch = launch_of(custom_target("mpv", &[]), PathBuf::from("log"));
+        let mut config = ani_config(&["--dub", "-q", "720"]);
+        config.command = "/opt/ani-cli".to_string();
+
+        let command = ani_cli_command(&launch, &config, "X", 3, 0.0, None);
+
+        let (program, args, _) = command_parts(&command);
+        assert_eq!(program, "/opt/ani-cli");
+        assert_eq!(
+            args,
+            [
+                "--dub",
+                "-q",
+                "720",
+                "-S",
+                "1",
+                "-e",
+                "3",
+                "--exit-after-play",
+                "X"
+            ]
+            .map(String::from)
         );
     }
 }

@@ -104,6 +104,37 @@ pub fn history_path_here(config: &AniCli, home: Option<&Path>) -> Option<PathBuf
     )
 }
 
+/// Why a title can't be resumed through ani-cli.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleProblem {
+    /// No history line carries the title.
+    Missing,
+    /// This many history lines carry it, so the show can't be told.
+    Ambiguous(usize),
+}
+
+impl History {
+    /// The single history line for `title`.
+    pub fn unique(&self, title: &str) -> Result<&HistoryEntry, TitleProblem> {
+        let mut matches = self.entries.iter().filter(|e| e.title == title);
+        let Some(first) = matches.next() else {
+            return Err(TitleProblem::Missing);
+        };
+        match matches.count() {
+            0 => Ok(first),
+            more => Err(TitleProblem::Ambiguous(more + 1)),
+        }
+    }
+}
+
+/// True when `after` still has exactly one line for `before`'s title and it
+/// has the same id: ani-cli played the show it was expected to.
+pub fn same_show_after(before: &HistoryEntry, after: &History) -> bool {
+    after
+        .unique(&before.title)
+        .is_ok_and(|entry| entry.id == before.id)
+}
+
 /// An ani-cli playback: the show's title and the integer episode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
@@ -587,5 +618,46 @@ mod tests {
         let entries = [stream(Some("Blue Lock Episode 9"))];
 
         assert_eq!(claim_all(&entries, &History::default()), Claims::default());
+    }
+
+    // --- unique / same_show_after ---
+
+    #[test]
+    fn unique_finds_the_one_line_and_reports_missing_and_ambiguous_titles() {
+        let history = history();
+
+        assert_eq!(
+            history.unique("Blue Lock").map(|e| e.id.as_str()),
+            Ok("blue-lock-964")
+        );
+        assert_eq!(history.unique("Nope"), Err(TitleProblem::Missing));
+        assert_eq!(history.unique("Twin"), Err(TitleProblem::Ambiguous(2)));
+    }
+
+    #[test]
+    fn same_show_after_requires_one_line_with_the_same_id() {
+        let before = HistoryEntry {
+            episode: "9".to_string(),
+            id: "blue-lock-964".to_string(),
+            title: "Blue Lock".to_string(),
+        };
+
+        // Same line, later episode: still the same show.
+        assert!(same_show_after(
+            &before,
+            &History::parse("10\tblue-lock-964\tBlue Lock\n")
+        ));
+        // Another show took the title: a different id.
+        assert!(!same_show_after(
+            &before,
+            &History::parse("1\tblue-lock-1\tBlue Lock\n")
+        ));
+        // A second show with the title was added alongside.
+        assert!(!same_show_after(
+            &before,
+            &History::parse("9\tblue-lock-964\tBlue Lock\n1\tblue-lock-1\tBlue Lock\n")
+        ));
+        // The line is gone.
+        assert!(!same_show_after(&before, &History::default()));
     }
 }

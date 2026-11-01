@@ -9,6 +9,7 @@ All notable changes to Tsuzuki are documented here.
 - `tsuzuki add ani-cli` turns on the ani-cli source (new `[ani_cli]` config).
 - Streams watched through ani-cli in mpv are recorded as series once `ani-cli` is added.
 - `list`, `status`, `pause` and `drop` work on ani-cli series (`--root ani-cli` picks one when a folder series shares the title); `start` never offers them.
+- `tsuzuki` resumes ani-cli series by running ani-cli on the saved episode and second, or the next episode once finished.
 
 ## [v0.1.6]
 

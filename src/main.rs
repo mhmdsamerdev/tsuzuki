@@ -534,7 +534,7 @@ fn play_series(
     verb: &str,
 ) -> ExitCode {
     if root == ani_cli::ROOT {
-        return fail("resuming ani-cli series isn't supported yet");
+        return play_ani_cli(config, state, mpv, name, home, verb);
     }
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
@@ -552,6 +552,82 @@ fn play_series(
         },
         None => fail(&format!("no episodes found for \"{name}\"")),
     }
+}
+
+/// Resumes an ani-cli show: the stored episode at the stored position, played
+/// by ani-cli itself in the foreground. Refuses before launching when the
+/// title can't be told in ani-cli's history, and warns afterwards if ani-cli
+/// played something else or failed.
+fn play_ani_cli(
+    config: &Config,
+    state: &State,
+    mpv: &launch::Launch,
+    name: &str,
+    home: Option<&Path>,
+    verb: &str,
+) -> ExitCode {
+    let Some(record) = state.find(ani_cli::ROOT, name) else {
+        return fail(&format!("no ani-cli record for \"{name}\""));
+    };
+    let Some(episode) = record.episode_number else {
+        return fail(&format!("no episode stored for \"{name}\""));
+    };
+    let Some(history_path) = ani_cli::history_path_here(&config.ani_cli, home) else {
+        return fail("could not resolve ani-cli's history file");
+    };
+    let history = match ani_cli::read_history(&history_path) {
+        Ok(h) => h,
+        Err(e) => {
+            return fail(&format!(
+                "could not read ani-cli history at {}: {e}",
+                history_path.display()
+            ));
+        }
+    };
+    let before = match history.unique(name) {
+        Ok(entry) => entry.clone(),
+        Err(ani_cli::TitleProblem::Missing) => {
+            return fail(&format!("\"{name}\" is no longer in ani-cli's history"));
+        }
+        Err(ani_cli::TitleProblem::Ambiguous(count)) => {
+            return fail(&format!(
+                "\"{name}\" is in ani-cli's history {count} times, so the show can't be told"
+            ));
+        }
+    };
+
+    println!(
+        "→ {verb} \"{name}\" — {} ({})",
+        anitomy::episode_phrase(None, episode),
+        format_timestamp(record.position_seconds),
+    );
+    let command = launch::ani_cli_command(
+        mpv,
+        &config.ani_cli,
+        name,
+        episode,
+        record.position_seconds,
+        std::env::var("ANI_CLI_PLAYER_FLAGS").ok().as_deref(),
+    );
+    match launch::run_foreground(command) {
+        Ok(status) if status.success() => {}
+        Ok(_) => {
+            eprintln!(
+                "⚠ ani-cli could not play episode {episode} — not released, the series ended, or the title didn't match"
+            );
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            return fail(&format!("failed to run {}: {e}", config.ani_cli.command));
+        }
+    }
+
+    let still_same_show = ani_cli::read_history(&history_path)
+        .is_ok_and(|after| ani_cli::same_show_after(&before, &after));
+    if !still_same_show {
+        eprintln!("⚠ ani-cli may have played a different show titled \"{name}\"");
+    }
+    ExitCode::SUCCESS
 }
 
 /// Resolves an explicit `series [--root]` argument and plays it, bypassing
