@@ -84,6 +84,85 @@ pub fn ordered_episodes_excluding(
     Ok(episodes)
 }
 
+/// Real paths of the symlinked directories and files under `series_path` that
+/// resolve outside `real_base`. A directory is returned whole and not entered,
+/// since everything below it shares its prefix; a file is returned exactly.
+/// Real directories and symlinks that stay inside `real_base` are entered, and
+/// a directory whose real path was already visited is not entered again.
+pub fn paths_outside(series_path: &Path, real_base: &Path) -> Vec<PathBuf> {
+    let mut outside = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(fs::canonicalize(series_path).unwrap_or_else(|_| series_path.to_path_buf()));
+    collect_outside(series_path, real_base, &mut outside, &mut visited);
+    outside
+}
+
+/// Real paths beyond `real_root` that the series of `root` reach through
+/// symlinks: series folders linked out, and directories and files linked out
+/// from inside any series. Children that are tracked roots are skipped, as in
+/// [`series_in_root`]. Empty when `root` can't be read.
+pub fn outside_targets(
+    root: &Path,
+    real_root: &Path,
+    tracked_root_real_paths: &[PathBuf],
+) -> Vec<PathBuf> {
+    let Ok(children) = series_in_root(root, tracked_root_real_paths) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for child in children {
+        let real_child = fs::canonicalize(&child.path).unwrap_or_else(|_| child.path.clone());
+        let base = if real_child.starts_with(real_root) {
+            real_root
+        } else {
+            targets.push(real_child.clone());
+            &real_child
+        };
+        targets.extend(paths_outside(&child.path, base));
+    }
+    targets
+}
+
+fn collect_outside(
+    dir: &Path,
+    real_base: &Path,
+    outside: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_symlink() {
+            // Broken links fail to canonicalize and are skipped.
+            let Ok(real) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if real.is_dir() {
+                if !visited.insert(real.clone()) {
+                    continue;
+                }
+                if real.starts_with(real_base) {
+                    collect_outside(&path, real_base, outside, visited);
+                } else {
+                    outside.push(real);
+                }
+            } else if !real.starts_with(real_base) {
+                outside.push(real);
+            }
+        } else if file_type.is_dir() {
+            let real = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if visited.insert(real) {
+                collect_outside(&path, real_base, outside, visited);
+            }
+        }
+    }
+}
+
 fn walk(
     dir: &Path,
     video_extensions: &[String],
@@ -742,5 +821,144 @@ mod tests {
         assert!(!is_series_dir(&link_to_root, &tracked));
         assert!(!is_series_dir(&file, &tracked));
         assert!(!is_series_dir(&dir.path().join("missing"), &tracked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_outside_returns_symlinked_dirs_at_any_depth_and_terminates_on_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series = dir.path().join("tv").join("Lupin");
+        let base = fs::canonicalize({
+            std_fs::create_dir_all(&series).unwrap();
+            dir.path().join("tv")
+        })
+        .unwrap();
+        let s2 = dir.path().join("storage").join("S02");
+        let s3 = dir.path().join("storage").join("S03");
+        std_fs::create_dir_all(&s2).unwrap();
+        std_fs::create_dir_all(&s3).unwrap();
+        // Depth 1 and depth 2 (inside a real subfolder); a real subfolder stays inside.
+        symlink(&s2, series.join("S02")).unwrap();
+        std_fs::create_dir_all(series.join("extras")).unwrap();
+        symlink(&s3, series.join("extras").join("S03")).unwrap();
+        // Cycles: back to the series, and out-and-back from storage.
+        symlink(&series, series.join("extras").join("loop")).unwrap();
+        symlink(&series, s2.join("back")).unwrap();
+
+        let mut found = paths_outside(&series, &base);
+        found.sort();
+        let mut expected = vec![
+            fs::canonicalize(&s2).unwrap(),
+            fs::canonicalize(&s3).unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn paths_outside_of_a_series_with_only_inside_dirs_is_empty() {
+        let dir = tempdir().unwrap();
+        let series = dir.path().join("tv").join("Show");
+        std_fs::create_dir_all(series.join("S01")).unwrap();
+        let base = fs::canonicalize(dir.path().join("tv")).unwrap();
+
+        assert_eq!(paths_outside(&series, &base), Vec::<PathBuf>::new());
+        assert_eq!(
+            paths_outside(&dir.path().join("missing"), &base),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paths_outside_returns_symlinked_files_exactly_and_skips_regular_and_inside_ones() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let series = dir.path().join("tv").join("Show");
+        std_fs::create_dir_all(series.join("S01")).unwrap();
+        let base = fs::canonicalize(dir.path().join("tv")).unwrap();
+        let storage = dir.path().join("storage");
+        touch(&storage.join("ep01.mkv"));
+        touch(&storage.join("ep02.mkv"));
+        touch(&series.join("regular.mkv"));
+        touch(&series.join("S01").join("inside_target.mkv"));
+        // Outside file links at depth 1 and 2, an inside file link, and a broken link.
+        symlink(storage.join("ep01.mkv"), series.join("ep01.mkv")).unwrap();
+        symlink(
+            storage.join("ep02.mkv"),
+            series.join("S01").join("ep02.mkv"),
+        )
+        .unwrap();
+        symlink(
+            series.join("S01").join("inside_target.mkv"),
+            series.join("alias.mkv"),
+        )
+        .unwrap();
+        symlink(storage.join("missing.mkv"), series.join("broken.mkv")).unwrap();
+
+        let mut found = paths_outside(&series, &base);
+        found.sort();
+        let mut expected = vec![
+            fs::canonicalize(storage.join("ep01.mkv")).unwrap(),
+            fs::canonicalize(storage.join("ep02.mkv")).unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn outside_targets_collects_every_symlink_target_beyond_the_root_per_series() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("tv");
+        let storage = dir.path().join("storage");
+        // Series 1 is itself symlinked out; its season link points elsewhere again.
+        let linked = storage.join("Linked");
+        let elsewhere = dir.path().join("elsewhere").join("S02");
+        std_fs::create_dir_all(&elsewhere).unwrap();
+        std_fs::create_dir_all(&linked).unwrap();
+        std_fs::create_dir_all(&root).unwrap();
+        symlink(&linked, root.join("Linked")).unwrap();
+        symlink(&elsewhere, linked.join("S02")).unwrap();
+        // Series 2 is real with an episode-file link; series 3 is fully inside.
+        touch(&storage.join("ep01.mkv"));
+        touch(&root.join("Plain").join("ep02.mkv"));
+        symlink(
+            storage.join("ep01.mkv"),
+            root.join("Plain").join("ep01.mkv"),
+        )
+        .unwrap();
+        touch(&root.join("Inside").join("ep01.mkv"));
+        // A child that is itself a tracked root contributes nothing here.
+        let other_root = dir.path().join("other");
+        std_fs::create_dir_all(&other_root).unwrap();
+        symlink(&other_root, root.join("OtherRoot")).unwrap();
+        let real_root = fs::canonicalize(&root).unwrap();
+        let tracked = vec![real_root.clone(), fs::canonicalize(&other_root).unwrap()];
+
+        let mut found = outside_targets(&root, &real_root, &tracked);
+        found.sort();
+        let mut expected = vec![
+            fs::canonicalize(&linked).unwrap(),
+            fs::canonicalize(&elsewhere).unwrap(),
+            fs::canonicalize(storage.join("ep01.mkv")).unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn outside_targets_of_a_missing_root_is_empty() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        assert_eq!(
+            outside_targets(&missing, &missing, &[]),
+            Vec::<PathBuf>::new()
+        );
     }
 }

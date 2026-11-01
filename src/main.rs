@@ -1548,13 +1548,17 @@ fn doctor_command(
         if target.kind == mpv::Kind::Flatpak {
             let flatpak_cli_present = mpv::program_on_path("flatpak");
             let probes: Vec<(String, Option<String>)> = if flatpak_cli_present {
-                config
-                    .roots
-                    .paths
-                    .iter()
-                    .map(|root| {
-                        let expanded = roots::expand_tilde(Path::new(root), home);
-                        let probed = expanded.canonicalize().unwrap_or(expanded);
+                let tracked = roots::tracked_real_paths(config, home);
+                let mut roots_real = Vec::new();
+                let mut symlink_targets = Vec::new();
+                for (root, real_root) in config.roots.paths.iter().zip(&tracked) {
+                    let expanded = roots::expand_tilde(Path::new(root), home);
+                    symlink_targets.extend(series::outside_targets(&expanded, real_root, &tracked));
+                    roots_real.push(real_root.clone());
+                }
+                doctor::flatpak_probe_paths(&roots_real, &symlink_targets)
+                    .into_iter()
+                    .map(|probed| {
                         let answer = std::process::Command::new("flatpak")
                             .arg("info")
                             .arg(format!("--file-access={}", probed.display()))

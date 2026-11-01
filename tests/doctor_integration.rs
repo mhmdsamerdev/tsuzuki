@@ -222,3 +222,87 @@ fn doctor_omits_timestamps_line_when_no_entry_is_in_the_future() {
 
     assert!(!stdout.contains("mpv timestamps"), "got:\n{stdout}");
 }
+
+/// A temp `HOME` with Flatpak mpv pinned, `~/Anime/Show/ep01.mkv` a symlink to
+/// `~/storage/ep01.mkv`, and a fake `flatpak` answering `access` for any path
+/// containing `storage` and `read-only` for everything else.
+#[cfg(unix)]
+fn flatpak_home_with_a_symlinked_episode(access: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(dir.path()).unwrap().join("home");
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(home.join("storage")).unwrap();
+    fs::File::create(home.join("storage/ep01.mkv")).unwrap();
+    fs::create_dir_all(home.join("Anime/Show")).unwrap();
+    symlink(
+        home.join("storage/ep01.mkv"),
+        home.join("Anime/Show/ep01.mkv"),
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".local/share/flatpak/app/io.mpv.Mpv")).unwrap();
+    let flatpak = bin.join("flatpak");
+    fs::write(
+        &flatpak,
+        format!("#!/bin/sh\ncase \"$*\" in *storage*) echo {access};; *) echo read-only;; esac\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&flatpak, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = home.join(".config/tsuzuki/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        config,
+        format!(
+            "[roots]\npaths = [\"{}\"]\n\n[mpv]\ninstall = \"flatpak\"\n",
+            home.join("Anime").display()
+        ),
+    )
+    .unwrap();
+    (dir, home)
+}
+
+#[cfg(unix)]
+fn doctor_stdout_with_fake_flatpak(home: &Path) -> String {
+    let out = Command::new(tsuzuki_bin())
+        .arg("doctor")
+        .env("HOME", home)
+        .env("PATH", home.join("bin"))
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .expect("failed to spawn the tsuzuki binary");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_warns_when_flatpak_mpv_cannot_see_the_folder_an_episode_symlink_points_to() {
+    let (_dir, home) = flatpak_home_with_a_symlinked_episode("hidden");
+
+    let out = doctor_stdout_with_fake_flatpak(&home);
+
+    let storage = home.join("storage");
+    assert!(
+        out.contains(&format!(
+            "⚠ mpv permissions — mpv can't see: {}\n  → flatpak override --user --filesystem={}:ro io.mpv.Mpv\n",
+            storage.display(),
+            storage.display()
+        )),
+        "{out}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_accepts_flatpak_access_when_the_symlink_target_is_visible() {
+    let (_dir, home) = flatpak_home_with_a_symlinked_episode("read-only");
+
+    let out = doctor_stdout_with_fake_flatpak(&home);
+
+    assert!(
+        out.contains("✓ mpv permissions — tracked directories accessible\n"),
+        "{out}"
+    );
+}

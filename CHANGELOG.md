@@ -5,6 +5,7 @@ All notable changes to Tsuzuki are documented here.
 ## [Unreleased]
 
 - Fix progress not updating when a series contains symlinked season folders or episode files.
+- `doctor` warns when Flatpak mpv can't see a folder your symlinks point to.
 
 ## [v0.1.7]
 

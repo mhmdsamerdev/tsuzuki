@@ -237,6 +237,27 @@ pub fn check_entry_timestamps(mtimes: &[SystemTime], now: SystemTime) -> Option<
 
 // --- 1d. Flatpak filesystem-permission gap ---
 
+/// The paths to ask Flatpak about: the tracked roots, then the folders mpv must
+/// also open because series symlink into them. A file target is probed through
+/// its folder. Nested paths are kept, since a folder inside a hidden one can be
+/// granted on its own. Order is kept and repeats dropped.
+pub fn flatpak_probe_paths(roots: &[PathBuf], symlink_targets: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let targets = symlink_targets.iter().filter_map(|target| {
+        if target.is_file() {
+            target.parent().map(Path::to_path_buf)
+        } else {
+            Some(target.clone())
+        }
+    });
+    for path in roots.iter().cloned().chain(targets) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 /// Whether Flatpak mpv can read each tracked root, from `flatpak info
 /// --file-access=<root>` answers (`hidden`, `read-only`, `read-write`) paired
 /// with the probed root; `None` is a failed probe. Never fails: sandbox
@@ -841,6 +862,36 @@ mod tests {
 
     fn probe(root: &str, answer: Option<&str>) -> (String, Option<String>) {
         (root.to_string(), answer.map(str::to_string))
+    }
+
+    #[test]
+    fn flatpak_probe_paths_keeps_roots_then_targets_with_files_probed_by_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        std_fs::create_dir_all(storage.join("season")).unwrap();
+        std_fs::File::create(storage.join("ep01.mkv")).unwrap();
+        std_fs::File::create(storage.join("ep02.mkv")).unwrap();
+        let root = dir.path().join("Anime");
+
+        let probes = flatpak_probe_paths(
+            std::slice::from_ref(&root),
+            &[
+                storage.join("ep01.mkv"),
+                storage.join("season"),
+                storage.join("ep02.mkv"),
+                root.clone(),
+            ],
+        );
+
+        // Nested paths stay: a child of a hidden dir can be granted on its own.
+        assert_eq!(probes, vec![root, storage.clone(), storage.join("season")]);
+    }
+
+    #[test]
+    fn flatpak_probe_paths_with_no_targets_is_just_the_roots() {
+        let roots = [PathBuf::from("/a"), PathBuf::from("/b")];
+        assert_eq!(flatpak_probe_paths(&roots, &[]), roots.to_vec());
+        assert_eq!(flatpak_probe_paths(&[], &[]), Vec::<PathBuf>::new());
     }
 
     #[test]
