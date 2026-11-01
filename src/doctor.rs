@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::ani_cli::{self, History, TitleProblem};
 use crate::config::Config;
 use crate::mpv::{self, ChosenBy, Installed, Kind, ResolveError, Target};
 use crate::roots;
@@ -488,6 +489,130 @@ pub fn forget_orphans(state: &mut State, orphans: &[Orphan]) {
     state
         .series
         .retain(|r| !orphans.iter().any(|o| o.root == r.root && o.name == r.name));
+}
+
+// --- 1h. ani-cli source ---
+
+/// ani-cli records whose title is no longer in its history: inert until
+/// forgotten. A title listed twice is still there (just ambiguous), so it
+/// isn't stale.
+pub fn find_ani_cli_orphans(state: &State, history: &History) -> Vec<Orphan> {
+    state
+        .series
+        .iter()
+        .filter(|r| {
+            r.root == ani_cli::ROOT && history.unique(&r.name) == Err(TitleProblem::Missing)
+        })
+        .map(|r| Orphan {
+            root: r.root.clone(),
+            name: r.name.clone(),
+        })
+        .collect()
+}
+
+/// What [`check_ani_cli`] judges, all resolved by the caller.
+pub struct AniCliFacts<'a> {
+    pub command: &'a str,
+    pub command_resolves: bool,
+    /// The menu program ani-cli needs at startup (`ANI_CLI_MENU`, else `fzf`).
+    pub menu: &'a str,
+    pub menu_resolves: bool,
+    pub history_path: Option<&'a Path>,
+    /// `None` when the history file couldn't be read.
+    pub history: Option<&'a History>,
+    /// `ANI_CLI_PLAYER` from the environment, if set.
+    pub player_env: Option<&'a str>,
+    /// Log entries skipped for a fractional episode number.
+    pub decimal_skipped: usize,
+    /// Titles skipped because history lists them more than once.
+    pub ambiguous: &'a [String],
+    pub stale: &'a [Orphan],
+}
+
+/// The ani-cli rows: the program, its menu, the history, and anything that
+/// keeps watched shows from being tracked. Only runs while the source is on.
+pub fn check_ani_cli(facts: &AniCliFacts) -> Vec<CheckResult> {
+    let mut rows = Vec::new();
+
+    rows.push(if facts.command_resolves {
+        CheckResult::ok("ani-cli", format!("found ({})", facts.command))
+    } else {
+        CheckResult::fail("ani-cli", format!("`{}` not found", facts.command))
+            .with_action("install ani-cli, or set [ani_cli] command in config.toml")
+    });
+
+    rows.push(if facts.menu_resolves {
+        CheckResult::ok("ani-cli menu", format!("{} found", facts.menu))
+    } else {
+        CheckResult::fail("ani-cli menu", format!("`{}` not found", facts.menu))
+            .with_action("install it (ani-cli needs a menu program), or set ANI_CLI_MENU")
+    });
+
+    rows.push(match (facts.history_path, facts.history) {
+        (_, Some(history)) => CheckResult::ok(
+            "ani-cli history",
+            format!(
+                "{} {}",
+                history.entries.len(),
+                if history.entries.len() == 1 {
+                    "show"
+                } else {
+                    "shows"
+                }
+            ),
+        ),
+        (Some(path), None) => CheckResult::warn(
+            "ani-cli history",
+            format!("not readable at {}", path.display()),
+        )
+        .with_action("watch something with ani-cli, or set [ani_cli] history_path"),
+        (None, None) => CheckResult::warn("ani-cli history", "location unknown")
+            .with_action("set [ani_cli] history_path in config.toml"),
+    });
+
+    if let Some(player) = facts.player_env.filter(|p| !p.contains("mpv")) {
+        rows.push(
+            CheckResult::warn(
+                "ani-cli player",
+                format!("ANI_CLI_PLAYER is {player}; only mpv is tracked"),
+            )
+            .with_action("unset ANI_CLI_PLAYER, or use mpv, to have your watching recorded"),
+        );
+    }
+
+    if facts.decimal_skipped > 0 {
+        rows.push(CheckResult::warn(
+            "ani-cli entries",
+            format!(
+                "{} for fractional episodes aren't tracked",
+                facts.decimal_skipped
+            ),
+        ));
+    }
+    if !facts.ambiguous.is_empty() {
+        let names: Vec<&str> = facts.ambiguous.iter().map(String::as_str).collect();
+        rows.push(
+            CheckResult::warn(
+                "ani-cli titles",
+                format!("{} listed twice in ani-cli's history", names.len()),
+            )
+            .with_details(name_lines(&names, ORPHAN_LIST_CAP)),
+        );
+    }
+
+    if !facts.stale.is_empty() {
+        let names: Vec<&str> = facts.stale.iter().map(|o| o.name.as_str()).collect();
+        rows.push(
+            CheckResult::warn(
+                "ani-cli stale records",
+                format!("{} (no longer in ani-cli's history)", names.len()),
+            )
+            .with_details(name_lines(&names, ORPHAN_LIST_CAP))
+            .with_action(FORGET_ORPHANS_COMMAND),
+        );
+    }
+
+    rows
 }
 
 // --- 1i. MAL auth status ---
@@ -1368,6 +1493,189 @@ mod tests {
                 )
                 .with_action("check the system clock")
             )
+        );
+    }
+
+    // --- 1h: ani-cli ---
+
+    fn hist(titles: &[&str]) -> History {
+        History::parse(
+            &titles
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("1\tid-{i}\t{t}\n"))
+                .collect::<String>(),
+        )
+    }
+
+    fn ani_record(name: &str) -> crate::state::SeriesRecord {
+        crate::state::SeriesRecord {
+            root: ani_cli::ROOT.to_string(),
+            name: name.to_string(),
+            status: crate::state::Status::InProgress,
+            current_relative_path: String::new(),
+            position_seconds: 300.0,
+            episode_number: Some(9),
+            updated_at: 1,
+            mal_episode_awareness: None,
+            season_number: None,
+        }
+    }
+
+    fn healthy<'a>(history: &'a History, path: &'a Path) -> AniCliFacts<'a> {
+        AniCliFacts {
+            command: "ani-cli",
+            command_resolves: true,
+            menu: "fzf",
+            menu_resolves: true,
+            history_path: Some(path),
+            history: Some(history),
+            player_env: None,
+            decimal_skipped: 0,
+            ambiguous: &[],
+            stale: &[],
+        }
+    }
+
+    fn rendered(rows: &[CheckResult]) -> Vec<String> {
+        rows.iter().map(CheckResult::render).collect()
+    }
+
+    #[test]
+    fn ani_cli_checks_for_a_healthy_setup_are_three_ok_rows() {
+        let history = hist(&["Blue Lock", "Yasuke"]);
+
+        assert_eq!(
+            rendered(&check_ani_cli(&healthy(&history, Path::new("/h/ani-hsts")))),
+            vec![
+                "✓ ani-cli — found (ani-cli)",
+                "✓ ani-cli menu — fzf found",
+                "✓ ani-cli history — 2 shows",
+            ]
+        );
+        assert_eq!(
+            rendered(&check_ani_cli(&healthy(
+                &hist(&["Blue Lock"]),
+                Path::new("/h")
+            )))
+            .last()
+            .unwrap(),
+            "✓ ani-cli history — 1 show"
+        );
+    }
+
+    #[test]
+    fn ani_cli_checks_fail_for_a_missing_program_or_menu_with_the_fix() {
+        let history = hist(&[]);
+        let mut facts = healthy(&history, Path::new("/h/ani-hsts"));
+        facts.command_resolves = false;
+        facts.menu_resolves = false;
+        facts.menu = "rofi";
+
+        assert_eq!(
+            rendered(&check_ani_cli(&facts))[..2],
+            [
+                "✗ ani-cli — `ani-cli` not found\n  → install ani-cli, or set [ani_cli] command in config.toml",
+                "✗ ani-cli menu — `rofi` not found\n  → install it (ani-cli needs a menu program), or set ANI_CLI_MENU",
+            ]
+        );
+        assert_eq!(check_ani_cli(&facts)[0].level, Level::Fail);
+        assert_eq!(check_ani_cli(&facts)[1].level, Level::Fail);
+    }
+
+    #[test]
+    fn ani_cli_checks_warn_when_the_history_cannot_be_read() {
+        let history = hist(&[]);
+        let mut facts = healthy(&history, Path::new("/h/ani-hsts"));
+        facts.history = None;
+        let unreadable = check_ani_cli(&facts);
+        facts.history_path = None;
+        let unknown = check_ani_cli(&facts);
+
+        assert_eq!(
+            rendered(&unreadable)[2],
+            "⚠ ani-cli history — not readable at /h/ani-hsts\n  → watch something with ani-cli, or set [ani_cli] history_path"
+        );
+        assert_eq!(
+            rendered(&unknown)[2],
+            "⚠ ani-cli history — location unknown\n  → set [ani_cli] history_path in config.toml"
+        );
+        assert_eq!(unreadable[2].level, Level::Warn);
+    }
+
+    #[test]
+    fn ani_cli_checks_warn_about_a_player_other_than_mpv_only() {
+        let history = hist(&[]);
+        for (player, warns) in [
+            (None, false),
+            (Some("mpv"), false),
+            (Some("flatpak run io.mpv.Mpv"), false),
+            (Some("vlc"), true),
+        ] {
+            let mut facts = healthy(&history, Path::new("/h"));
+            facts.player_env = player;
+
+            let rows = check_ani_cli(&facts);
+
+            assert_eq!(rows.len(), if warns { 4 } else { 3 }, "{player:?}");
+            if warns {
+                assert_eq!(
+                    rows[3].render(),
+                    "⚠ ani-cli player — ANI_CLI_PLAYER is vlc; only mpv is tracked\n  → unset ANI_CLI_PLAYER, or use mpv, to have your watching recorded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ani_cli_checks_report_skipped_entries_ambiguous_titles_and_stale_records() {
+        let history = hist(&["Blue Lock"]);
+        let ambiguous = vec!["Twin".to_string()];
+        let stale = vec![Orphan {
+            root: ani_cli::ROOT.to_string(),
+            name: "Gone Show".to_string(),
+        }];
+        let mut facts = healthy(&history, Path::new("/h"));
+        facts.decimal_skipped = 2;
+        facts.ambiguous = &ambiguous;
+        facts.stale = &stale;
+
+        assert_eq!(
+            rendered(&check_ani_cli(&facts))[3..],
+            [
+                "⚠ ani-cli entries — 2 for fractional episodes aren't tracked",
+                "⚠ ani-cli titles — 1 listed twice in ani-cli's history\n    Twin",
+                "⚠ ani-cli stale records — 1 (no longer in ani-cli's history)\n    Gone Show\n  → tsuzuki doctor --fix --forget-orphans",
+            ]
+        );
+    }
+
+    #[test]
+    fn find_ani_cli_orphans_flags_only_records_whose_title_left_history() {
+        let state = State {
+            series: vec![
+                ani_record("Blue Lock"),
+                ani_record("Gone Show"),
+                ani_record("Twin"),
+                crate::state::SeriesRecord {
+                    root: "~/Anime".to_string(),
+                    ..ani_record("Folder Show")
+                },
+            ],
+            mal_links: Vec::new(),
+        };
+
+        assert_eq!(
+            find_ani_cli_orphans(&state, &hist(&["Blue Lock", "Twin", "Twin"])),
+            vec![Orphan {
+                root: ani_cli::ROOT.to_string(),
+                name: "Gone Show".to_string(),
+            },]
+        );
+        assert_eq!(
+            find_ani_cli_orphans(&state, &hist(&[])).len(),
+            3,
+            "an empty history leaves every ani-cli record stale, and never a folder record"
         );
     }
 }

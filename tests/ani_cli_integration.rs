@@ -552,3 +552,180 @@ fn sync_with_every_ani_cli_show_excluded_has_nothing_to_do_and_needs_no_network(
     assert!(output.status.success());
     assert_eq!(stdout_of(&output), "Nothing eligible to sync.\n");
 }
+
+#[cfg(unix)]
+mod doctor {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A `bin` dir holding fake `fzf` and `ani-cli`, used as the whole PATH so
+    /// the real machine's programs never decide the result.
+    fn bin_with(home: &Path, programs: &[&str]) -> std::path::PathBuf {
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in programs {
+            let path = bin.join(name);
+            fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bin
+    }
+
+    fn doctor(home: &Path, bin: &Path, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_tsuzuki"))
+            .env("HOME", home)
+            .env("PATH", bin)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("ANI_CLI_HIST_DIR")
+            .env_remove("ANI_CLI_MENU")
+            .env_remove("ANI_CLI_PLAYER")
+            .arg("doctor")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn doctor_with_menu(home: &Path, bin: &Path, menu: &str) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_tsuzuki"))
+            .env("HOME", home)
+            .env("PATH", bin)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("ANI_CLI_HIST_DIR")
+            .env("ANI_CLI_MENU", menu)
+            .arg("doctor")
+            .output()
+            .unwrap()
+    }
+
+    fn lines_with(output: &Output, needle: &str) -> Vec<String> {
+        stdout_of(output)
+            .lines()
+            .filter(|l| l.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn doctor_reports_the_ani_cli_rows_only_once_the_source_is_added() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let bin = bin_with(home, &["ani-cli", "fzf"]);
+        write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+
+        assert_eq!(
+            lines_with(&doctor(home, &bin, &[]), "ani-cli"),
+            Vec::<String>::new()
+        );
+
+        assert!(run(home, &["add", "ani-cli"]).status.success());
+        let output = doctor(home, &bin, &[]);
+        assert_eq!(
+            lines_with(&output, "ani-cli"),
+            vec![
+                "✓ ani-cli — found (ani-cli)",
+                "✓ ani-cli menu — fzf found",
+                "✓ ani-cli history — 1 show",
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_fails_when_ani_cli_or_its_menu_is_missing() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let bin = bin_with(home, &[]);
+        assert!(run(home, &["add", "ani-cli"]).status.success());
+        write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+
+        let output = doctor(home, &bin, &[]);
+
+        assert!(!output.status.success());
+        let rows = lines_with(&output, "✗ ani-cli");
+        assert_eq!(
+            rows,
+            vec![
+                "✗ ani-cli — `ani-cli` not found",
+                "✗ ani-cli menu — `fzf` not found"
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_flags_a_show_that_left_the_history_and_forget_orphans_removes_only_it() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let bin = bin_with(home, &["ani-cli", "fzf"]);
+        assert!(run(home, &["add", "ani-cli"]).status.success());
+        write_history(
+            home,
+            "9\tblue-lock-964\tBlue Lock\n1\tyasuke-3298\tYasuke\n",
+        );
+        write_stream(home, "a1", "Blue Lock Episode 9", 300.0, "quit");
+        write_stream(home, "a2", "Yasuke Episode 1", 400.0, "quit");
+        assert!(run(home, &["status"]).status.success());
+        write_history(home, "1\tyasuke-3298\tYasuke\n");
+
+        let report = doctor(home, &bin, &[]);
+        assert_eq!(
+            lines_with(&report, "ani-cli stale records"),
+            vec!["⚠ ani-cli stale records — 1 (no longer in ani-cli's history)"]
+        );
+        assert!(stdout_of(&report).contains("    Blue Lock"));
+
+        let fixed = doctor(home, &bin, &["--fix", "--forget-orphans"]);
+        assert!(stdout_of(&fixed).contains("✓ removed 1 stale record\n    Blue Lock\n"));
+        // A run that removes records reports that, not a "stale records" row.
+        assert_eq!(lines_with(&fixed, "stale records"), Vec::<String>::new());
+        let state = state_text(home);
+        assert!(!state.contains("Blue Lock"), "{state}");
+        assert!(state.contains("Yasuke"), "{state}");
+    }
+
+    #[test]
+    fn doctor_warns_when_ani_cli_history_is_missing_and_never_calls_records_stale() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let bin = bin_with(home, &["ani-cli", "fzf"]);
+        assert!(run(home, &["add", "ani-cli"]).status.success());
+        write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+        write_stream(home, "a1", "Blue Lock Episode 9", 300.0, "quit");
+        assert!(run(home, &["status"]).status.success());
+        fs::remove_file(home.join(".local/state/ani-cli/ani-hsts")).unwrap();
+
+        let output = doctor(home, &bin, &[]);
+
+        assert_eq!(
+            lines_with(&output, "stale records").len(),
+            1,
+            "only the folder row"
+        );
+        assert!(lines_with(&output, "stale records")[0].starts_with("✓ stale records"));
+        assert_eq!(lines_with(&output, "ani-cli history").len(), 1);
+        assert!(
+            lines_with(&output, "ani-cli history")[0]
+                .starts_with("⚠ ani-cli history — not readable at")
+        );
+    }
+
+    #[test]
+    fn doctor_checks_the_menu_named_by_ani_cli_menu_and_falls_back_to_fzf_when_it_is_empty() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let bin = bin_with(home, &["ani-cli", "rofi"]);
+        assert!(run(home, &["add", "ani-cli"]).status.success());
+        write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+
+        assert_eq!(
+            lines_with(&doctor_with_menu(home, &bin, "rofi"), "ani-cli menu"),
+            vec!["✓ ani-cli menu — rofi found"]
+        );
+        assert_eq!(
+            lines_with(&doctor_with_menu(home, &bin, ""), "ani-cli menu"),
+            vec!["✗ ani-cli menu — `fzf` not found"]
+        );
+    }
+}

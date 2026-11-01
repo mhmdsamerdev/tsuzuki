@@ -149,6 +149,7 @@ pub(crate) struct ScriptLogScan {
 /// keeps the freshest entry per source path, and filters to entries under
 /// `tracked_roots`. Keyed by the source path's canonical form, resolved once
 /// here. Missing directories are skipped.
+#[cfg(test)]
 pub fn scan_script_log(
     dirs: &[PathBuf],
     tracked_roots: &[String],

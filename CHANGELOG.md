@@ -12,6 +12,7 @@ All notable changes to Tsuzuki are documented here.
 - `tsuzuki` resumes ani-cli series by running ani-cli on the saved episode and second, or the next episode once finished.
 - `sync` saves MAL's episode count; an ani-cli show becomes completed when its last episode is finished.
 - `sync`, `sync link` and `sync exclude` work on ani-cli series.
+- `doctor` checks ani-cli (program, menu, history, stale shows) once `ani-cli` is added; `--forget-orphans` clears shows that left its history.
 
 ## [v0.1.6]
 

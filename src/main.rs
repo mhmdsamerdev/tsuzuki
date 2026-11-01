@@ -1533,11 +1533,12 @@ fn doctor_command(
         custom_resolves,
     ));
 
-    let entry_mtimes: Vec<std::time::SystemTime> =
-        script_log::scan_script_log(&script_log::mpv_log_dirs(home), &config.roots.paths, home)
-            .values()
-            .map(|e| e.mtime)
-            .collect();
+    let scan = script_log::scan_script_log_full(
+        &script_log::mpv_log_dirs(home),
+        &script_log::resolve_roots(&config.roots.paths, home),
+        home,
+    );
+    let entry_mtimes: Vec<std::time::SystemTime> = scan.files.values().map(|e| e.mtime).collect();
     results.extend(doctor::check_entry_timestamps(
         &entry_mtimes,
         std::time::SystemTime::now(),
@@ -1598,10 +1599,48 @@ fn doctor_command(
         .collect();
     results.push(doctor::summarize_tracked_roots(&root_checks));
 
-    let orphans = doctor::find_orphans(config, &state, &valid_roots, home);
-    if !forget_orphans || orphans.is_empty() {
-        results.push(doctor::orphan_check_result(&orphans));
+    let mut orphans = doctor::find_orphans(config, &state, &valid_roots, home);
+    let folder_orphan_count = orphans.len();
+
+    let mut ani_cli_rows = Vec::new();
+    if config.ani_cli.enabled {
+        let history_path = ani_cli::history_path_here(&config.ani_cli, home);
+        let history = history_path
+            .as_deref()
+            .and_then(|path| ani_cli::read_history(path).ok());
+        let claims = history
+            .as_ref()
+            .map(|h| ani_cli::claim_all(&scan.streams, h))
+            .unwrap_or_default();
+        let stale = history
+            .as_ref()
+            .map(|h| doctor::find_ani_cli_orphans(&state, h))
+            .unwrap_or_default();
+        let menu = std::env::var("ANI_CLI_MENU")
+            .ok()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "fzf".to_string());
+        let ambiguous: Vec<String> = claims.ambiguous.iter().cloned().collect();
+        ani_cli_rows = doctor::check_ani_cli(&doctor::AniCliFacts {
+            command: &config.ani_cli.command,
+            command_resolves: doctor::custom_command_resolves(&config.ani_cli.command),
+            menu: &menu,
+            menu_resolves: doctor::custom_command_resolves(&menu),
+            history_path: history_path.as_deref(),
+            history: history.as_ref(),
+            player_env: std::env::var("ANI_CLI_PLAYER").ok().as_deref(),
+            decimal_skipped: claims.decimal,
+            ambiguous: &ambiguous,
+            // A forget run reports what it removes instead.
+            stale: if forget_orphans { &[] } else { &stale },
+        });
+        orphans.extend(stale);
     }
+
+    if !forget_orphans || orphans.is_empty() {
+        results.push(doctor::orphan_check_result(&orphans[..folder_orphan_count]));
+    }
+    results.extend(ani_cli_rows);
 
     if forget_orphans && !orphans.is_empty() {
         let names: Vec<&str> = orphans.iter().map(|o| o.name.as_str()).collect();
