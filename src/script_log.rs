@@ -49,6 +49,8 @@ pub struct ScriptLogEntry {
     pub position: Option<f64>,
     /// One of `eof`/`stop`/`quit`/`error`/`unknown`; redirects never get an entry.
     pub reason: String,
+    /// The `title=` line: mpv's media title, written for stream URLs only.
+    pub title: Option<String>,
     /// The entry file's mtime: when playback of this file last ended.
     pub mtime: SystemTime,
 }
@@ -98,6 +100,7 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
     let mut duration: Option<f64> = None;
     let mut position: Option<f64> = None;
     let mut reason: Option<String> = None;
+    let mut title: Option<String> = None;
 
     for line in lines {
         if let Some(rest) = line.strip_prefix("duration=") {
@@ -107,6 +110,10 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
         } else if let Some(rest) = line.strip_prefix("position=") {
             if !rest.is_empty() {
                 position = Some(rest.trim().parse::<f64>().ok()?);
+            }
+        } else if let Some(rest) = line.strip_prefix("title=") {
+            if !rest.is_empty() {
+                title = Some(rest.to_string());
             }
         } else if let Some(rest) = line.strip_prefix("reason=") {
             reason = Some(rest.trim().to_string());
@@ -125,6 +132,7 @@ fn parse_entry_file(path: &Path) -> Option<ScriptLogEntry> {
         duration,
         position,
         reason,
+        title,
         mtime,
     })
 }
@@ -303,6 +311,53 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_entry_keeps_its_title_line_verbatim() {
+        let dir = tempdir().unwrap();
+        let entry_path = dir.path().join("stream");
+        write_entry(
+            &entry_path,
+            "# https://cdn.example/x/index.m3u8?t=abc\ntitle=Blue Lock Episode 9\nduration=1400.5\nposition=312.25\nreason=quit\n",
+        );
+
+        let entry = parse_entry_file(&entry_path).unwrap();
+        assert_eq!(
+            (
+                entry.source_path,
+                entry.duration,
+                entry.position,
+                entry.reason,
+                entry.title
+            ),
+            (
+                PathBuf::from("https://cdn.example/x/index.m3u8?t=abc"),
+                Some(1400.5),
+                Some(312.25),
+                "quit".to_string(),
+                Some("Blue Lock Episode 9".to_string()),
+            )
+        );
+    }
+
+    #[test]
+    fn an_entry_without_or_with_an_empty_title_line_has_no_title() {
+        let dir = tempdir().unwrap();
+        for (name, contents) in [
+            (
+                "plain",
+                "# /home/user/Anime/Show/ep01.mkv\nduration=5.0\nposition=1.0\nreason=quit\n",
+            ),
+            (
+                "empty",
+                "# https://cdn.example/a\ntitle=\nduration=5.0\nposition=1.0\nreason=quit\n",
+            ),
+        ] {
+            let entry_path = dir.path().join(name);
+            write_entry(&entry_path, contents);
+            assert_eq!(parse_entry_file(&entry_path).unwrap().title, None, "{name}");
+        }
+    }
+
+    #[test]
     fn a_redirect_entry_is_discarded() {
         let dir = tempdir().unwrap();
         let entry_path = dir.path().join("redirect");
@@ -379,6 +434,7 @@ mod tests {
                     duration: Some(1000.0),
                     position: Some(990.0),
                     reason: "eof".to_string(),
+                    title: None,
                     mtime,
                 }
             )])
@@ -565,6 +621,7 @@ mod tests {
                     duration: None,
                     position: Some(200.0),
                     reason: "quit".to_string(),
+                    title: None,
                     mtime: now,
                 }
             )])
@@ -618,6 +675,7 @@ mod tests {
                         duration: None,
                         position: Some(99.0),
                         reason: "quit".to_string(),
+                        title: None,
                         mtime: now,
                     }
                 ),
@@ -628,6 +686,7 @@ mod tests {
                         duration: None,
                         position: Some(20.0),
                         reason: "quit".to_string(),
+                        title: None,
                         mtime: earlier,
                     }
                 ),
@@ -678,6 +737,7 @@ mod tests {
                     duration: Some(1400.0),
                     position: Some(300.0),
                     reason: "quit".to_string(),
+                    title: None,
                     mtime,
                 }
             )])
@@ -729,6 +789,7 @@ mod tests {
                     duration: None,
                     position: Some(200.0),
                     reason: "quit".to_string(),
+                    title: None,
                     mtime: now,
                 }
             )])

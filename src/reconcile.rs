@@ -1408,6 +1408,7 @@ mod tests {
             duration,
             position,
             reason: reason.to_string(),
+            title: None,
             mtime: SystemTime::UNIX_EPOCH,
         }
     }

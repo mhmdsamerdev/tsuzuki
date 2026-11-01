@@ -5,6 +5,7 @@ All notable changes to Tsuzuki are documented here.
 ## [Unreleased]
 
 - `status` shows the saved position when it is past 0:00.
+- The mpv script now logs the title of streams; update it with `tsuzuki doctor --fix`.
 
 ## [v0.1.6]
 
