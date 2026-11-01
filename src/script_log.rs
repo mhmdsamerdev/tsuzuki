@@ -257,7 +257,9 @@ fn merge_freshest_wins(
     for entry in entries {
         let key = normalize(&entry.source_path, home);
         match by_path.get(&key) {
-            Some(existing) if existing.mtime >= entry.mtime => {}
+            Some(existing)
+                if (existing.mtime, &existing.source_path) >= (entry.mtime, &entry.source_path) => {
+            }
             _ => {
                 by_path.insert(key, entry);
             }
@@ -267,6 +269,8 @@ fn merge_freshest_wins(
 }
 
 /// Keeps one stream entry per title: the one whose file has the newest mtime.
+/// Equal mtimes go to the greater source path, so the choice never depends on
+/// the order the log directories were read.
 fn merge_streams_freshest_wins(entries: Vec<ScriptLogEntry>) -> Vec<ScriptLogEntry> {
     let mut by_title: BTreeMap<String, ScriptLogEntry> = BTreeMap::new();
     for entry in entries {
@@ -274,7 +278,9 @@ fn merge_streams_freshest_wins(entries: Vec<ScriptLogEntry>) -> Vec<ScriptLogEnt
             continue;
         };
         match by_title.get(&title) {
-            Some(existing) if existing.mtime >= entry.mtime => {}
+            Some(existing)
+                if (existing.mtime, &existing.source_path) >= (entry.mtime, &entry.source_path) => {
+            }
             _ => {
                 by_title.insert(title, entry);
             }
@@ -869,6 +875,65 @@ mod tests {
             let scan = scan_script_log_full(&dirs, &resolve_roots(&tracked_roots, None), None);
             check_scan(&scan, &root);
         }
+    }
+
+    #[test]
+    fn scan_drops_a_redirect_stream_entry_and_skips_a_malformed_one_without_aborting() {
+        let dir = tempdir().unwrap();
+        let log_dir = dir.path().join("mpv-log");
+        write_entry(
+            &log_dir.join("redirect"),
+            "# https://cdn.example/r\ntitle=Blue Lock Episode 1\nduration=1400.0\nposition=900.0\nreason=redirect\n",
+        );
+        write_entry(
+            &log_dir.join("malformed"),
+            "# https://cdn.example/m\ntitle=Blue Lock Episode 2\nduration=1400.0\nposition=abc\nreason=quit\n",
+        );
+        write_entry(
+            &log_dir.join("good"),
+            "# https://cdn.example/g\ntitle=Blue Lock Episode 3\nduration=1400.0\nposition=60.0\nreason=quit\n",
+        );
+
+        let scan = scan_script_log_full(&[log_dir], &[], None);
+
+        assert_eq!(
+            scan.streams
+                .iter()
+                .map(|e| (e.title.clone().unwrap(), e.position))
+                .collect::<Vec<_>>(),
+            vec![("Blue Lock Episode 3".to_string(), Some(60.0))]
+        );
+    }
+
+    #[test]
+    fn scan_streams_with_equal_mtimes_pick_the_same_entry_whichever_dir_is_read_first() {
+        let dir = tempdir().unwrap();
+        let native = dir.path().join("native-log");
+        let flatpak = dir.path().join("flatpak-log");
+        write_entry(
+            &native.join("stream"),
+            "# https://cdn.example/a\ntitle=Blue Lock Episode 9\nduration=1400.0\nposition=100.0\nreason=quit\n",
+        );
+        write_entry(
+            &flatpak.join("stream"),
+            "# https://cdn.example/b\ntitle=Blue Lock Episode 9\nduration=1400.0\nposition=900.0\nreason=quit\n",
+        );
+        set_mtime(&native.join("stream"), fixed_mtime());
+        set_mtime(&flatpak.join("stream"), fixed_mtime());
+
+        let positions: Vec<Vec<Option<f64>>> =
+            [[native.clone(), flatpak.clone()], [flatpak, native]]
+                .iter()
+                .map(|dirs| {
+                    scan_script_log_full(dirs, &[], None)
+                        .streams
+                        .iter()
+                        .map(|e| e.position)
+                        .collect()
+                })
+                .collect();
+
+        assert_eq!(positions[0], positions[1]);
     }
 
     fn check_scan(scan: &ScriptLogScan, root: &Path) {

@@ -174,7 +174,8 @@ fn reconcile_ani_cli(
     for (title, episodes) in by_title {
         let total = state
             .find_mal_link(ani_cli::ROOT, title)
-            .and_then(|link| link.total_episodes);
+            .and_then(|link| link.total_episodes)
+            .filter(|&total| total > 0);
         reconcile_ani_cli_title(
             state,
             title,
@@ -3978,6 +3979,22 @@ mod tests {
         assert_eq!(
             stamped(&state, 0),
             vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 13, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_zero_total_never_completes_even_for_a_finished_episode_zero() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        finished(&log, 0, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", Some(0));
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 1, 0)]
         );
     }
 

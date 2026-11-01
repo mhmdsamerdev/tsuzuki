@@ -493,6 +493,50 @@ fn a_saved_mal_total_completes_an_ani_cli_show_once_its_last_episode_is_finished
     assert_eq!(state_field(&state, "episode_number").as_deref(), Some("12"));
 }
 
+#[test]
+fn pause_and_drop_reject_a_completed_ani_cli_show_and_leave_state_untouched() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    assert!(run(home, &["add", "ani-cli"]).status.success());
+    write_history(home, "12\tblue-lock-964\tBlue Lock\n");
+    write_stream(home, "a1", "Blue Lock Episode 12", 1399.0, "eof");
+    assert!(run(home, &["status"]).status.success());
+    let linked = format!(
+        "{}\n[[mal_links]]\nroot = \"ani-cli://\"\nname = \"Blue Lock\"\nmal_id = 7\ntotal_episodes = 12\n",
+        state_text(home).replace("mal_links = []\n", "")
+    );
+    fs::write(home.join(".local/share/tsuzuki/state.toml"), linked).unwrap();
+    assert_eq!(
+        stdout_of(&run(home, &["list"])),
+        "Completed:\n  Blue Lock (ani-cli)\n"
+    );
+    let before = state_text(home);
+
+    for command in ["pause", "drop"] {
+        let output = run(home, &[command, "Blue Lock", "--root", "ani-cli"]);
+        assert!(!output.status.success(), "{command}");
+        assert_eq!(state_text(home), before, "{command}");
+    }
+}
+
+#[test]
+fn pausing_an_already_paused_ani_cli_show_succeeds_and_keeps_it_paused() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(run(home, &["pause", "Blue Lock"]).status.success());
+
+    let again = run(home, &["pause", "Blue Lock"]);
+
+    assert!(again.status.success());
+    let state = state_text(home);
+    assert_eq!(state_field(&state, "status").as_deref(), Some("\"paused\""));
+    assert_eq!(
+        state_field(&state, "position_seconds").as_deref(),
+        Some("300.0")
+    );
+}
+
 fn config_text(home: &Path) -> String {
     fs::read_to_string(home.join(".config/tsuzuki/config.toml")).unwrap()
 }
