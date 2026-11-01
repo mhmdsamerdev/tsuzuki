@@ -64,6 +64,10 @@ pub struct MalLink {
     pub root: String,
     pub name: String,
     pub mal_id: u32,
+    /// MAL's episode count, saved by `sync`. `None` until MAL gives one:
+    /// it reports 0 for a show that is still airing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_episodes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -410,6 +414,7 @@ updated_at = 1700000000
             root: "~/Anime".to_string(),
             name: "One Piece".to_string(),
             mal_id: 21,
+            total_episodes: None,
         });
 
         write(&path, &state).unwrap();
@@ -426,11 +431,13 @@ updated_at = 1700000000
                     root: "~/Anime".to_string(),
                     name: "Monster".to_string(),
                     mal_id: 19,
+                    total_episodes: None,
                 },
                 MalLink {
                     root: "~/Anime/Rewatches".to_string(),
                     name: "Monster".to_string(),
                     mal_id: 19,
+                    total_episodes: None,
                 },
             ],
         };
@@ -533,6 +540,32 @@ updated_at = 1700000000
                 .unwrap()
                 .contains("status = \"completed\"")
         );
+        assert_eq!(read(&path).unwrap(), state);
+    }
+
+    #[test]
+    fn a_mal_link_without_total_episodes_reads_as_none_and_none_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.toml");
+        fs::write(
+            &path,
+            "[[mal_links]]\nroot = \"~/Anime\"\nname = \"Monster\"\nmal_id = 19\n\n[[mal_links]]\nroot = \"~/Anime\"\nname = \"Naruto\"\nmal_id = 20\ntotal_episodes = 220\n",
+        )
+        .unwrap();
+
+        let state = read(&path).unwrap();
+
+        assert_eq!(
+            state
+                .mal_links
+                .iter()
+                .map(|l| l.total_episodes)
+                .collect::<Vec<_>>(),
+            vec![None, Some(220)]
+        );
+        write(&path, &state).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("total_episodes").count(), 1);
         assert_eq!(read(&path).unwrap(), state);
     }
 }

@@ -1284,6 +1284,9 @@ fn sync_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
         config.mal.fuzzy_match_threshold,
     );
 
+    // The totals just saved can finish an ani-cli show.
+    reconcile::reconcile(config, &mut state, home);
+
     let local_advances = sync::apply_synced_progress(config, &mut state, &outcomes, home);
 
     if state != before

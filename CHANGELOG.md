@@ -10,6 +10,7 @@ All notable changes to Tsuzuki are documented here.
 - Streams watched through ani-cli in mpv are recorded as series once `ani-cli` is added.
 - `list`, `status`, `pause` and `drop` work on ani-cli series (`--root ani-cli` picks one when a folder series shares the title); `start` never offers them.
 - `tsuzuki` resumes ani-cli series by running ani-cli on the saved episode and second, or the next episode once finished.
+- `sync` saves MAL's episode count; an ani-cli show becomes completed when its last episode is finished.
 
 ## [v0.1.6]
 

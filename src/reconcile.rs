@@ -172,9 +172,13 @@ fn reconcile_ani_cli(
             .insert(claim.episode, entry);
     }
     for (title, episodes) in by_title {
+        let total = state
+            .find_mal_link(ani_cli::ROOT, title)
+            .and_then(|link| link.total_episodes);
         reconcile_ani_cli_title(
             state,
             title,
+            total,
             &episodes,
             resume_seconds,
             completion_remaining_seconds,
@@ -185,11 +189,15 @@ fn reconcile_ani_cli(
 /// Reconciles one show from its readings, keyed by episode number. The
 /// furthest episode with a usable reading decides: a `Resume` lands on that
 /// episode at that position, a `Completed` lands on the next episode at 0.
+/// A `Completed` reading of the final episode, `total` (MAL's count), makes
+/// the show `Completed` instead; a reading above `total`, or an unknown
+/// `total`, never does.
 /// Like a folder series, a dropped or completed record reacts only to readings
 /// newer than it, and an active one ignores episodes before its cursor.
 fn reconcile_ani_cli_title(
     state: &mut State,
     title: &str,
+    total: Option<u32>,
     episodes: &BTreeMap<u32, &ScriptLogEntry>,
     resume_seconds: u64,
     completion_remaining_seconds: u64,
@@ -203,7 +211,12 @@ fn reconcile_ani_cli_title(
         Some(r) if matches!(r.status, Status::Dropped | Status::Completed) => {
             (Some(r.updated_at), 0)
         }
-        Some(r) => (None, r.episode_number.unwrap_or(0)),
+        // An active record sits one past the final episode right after that
+        // episode finished, so the scan reaches back to it.
+        Some(r) => {
+            let cursor = r.episode_number.unwrap_or(0);
+            (None, total.map_or(cursor, |t| cursor.min(t)))
+        }
         None => (None, 0),
     };
 
@@ -219,9 +232,16 @@ fn reconcile_ani_cli_title(
     let Some((episode, action)) = furthest else {
         return;
     };
-    let (episode, position) = match action {
-        PlaybackAction::Resume(position) => (episode, position),
-        PlaybackAction::Completed => (episode.saturating_add(1), 0.0),
+    let stored_position = existing.map_or(0.0, |i| state.series[i].position_seconds);
+    let (episode, position, finished) = match action {
+        PlaybackAction::Resume(position) => (episode, position, false),
+        PlaybackAction::Completed if total == Some(episode) => (episode, stored_position, true),
+        PlaybackAction::Completed => (episode.saturating_add(1), 0.0, false),
+    };
+    let status = if finished {
+        Status::Completed
+    } else {
+        Status::InProgress
     };
 
     // Readings that pass the cutoff are newer than the record, so even an
@@ -229,6 +249,7 @@ fn reconcile_ani_cli_title(
     let changed = match existing.map(|i| &state.series[i]) {
         Some(r) => {
             cutoff.is_some()
+                || finished
                 || r.episode_number != Some(episode)
                 || (r.position_seconds - position).abs() > f64::EPSILON
         }
@@ -242,7 +263,7 @@ fn reconcile_ani_cli_title(
     match existing {
         Some(i) => {
             let record = &mut state.series[i];
-            record.status = Status::InProgress;
+            record.status = status;
             record.position_seconds = position;
             record.episode_number = Some(episode);
             record.season_number = None;
@@ -251,7 +272,7 @@ fn reconcile_ani_cli_title(
         None => state.series.push(SeriesRecord {
             root: ani_cli::ROOT.to_string(),
             name: title.to_string(),
-            status: Status::InProgress,
+            status,
             current_relative_path: String::new(),
             position_seconds: position,
             episode_number: Some(episode),
@@ -3889,6 +3910,194 @@ mod tests {
         assert_eq!(
             stamped(&state, 0),
             vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 5, 0)]
+        );
+    }
+
+    // --- ani-cli: completion from MAL's total ---
+
+    fn with_total(state: &mut State, title: &str, total: Option<u32>) {
+        state.mal_links.push(crate::state::MalLink {
+            root: ani_cli::ROOT.to_string(),
+            name: title.to_string(),
+            mal_id: 7,
+            total_episodes: total,
+        });
+    }
+
+    fn finished(log: &Path, episode: u32, mtime: SystemTime) {
+        write_stream(
+            log,
+            &format!("Blue Lock Episode {episode}"),
+            Some(1400.0),
+            Some(1399.0),
+            "eof",
+            mtime,
+        );
+    }
+
+    #[test]
+    fn ani_cli_finishing_the_final_episode_completes_only_at_exactly_the_total() {
+        // Total 12: below advances, equal completes, above never completes.
+        for (episode, status, expected_episode, expected_position) in [
+            (11, Status::InProgress, 12, 0.0),
+            (12, Status::Completed, 12, 0.0),
+            (13, Status::InProgress, 14, 0.0),
+        ] {
+            let dir = tempdir().unwrap();
+            let log = dir.path().join("mpv-log");
+            finished(&log, episode, at(CUTOFF));
+            let mut state = State::default();
+            with_total(&mut state, "Blue Lock", Some(12));
+
+            run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+            assert_eq!(
+                stamped(&state, 0),
+                vec![ani_record(
+                    status,
+                    "Blue Lock",
+                    expected_position,
+                    expected_episode,
+                    0
+                )],
+                "finished episode {episode}"
+            );
+        }
+    }
+
+    #[test]
+    fn ani_cli_finishing_the_last_episode_never_completes_when_the_total_is_unknown() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        finished(&log, 12, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", None);
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 13, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_total_learned_after_the_cursor_passed_the_last_episode_completes_it() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        finished(&log, 12, at(CUTOFF));
+        let mut state = State::default();
+        run_ani(&ani_config(), &mut state, &log, &history);
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 13, 0)]
+        );
+
+        with_total(&mut state, "Blue Lock", Some(12));
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::Completed, "Blue Lock", 0.0, 12, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_final_episode_resume_reading_stays_in_progress_at_that_episode() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        quit_at(&log, "Blue Lock Episode 12", 300.0, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", Some(12));
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 300.0, 12, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_finishing_the_final_episode_completes_a_paused_record_and_keeps_its_position() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        quit_at(&log, "Blue Lock Episode 12", 300.0, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", Some(12));
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].status = Status::Paused;
+        state.series[0].updated_at = 5;
+        finished(&log, 12, at(CUTOFF + 10));
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::Completed, "Blue Lock", 300.0, 12, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_completed_record_ignores_the_old_final_reading_and_is_not_bumped_again() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        finished(&log, 12, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", Some(12));
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].updated_at = CUTOFF + 100;
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            state.series,
+            vec![ani_record(
+                Status::Completed,
+                "Blue Lock",
+                0.0,
+                12,
+                CUTOFF + 100
+            )]
+        );
+    }
+
+    #[test]
+    fn ani_cli_a_completed_show_reactivates_on_newer_playback_as_for_folders() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        let history = history_of(&["Blue Lock"]);
+        finished(&log, 12, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Blue Lock", Some(12));
+        run_ani(&ani_config(), &mut state, &log, &history);
+        state.series[0].updated_at = CUTOFF + 100;
+        quit_at(&log, "Blue Lock Episode 3", 500.0, at(CUTOFF + 200));
+
+        run_ani(&ani_config(), &mut state, &log, &history);
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 500.0, 3, 0)]
+        );
+    }
+
+    #[test]
+    fn ani_cli_another_titles_total_does_not_complete_this_show() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("mpv-log");
+        finished(&log, 12, at(CUTOFF));
+        let mut state = State::default();
+        with_total(&mut state, "Chained Soldier", Some(12));
+
+        run_ani(&ani_config(), &mut state, &log, &history_of(&["Blue Lock"]));
+
+        assert_eq!(
+            stamped(&state, 0),
+            vec![ani_record(Status::InProgress, "Blue Lock", 0.0, 13, 0)]
         );
     }
 }

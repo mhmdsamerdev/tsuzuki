@@ -707,6 +707,14 @@ impl fmt::Display for ManualLinkError {
     }
 }
 
+/// Saves MAL's episode count on the link; 0 (MAL doesn't know it yet, as for a
+/// show that is still airing) clears it.
+fn store_total(state: &mut State, root: &str, name: &str, num_episodes: u32) {
+    if let Some(link) = state.find_mal_link_mut(root, name) {
+        link.total_episodes = (num_episodes > 0).then_some(num_episodes);
+    }
+}
+
 /// Links `name` to `mal_id` after checking the id is on the user's MAL list,
 /// so a mistyped id is rejected here instead of failing later or patching an
 /// unrelated anime.
@@ -723,17 +731,22 @@ pub fn manual_link(
         return Err(ManualLinkError::NotOnList);
     }
     upsert_link(state, root, name, mal_id);
+    store_total(state, root, name, status.num_episodes);
     Ok(())
 }
 
 fn upsert_link(state: &mut State, root: &str, name: &str, mal_id: u32) {
     if let Some(link) = state.find_mal_link_mut(root, name) {
-        link.mal_id = mal_id;
+        if link.mal_id != mal_id {
+            link.mal_id = mal_id;
+            link.total_episodes = None;
+        }
     } else {
         state.mal_links.push(MalLink {
             root: root.to_string(),
             name: name.to_string(),
             mal_id,
+            total_episodes: None,
         });
     }
 }
@@ -918,6 +931,7 @@ fn run_sync_on_date(
                         Some(entry) => {
                             let id = entry.id;
                             upsert_link(state, root, name, id);
+                            store_total(state, root, name, entry.num_episodes);
                             // The list entry already carries the watched
                             // count; no extra GET.
                             let remote = AnimeStatus {
@@ -985,6 +999,7 @@ fn run_sync_on_date(
         // Already linked: read MAL's current progress for this one anime.
         throttle(&mut is_first_call, delay);
         let result = fetch_anime_status(client, bearer_token, mal_id).and_then(|status| {
+            store_total(state, root, name, status.num_episodes);
             merge_and_maybe_update(
                 client,
                 bearer_token,
@@ -1540,6 +1555,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         };
 
@@ -1588,6 +1604,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         };
         let outcomes = run_sync_on_date(
@@ -1630,6 +1647,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         };
         let outcomes = run_sync_on_date(
@@ -1671,6 +1689,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         };
         let outcomes = run_sync_on_date(
@@ -1712,6 +1731,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         };
         let outcomes = run_sync_on_date(
@@ -1786,6 +1806,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "Monster".to_string(),
                 mal_id: 100,
+                total_episodes: None,
             }],
         };
         manual_link(&client, "token", &mut state, "~/Anime", "Monster", 200).unwrap();
@@ -1799,6 +1820,135 @@ mod tests {
             state.find_mal_link("~/Anime", "Monster").unwrap().mal_id,
             200
         );
+    }
+
+    #[test]
+    fn manual_link_saves_the_total_episodes_mal_reports() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":100,"title":"Test Anime","num_episodes":12,"my_list_status":{"num_episodes_watched":3}}"#,
+        );
+
+        let mut state = State::default();
+        manual_link(&client, "token", &mut state, "~/Anime", "Monster", 100).unwrap();
+
+        assert_eq!(
+            state
+                .find_mal_link("~/Anime", "Monster")
+                .unwrap()
+                .total_episodes,
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn relinking_to_another_id_replaces_the_old_total_even_when_mal_reports_none() {
+        for (response_total, expected) in [(r#","num_episodes":24"#, Some(24)), ("", None)] {
+            let client = FakeClient::new();
+            client.push_status_response(
+                200,
+                &format!(
+                    r#"{{"id":200,"title":"Other"{response_total},"my_list_status":{{"num_episodes_watched":0}}}}"#
+                ),
+            );
+            let mut state = State {
+                series: Vec::new(),
+                mal_links: vec![MalLink {
+                    root: "~/Anime".to_string(),
+                    name: "Monster".to_string(),
+                    mal_id: 100,
+                    total_episodes: Some(12),
+                }],
+            };
+
+            manual_link(&client, "token", &mut state, "~/Anime", "Monster", 200).unwrap();
+
+            assert_eq!(
+                state.mal_links,
+                vec![MalLink {
+                    root: "~/Anime".to_string(),
+                    name: "Monster".to_string(),
+                    mal_id: 200,
+                    total_episodes: expected,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn run_sync_saves_the_total_when_it_auto_links_and_clears_it_when_mal_reports_zero() {
+        for (num_episodes, expected) in [(12, Some(12)), (0, None)] {
+            let client = FakeClient::new();
+            client.push_list_response(
+                200,
+                &format!(
+                    r#"{{"data":[{{"node":{{"id":7,"title":"One Piece","num_episodes":{num_episodes},"alternative_titles":{{"en":"","ja":"","synonyms":[]}}}},"list_status":{{"status":"watching","num_episodes_watched":3}}}}]}}"#
+                ),
+            );
+            let mut state = State {
+                series: vec![base_record()],
+                mal_links: Vec::new(),
+            };
+
+            run_sync(
+                &client,
+                "token",
+                &mut state,
+                &[("~/Anime".to_string(), "One Piece".to_string())],
+                Duration::ZERO,
+                TEST_FUZZY_MATCH_THRESHOLD,
+            );
+
+            assert_eq!(
+                state
+                    .find_mal_link("~/Anime", "One Piece")
+                    .unwrap()
+                    .total_episodes,
+                expected,
+                "num_episodes {num_episodes}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_sync_refreshes_the_total_of_an_already_linked_series() {
+        // A show that was airing (no total) now reports 24; another reports 0 again.
+        for (previous, response, expected) in [(None, 24, Some(24)), (Some(12), 0, None)] {
+            let client = FakeClient::new();
+            client.push_status_response(
+                200,
+                &format!(
+                    r#"{{"id":42,"title":"Test Anime","num_episodes":{response},"my_list_status":{{"num_episodes_watched":3}}}}"#
+                ),
+            );
+            let mut state = State {
+                series: vec![base_record()],
+                mal_links: vec![MalLink {
+                    root: "~/Anime".to_string(),
+                    name: "One Piece".to_string(),
+                    mal_id: 42,
+                    total_episodes: previous,
+                }],
+            };
+
+            run_sync(
+                &client,
+                "token",
+                &mut state,
+                &[("~/Anime".to_string(), "One Piece".to_string())],
+                Duration::ZERO,
+                TEST_FUZZY_MATCH_THRESHOLD,
+            );
+
+            assert_eq!(
+                state
+                    .find_mal_link("~/Anime", "One Piece")
+                    .unwrap()
+                    .total_episodes,
+                expected
+            );
+        }
     }
 
     // --- run_sync: no-match / empty-list outcomes ---
@@ -1963,11 +2113,13 @@ mod tests {
                     root: "~/Anime".to_string(),
                     name: "Failing Show".to_string(),
                     mal_id: 1,
+                    total_episodes: None,
                 },
                 MalLink {
                     root: "~/Anime".to_string(),
                     name: "Working Show".to_string(),
                     mal_id: 2,
+                    total_episodes: None,
                 },
             ],
         };
@@ -2022,6 +2174,7 @@ mod tests {
                     root: "~/Anime".to_string(),
                     name: name.to_string(),
                     mal_id,
+                    total_episodes: None,
                 })
                 .collect(),
         }
@@ -2156,6 +2309,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "Linked Show".to_string(),
                 mal_id: 9,
+                total_episodes: None,
             }],
         };
 
@@ -2208,6 +2362,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 3,
+                total_episodes: None,
             }],
         };
 
@@ -2263,6 +2418,7 @@ mod tests {
                 root: "~/Anime".to_string(),
                 name: "One Piece".to_string(),
                 mal_id: 42,
+                total_episodes: None,
             }],
         }
     }
