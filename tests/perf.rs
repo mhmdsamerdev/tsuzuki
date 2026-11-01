@@ -8,9 +8,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-/// Upper bound for every command's median: about 3× the slowest measured
-/// (~130 ms on an NVMe laptop).
-const BUDGET: Duration = Duration::from_millis(400);
+/// Upper bound for every command's median: about 2.5× the slowest measured
+/// (~80 ms on an NVMe laptop).
+const BUDGET: Duration = Duration::from_millis(200);
 
 const TIMED_RUNS: usize = 9;
 

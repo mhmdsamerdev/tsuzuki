@@ -30,6 +30,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - One resolver (`mpv::resolve`, from `[mpv] install`) picks the mpv target. Launch, the script check, `doctor` and `--fix` use only it; nothing else detects mpv. Log reading deliberately merges every known log dir (native, Flatpak) regardless of target.
 - The mpv script is enforced only by `tsuzuki`/`start` (refuse to launch when the target's script file is missing) and `doctor`. No runtime warnings anywhere else. Snap isn't supported (its paths can't be known); Snap users use `custom`.
 - Commands must feel instant, and their cost must not grow with history or library size. Do each filesystem lookup or scan once per command and reuse it. Don't trade correctness or the invariants above for speed, and don't add caches or dependencies for it.
+- Every command pays for `resolve_roots`, the script-log scan and reconcile. Their cost may scale with root count, depth-1 series and mpv-log entries, never with episode files or directory depth. Walk a series' files only for the one series being acted on; `doctor` may walk deeper.
 - Pure Rust only, no C/C++ dependencies. `vendor/anitomy` is read-only (edit only for a reproduced, blocking parsing bug). Distribution is prebuilt binaries via cargo-dist only.
 
 ## Architecture
@@ -94,6 +95,8 @@ Every test guards a named invariant. Rules are checkable, not taste.
 **Verification**
 - Run `cargo test`, then `cargo mutants --in-diff <diff-of-change>`. Report surviving mutants and either add tests that kill them or say why each is equivalent. Don't claim "done" without that report.
 - Grep every site that decides the same concept as the change, and confirm each is tested against the Hard invariants.
+- After touching anything that reads the filesystem or the mpv-log, run `cargo test --release --test perf -- --ignored --nocapture` and compare with the same run on the previous commit. Report both numbers. A slowdown over about 20% needs a fix or an explicit reason.
+- A change that adds a layout (a new kind of symlink, nested roots, etc.) adds it to every fixture that can see it, unit, integration and `tests/perf.rs`, in the same change.
 
 ## Code comments
 - Short, clear, focused; explain only the code they sit on. No diff/change notes ("added", "now", "was").
