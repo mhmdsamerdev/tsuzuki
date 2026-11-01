@@ -84,9 +84,10 @@ fn quit_entry(home: &Path, entry_name: &str, source_file: &Path, position_second
     .unwrap();
 }
 
-/// Two tracked roots (`Anime` and the nested `Anime/[RE]`), 171 series of 24
-/// files (one symlinked in from outside), and 5 000 mpv-log entries, 3 500 of
-/// them for files outside every root. 66 series end up in progress.
+/// Two tracked roots (`Anime` and the nested `Anime/[RE]`), 173 series of 24
+/// files (one symlinked in from outside, one with symlinked season folders, one
+/// with symlinked episode files), and 5 000 mpv-log entries, 3 500 of them for
+/// files outside every root. 68 series end up in progress.
 fn large_library(home: &Path) {
     let anime = home.join("Anime");
     let rewatches = anime.join("[RE]");
@@ -99,6 +100,27 @@ fn large_library(home: &Path) {
     let outside = home.join("Elsewhere/Linked Show");
     series(&outside);
     std::os::unix::fs::symlink(&outside, anime.join("Linked Show")).unwrap();
+
+    // A real series folder holding a symlinked season folder, and one whose
+    // episode files are symlinks, both into storage outside every root.
+    let storage = home.join("Storage");
+    series(&storage.join("Season Links S01"));
+    fs::create_dir_all(anime.join("Season Links")).unwrap();
+    std::os::unix::fs::symlink(
+        storage.join("Season Links S01"),
+        anime.join("Season Links/S01"),
+    )
+    .unwrap();
+    series(&storage.join("Episode Links"));
+    fs::create_dir_all(anime.join("Episode Links")).unwrap();
+    for ep in 1..=24 {
+        let name = format!("ep{ep:02}.mkv");
+        std::os::unix::fs::symlink(
+            storage.join("Episode Links").join(&name),
+            anime.join("Episode Links").join(&name),
+        )
+        .unwrap();
+    }
 
     run_expecting(home, &["add", anime.to_str().unwrap()], 0);
     run_expecting(home, &["add", rewatches.to_str().unwrap()], 0);
@@ -113,6 +135,18 @@ fn large_library(home: &Path) {
         }
     }
     quit_entry(home, "linked", &anime.join("Linked Show/ep03.mkv"), 300.0);
+    quit_entry(
+        home,
+        "season",
+        &anime.join("Season Links/S01/ep04.mkv"),
+        300.0,
+    );
+    quit_entry(
+        home,
+        "episode",
+        &anime.join("Episode Links/ep05.mkv"),
+        300.0,
+    );
     for i in 1..=5 {
         let file = rewatches.join(format!("Rewatch {i:02}/ep02.mkv"));
         quit_entry(home, &format!("r{i:02}"), &file, 300.0);
@@ -147,12 +181,14 @@ fn perf_large_library_every_command_stays_under_budget() {
     let home = home_dir.path();
     large_library(home);
 
-    let mut expected = String::from("Linked Show — ep. 3\n");
+    let mut expected = String::from(
+        "Episode Links — ep. 5 (05:00)\nLinked Show — ep. 3 (05:00)\nSeason Links — ep. 4 (05:00)\n",
+    );
     for i in 1..=60 {
-        expected.push_str(&format!("Series {i:03} — ep. 10\n"));
+        expected.push_str(&format!("Series {i:03} — ep. 10 (05:00)\n"));
     }
     for i in 1..=5 {
-        expected.push_str(&format!("Rewatch {i:02} — ep. 2\n"));
+        expected.push_str(&format!("Rewatch {i:02} — ep. 2 (05:00)\n"));
     }
     expected.push_str("\nRunning `tsuzuki` bare will prompt among these.\n");
     assert_eq!(stdout_of(&run_expecting(home, &["status"], 0)), expected);
