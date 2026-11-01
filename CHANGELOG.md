@@ -2,10 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.7]
 
 - `status` shows the saved position when it is past 0:00.
-- ani-cli support: `tsuzuki add ani-cli`, then `tsuzuki` resumes what you watched through ani-cli. Update the mpv script with `tsuzuki doctor --fix`.
+- ani-cli support: `tsuzuki add ani-cli`, then `tsuzuki` resumes what you watched through ani-cli. 
 
 ## [v0.1.6]
 
