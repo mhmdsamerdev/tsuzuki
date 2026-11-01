@@ -34,7 +34,9 @@ pub enum Command {
 
     /// Register one or more tracked roots
     Add {
-        /// Directories to track; their immediate children become series
+        /// Directories to track; their immediate children become series.
+        /// `ani-cli` tracks ani-cli streams instead (a folder of that name
+        /// is `./ani-cli`)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },

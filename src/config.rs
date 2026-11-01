@@ -20,6 +20,8 @@ pub struct Config {
     #[serde(default)]
     pub mal: Mal,
     #[serde(default)]
+    pub ani_cli: AniCli,
+    #[serde(default)]
     pub exclusions: Vec<Exclusion>,
     #[serde(default)]
     pub sync_exclusions: Vec<SyncExclusion>,
@@ -111,6 +113,38 @@ pub struct Mpv {
     /// The `tsuzuki.lua` the `custom` mpv loads. Empty means it isn't checked.
     #[serde(default)]
     pub script_path: String,
+}
+
+/// `"ani-cli"`: looked up on `PATH`. Needs a named default: `String::default()`
+/// is empty, which can't be run.
+fn default_ani_cli_command() -> String {
+    "ani-cli".to_string()
+}
+
+/// ani-cli as a second source, switched on by `tsuzuki add ani-cli`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AniCli {
+    #[serde(default)]
+    pub enabled: bool,
+    /// ani-cli's history file. Empty means ani-cli's own default location.
+    #[serde(default)]
+    pub history_path: String,
+    #[serde(default = "default_ani_cli_command")]
+    pub command: String,
+    /// Extra arguments for every ani-cli run (e.g. `["--dub"]`).
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Default for AniCli {
+    fn default() -> Self {
+        AniCli {
+            enabled: false,
+            history_path: String::new(),
+            command: default_ani_cli_command(),
+            args: Vec::new(),
+        }
+    }
 }
 
 /// `8734`: the local OAuth-callback listener port for `tsuzuki sync login`.
@@ -327,11 +361,53 @@ mod tests {
                 script_path: String::new(),
             }
         );
+        assert_eq!(
+            config.ani_cli,
+            AniCli {
+                enabled: false,
+                history_path: String::new(),
+                command: "ani-cli".to_string(),
+                args: Vec::new(),
+            }
+        );
         assert_eq!(config.mal.client_id, "");
         assert_eq!(config.mal.redirect_port, 8734);
         assert_eq!(config.mal.fuzzy_match_threshold, 0.8);
         assert!(config.exclusions.is_empty());
         assert!(config.sync_exclusions.is_empty());
+    }
+
+    #[test]
+    fn an_ani_cli_table_missing_keys_gets_the_command_default_not_empty() {
+        let config: Config = toml::from_str("[ani_cli]\nenabled = true\n").unwrap();
+        assert_eq!(
+            config.ani_cli,
+            AniCli {
+                enabled: true,
+                history_path: String::new(),
+                command: "ani-cli".to_string(),
+                args: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn ani_cli_settings_round_trip_through_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config {
+            ani_cli: AniCli {
+                enabled: true,
+                history_path: "~/hist/ani-hsts".to_string(),
+                command: "/opt/ani-cli".to_string(),
+                args: vec!["--dub".to_string()],
+            },
+            ..Config::default()
+        };
+
+        write(&path, &config).unwrap();
+
+        assert_eq!(read(&path).unwrap().ani_cli, config.ani_cli);
     }
 
     #[test]

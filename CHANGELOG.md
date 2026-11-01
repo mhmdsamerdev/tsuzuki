@@ -6,6 +6,7 @@ All notable changes to Tsuzuki are documented here.
 
 - `status` shows the saved position when it is past 0:00.
 - The mpv script now logs the title of streams; update it with `tsuzuki doctor --fix`.
+- `tsuzuki add ani-cli` turns on the ani-cli source (new `[ani_cli]` config).
 
 ## [v0.1.6]
 

@@ -124,6 +124,10 @@ fn dispatch(
     }
 }
 
+/// The `add` argument that enables the ani-cli source; a folder of that name
+/// is added as `./ani-cli`.
+const ANI_CLI_SOURCE: &str = "ani-cli";
+
 /// `tsuzuki add <path>...`: validates and persists new tracked roots. A
 /// failing path doesn't stop the rest; config is written once, and the
 /// per-path lines are printed only after that write succeeds.
@@ -132,6 +136,16 @@ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> Ex
     let mut changed = false;
     let mut failed = false;
     for path in paths {
+        if path == Path::new(ANI_CLI_SOURCE) {
+            if config.ani_cli.enabled {
+                lines.push((ANI_CLI_SOURCE.to_string(), "already tracked"));
+            } else {
+                config.ani_cli.enabled = true;
+                changed = true;
+                lines.push((ANI_CLI_SOURCE.to_string(), "added"));
+            }
+            continue;
+        }
         match roots::add_root(config, path) {
             Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
                 lines.push((as_typed.display().to_string(), "already tracked"));

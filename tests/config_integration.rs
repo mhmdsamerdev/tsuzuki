@@ -132,3 +132,73 @@ fn edit_that_leaves_invalid_toml_behind_is_caught_immediately() {
         "must surface the parse error, got:\n{stderr}"
     );
 }
+
+fn config_text(home: &Path) -> String {
+    fs::read_to_string(home.join(".config").join("tsuzuki").join("config.toml")).unwrap()
+}
+
+#[test]
+fn add_ani_cli_enables_the_source_without_tracking_a_root() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let output = base_command(home)
+        .args(["add", "ani-cli"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "✓ ani-cli — added\n"
+    );
+    let config = config_text(home);
+    assert!(config.contains("[ani_cli]\nenabled = true\n"), "{config}");
+    assert!(config.contains("paths = []"), "{config}");
+}
+
+#[test]
+fn add_ani_cli_twice_reports_already_tracked_and_leaves_config_unchanged() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    base_command(home)
+        .args(["add", "ani-cli"])
+        .output()
+        .unwrap();
+    let before = config_text(home);
+
+    let output = base_command(home)
+        .args(["add", "ani-cli"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "✓ ani-cli — already tracked\n"
+    );
+    assert_eq!(config_text(home), before);
+}
+
+#[test]
+fn add_dot_slash_ani_cli_tracks_a_folder_of_that_name_not_the_source() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let cwd_dir = tempfile::tempdir().unwrap();
+    fs::create_dir(cwd_dir.path().join("ani-cli")).unwrap();
+
+    let output = base_command(home)
+        .current_dir(cwd_dir.path())
+        .args(["add", "./ani-cli"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = config_text(home);
+    assert!(config.contains("./ani-cli"), "{config}");
+    assert!(config.contains("enabled = false"), "{config}");
+}
