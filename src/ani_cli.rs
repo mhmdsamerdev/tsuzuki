@@ -13,6 +13,10 @@ use crate::config::AniCli;
 use crate::roots::expand_tilde;
 use crate::script_log::ScriptLogEntry;
 
+/// The word that names the source on the command line (`add ani-cli`,
+/// `--root ani-cli`). A folder of that name is written `./ani-cli`.
+pub const SOURCE_ARG: &str = "ani-cli";
+
 /// The reserved `SeriesRecord.root` of every ani-cli series. Not a path, so it
 /// can never equal a tracked root.
 pub const ROOT: &str = "ani-cli://";

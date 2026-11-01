@@ -4,10 +4,11 @@
 
 use std::path::Path;
 
+use crate::ani_cli;
 use crate::config::Config;
 use crate::roots::{expand_tilde, root_folder_name, tracked_real_paths};
 use crate::series::is_series_dir;
-use crate::state::resolve_root_arg;
+use crate::state::{State, resolve_root_arg};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TargetError {
@@ -21,17 +22,48 @@ pub enum TargetError {
     Ambiguous { series: String, roots: Vec<String> },
 }
 
+/// True when the ani-cli source is on and `state` holds a series by that title.
+fn has_ani_cli_series(config: &Config, state: &State, series: &str) -> bool {
+    config.ani_cli.enabled
+        && state
+            .series
+            .iter()
+            .any(|r| r.root == ani_cli::ROOT && r.name == series)
+}
+
+/// True when `root_arg` is the `ani-cli` source word and the source is on.
+fn is_ani_cli_arg(config: &Config, root_arg: &Path) -> bool {
+    config.ani_cli.enabled && root_arg == Path::new(ani_cli::SOURCE_ARG)
+}
+
+/// Resolves a `--root` used to narrow a picker: a tracked root's stored form,
+/// or the ani-cli source's reserved root for the word `ani-cli`.
+pub fn resolve_scope_root(config: &Config, root_arg: &Path, home: Option<&Path>) -> Option<String> {
+    if is_ani_cli_arg(config, root_arg) {
+        return Some(ani_cli::ROOT.to_string());
+    }
+    resolve_root_arg(config, root_arg, home)
+}
+
 /// Resolves `series` to the stored form of the tracked root it lives under.
 /// With `root_arg`, only that root is considered: an untracked one is
 /// `RootNotFound`, one without `series` is `NotFound`. Without it, zero
 /// matching roots is `NotFound` and more than one is `Ambiguous`.
 pub fn resolve_series_root(
     config: &Config,
+    state: &State,
     series: &str,
     root_arg: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<String, TargetError> {
     match root_arg {
+        Some(root_arg) if is_ani_cli_arg(config, root_arg) => {
+            if has_ani_cli_series(config, state, series) {
+                Ok(ani_cli::ROOT.to_string())
+            } else {
+                Err(TargetError::NotFound(series.to_string()))
+            }
+        }
         Some(root_arg) => {
             let root = resolve_root_arg(config, root_arg, home).ok_or_else(|| {
                 TargetError::RootNotFound(root_arg.to_string_lossy().into_owned())
@@ -48,7 +80,7 @@ pub fn resolve_series_root(
         }
         None => {
             let real_roots = tracked_real_paths(config, home);
-            let matches: Vec<String> = config
+            let mut matches: Vec<String> = config
                 .roots
                 .paths
                 .iter()
@@ -60,6 +92,9 @@ pub fn resolve_series_root(
                 })
                 .cloned()
                 .collect();
+            if has_ani_cli_series(config, state, series) {
+                matches.push(ani_cli::ROOT.to_string());
+            }
             match matches.len() {
                 0 => Err(TargetError::NotFound(series.to_string())),
                 1 => Ok(matches.into_iter().next().unwrap()),
@@ -102,24 +137,31 @@ pub enum PositionalError {
 /// never a silent pick.
 pub fn resolve_positional(
     config: &Config,
+    state: &State,
     arg: &str,
     home: Option<&Path>,
 ) -> Result<Resolved, PositionalError> {
     let real_roots = tracked_real_paths(config, home);
-    let series_roots: Vec<String> = config
+    let mut series_roots: Vec<String> = config
         .roots
         .paths
         .iter()
         .filter(|root| is_series_dir(&expand_tilde(Path::new(root), home).join(arg), &real_roots))
         .cloned()
         .collect();
-    let roots: Vec<String> = config
+    if has_ani_cli_series(config, state, arg) {
+        series_roots.push(ani_cli::ROOT.to_string());
+    }
+    let mut roots: Vec<String> = config
         .roots
         .paths
         .iter()
         .filter(|root| root_folder_name(root).as_deref() == Some(arg))
         .cloned()
         .collect();
+    if is_ani_cli_arg(config, Path::new(arg)) {
+        roots.push(ani_cli::ROOT.to_string());
+    }
     match (series_roots.len(), roots.len()) {
         (0, 0) => Err(PositionalError::NotFound(arg.to_string())),
         (1, 0) => Ok(Resolved::Series(series_roots.into_iter().next().unwrap())),
@@ -161,7 +203,8 @@ mod tests {
         fs::create_dir_all(root.join("Monster")).unwrap();
 
         let config = tracked_config(&[&root]);
-        let resolved = resolve_series_root(&config, "Monster", None, None).unwrap();
+        let resolved =
+            resolve_series_root(&config, &State::default(), "Monster", None, None).unwrap();
         assert_eq!(resolved, root.to_string_lossy());
     }
 
@@ -172,7 +215,8 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let config = tracked_config(&[&root]);
-        let err = resolve_series_root(&config, "Nonexistent", None, None).unwrap_err();
+        let err =
+            resolve_series_root(&config, &State::default(), "Nonexistent", None, None).unwrap_err();
         assert_eq!(err, TargetError::NotFound("Nonexistent".to_string()));
     }
 
@@ -185,7 +229,8 @@ mod tests {
         fs::create_dir_all(root_b.join("Monster")).unwrap();
 
         let config = tracked_config(&[&root_a, &root_b]);
-        let err = resolve_series_root(&config, "Monster", None, None).unwrap_err();
+        let err =
+            resolve_series_root(&config, &State::default(), "Monster", None, None).unwrap_err();
         match err {
             TargetError::Ambiguous { series, roots } => {
                 assert_eq!(series, "Monster");
@@ -204,7 +249,9 @@ mod tests {
         fs::create_dir_all(root_b.join("Monster")).unwrap();
 
         let config = tracked_config(&[&root_a, &root_b]);
-        let resolved = resolve_series_root(&config, "Monster", Some(&root_b), None).unwrap();
+        let resolved =
+            resolve_series_root(&config, &State::default(), "Monster", Some(&root_b), None)
+                .unwrap();
         assert_eq!(resolved, root_b.to_string_lossy());
     }
 
@@ -216,7 +263,14 @@ mod tests {
 
         let config = tracked_config(&[&root]);
         let unrelated = dir.path().join("Unrelated");
-        let err = resolve_series_root(&config, "Monster", Some(&unrelated), None).unwrap_err();
+        let err = resolve_series_root(
+            &config,
+            &State::default(),
+            "Monster",
+            Some(&unrelated),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             TargetError::RootNotFound(unrelated.to_string_lossy().into_owned())
@@ -232,7 +286,8 @@ mod tests {
         fs::create_dir_all(&root_b).unwrap();
 
         let config = tracked_config(&[&root_a, &root_b]);
-        let err = resolve_series_root(&config, "Monster", Some(&root_b), None).unwrap_err();
+        let err = resolve_series_root(&config, &State::default(), "Monster", Some(&root_b), None)
+            .unwrap_err();
         assert_eq!(err, TargetError::NotFound("Monster".to_string()));
     }
     fn s(p: &Path) -> String {
@@ -249,7 +304,7 @@ mod tests {
         let config = tracked_config(&[&anime, &re]);
 
         assert_eq!(
-            resolve_positional(&config, "Monster", None),
+            resolve_positional(&config, &State::default(), "Monster", None),
             Ok(Resolved::Series(s(&anime)))
         );
     }
@@ -264,7 +319,7 @@ mod tests {
         let config = tracked_config(&[&anime, &re]);
 
         assert_eq!(
-            resolve_positional(&config, "re", None),
+            resolve_positional(&config, &State::default(), "re", None),
             Ok(Resolved::Root(s(&re)))
         );
     }
@@ -277,7 +332,7 @@ mod tests {
         let config = tracked_config(&[&anime]);
 
         assert_eq!(
-            resolve_positional(&config, "nope", None),
+            resolve_positional(&config, &State::default(), "nope", None),
             Err(PositionalError::NotFound("nope".to_string()))
         );
     }
@@ -292,7 +347,7 @@ mod tests {
         let config = tracked_config(&[&anime, &re]);
 
         assert_eq!(
-            resolve_positional(&config, "re", None),
+            resolve_positional(&config, &State::default(), "re", None),
             Err(PositionalError::Collision {
                 name: "re".to_string(),
                 series_roots: vec![s(&anime)],
@@ -311,7 +366,7 @@ mod tests {
         let config = tracked_config(&[&a, &b]);
 
         assert_eq!(
-            resolve_positional(&config, "re", None),
+            resolve_positional(&config, &State::default(), "re", None),
             Err(PositionalError::Collision {
                 name: "re".to_string(),
                 series_roots: vec![s(&a), s(&b)],
@@ -330,7 +385,7 @@ mod tests {
         let config = tracked_config(&[&a, &b]);
 
         assert_eq!(
-            resolve_positional(&config, "Monster", None),
+            resolve_positional(&config, &State::default(), "Monster", None),
             Err(PositionalError::AmbiguousSeries {
                 series: "Monster".to_string(),
                 roots: vec![s(&a), s(&b)],
@@ -348,7 +403,7 @@ mod tests {
         let config = tracked_config(&[&a, &b]);
 
         assert_eq!(
-            resolve_positional(&config, "anime", None),
+            resolve_positional(&config, &State::default(), "anime", None),
             Err(PositionalError::AmbiguousRoot {
                 name: "anime".to_string(),
                 roots: vec![s(&a), s(&b)],
@@ -365,7 +420,7 @@ mod tests {
         config.roots.paths.push(format!("{}/", re.display()));
 
         assert_eq!(
-            resolve_positional(&config, "re", None),
+            resolve_positional(&config, &State::default(), "re", None),
             Ok(Resolved::Root(format!("{}/", re.display())))
         );
     }
@@ -378,7 +433,7 @@ mod tests {
         let config = tracked_config(&[&re]);
 
         assert_eq!(
-            resolve_positional(&config, "RE", None),
+            resolve_positional(&config, &State::default(), "RE", None),
             Err(PositionalError::NotFound("RE".to_string()))
         );
     }
@@ -391,7 +446,7 @@ mod tests {
         let config = tracked_config(&[&root]);
 
         assert_eq!(
-            resolve_positional(&config, "アニメ", None),
+            resolve_positional(&config, &State::default(), "アニメ", None),
             Ok(Resolved::Root(s(&root)))
         );
     }
@@ -406,11 +461,11 @@ mod tests {
         let config = tracked_config(&[&link]);
 
         assert_eq!(
-            resolve_positional(&config, "re", None),
+            resolve_positional(&config, &State::default(), "re", None),
             Ok(Resolved::Root(s(&link)))
         );
         assert_eq!(
-            resolve_positional(&config, "real", None),
+            resolve_positional(&config, &State::default(), "real", None),
             Err(PositionalError::NotFound("real".to_string()))
         );
     }
@@ -424,11 +479,11 @@ mod tests {
         config.roots.paths.push("~/re".to_string());
 
         assert_eq!(
-            resolve_positional(&config, "re", Some(home)),
+            resolve_positional(&config, &State::default(), "re", Some(home)),
             Ok(Resolved::Root("~/re".to_string()))
         );
         assert_eq!(
-            resolve_positional(&config, "Bleach", Some(home)),
+            resolve_positional(&config, &State::default(), "Bleach", Some(home)),
             Ok(Resolved::Series("~/re".to_string()))
         );
     }
@@ -443,11 +498,11 @@ mod tests {
         let config = tracked_config(&[&anime, &rewatch]);
 
         assert_eq!(
-            resolve_positional(&config, "rewatch", None),
+            resolve_positional(&config, &State::default(), "rewatch", None),
             Ok(Resolved::Root(s(&rewatch)))
         );
         assert_eq!(
-            resolve_positional(&config, "Monster", None),
+            resolve_positional(&config, &State::default(), "Monster", None),
             Ok(Resolved::Series(s(&anime)))
         );
     }
@@ -461,7 +516,7 @@ mod tests {
         let config = tracked_config(&[&anime, &rewatch]);
 
         assert_eq!(
-            resolve_series_root(&config, "rewatch", Some(&anime), None),
+            resolve_series_root(&config, &State::default(), "rewatch", Some(&anime), None),
             Err(TargetError::NotFound("rewatch".to_string()))
         );
     }
@@ -475,12 +530,161 @@ mod tests {
         let config = tracked_config(&[&anime, &rewatch]);
 
         assert_eq!(
-            resolve_series_root(&config, "rewatch", None, None),
+            resolve_series_root(&config, &State::default(), "rewatch", None, None),
             Err(TargetError::NotFound("rewatch".to_string()))
         );
         assert_eq!(
-            resolve_series_root(&config, "Bleach", None, None),
+            resolve_series_root(&config, &State::default(), "Bleach", None, None),
             Ok(s(&rewatch))
+        );
+    }
+
+    // --- ani-cli series ---
+
+    fn ani_config() -> Config {
+        let mut config = Config::default();
+        config.ani_cli.enabled = true;
+        config
+    }
+
+    fn ani_state(names: &[&str]) -> State {
+        State {
+            series: names
+                .iter()
+                .map(|name| crate::state::SeriesRecord {
+                    root: ani_cli::ROOT.to_string(),
+                    name: name.to_string(),
+                    status: crate::state::Status::InProgress,
+                    current_relative_path: String::new(),
+                    position_seconds: 300.0,
+                    episode_number: Some(9),
+                    updated_at: 1,
+                    mal_episode_awareness: None,
+                    season_number: None,
+                })
+                .collect(),
+            mal_links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_ani_cli_series_resolves_to_the_reserved_root_by_name_or_with_root_ani_cli() {
+        let config = ani_config();
+        let state = ani_state(&["Blue Lock"]);
+
+        assert_eq!(
+            resolve_series_root(&config, &state, "Blue Lock", None, None),
+            Ok(ani_cli::ROOT.to_string())
+        );
+        assert_eq!(
+            resolve_series_root(
+                &config,
+                &state,
+                "Blue Lock",
+                Some(Path::new("ani-cli")),
+                None
+            ),
+            Ok(ani_cli::ROOT.to_string())
+        );
+        assert_eq!(
+            resolve_series_root(&config, &state, "Other", Some(Path::new("ani-cli")), None),
+            Err(TargetError::NotFound("Other".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_ani_cli_series_does_not_resolve_while_the_source_is_off() {
+        let state = ani_state(&["Blue Lock"]);
+
+        assert_eq!(
+            resolve_series_root(&Config::default(), &state, "Blue Lock", None, None),
+            Err(TargetError::NotFound("Blue Lock".to_string()))
+        );
+        assert_eq!(
+            resolve_positional(&Config::default(), &state, "ani-cli", None),
+            Err(PositionalError::NotFound("ani-cli".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_title_shared_by_a_folder_series_and_an_ani_cli_show_is_ambiguous_until_root_is_given() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(root.join("Blue Lock")).unwrap();
+        let mut config = tracked_config(&[&root]);
+        config.ani_cli.enabled = true;
+        let state = ani_state(&["Blue Lock"]);
+        let stored = root.to_string_lossy().into_owned();
+
+        assert_eq!(
+            resolve_series_root(&config, &state, "Blue Lock", None, None),
+            Err(TargetError::Ambiguous {
+                series: "Blue Lock".to_string(),
+                roots: vec![stored.clone(), ani_cli::ROOT.to_string()],
+            })
+        );
+        assert_eq!(
+            resolve_series_root(&config, &state, "Blue Lock", Some(&root), None),
+            Ok(stored)
+        );
+        assert_eq!(
+            resolve_series_root(
+                &config,
+                &state,
+                "Blue Lock",
+                Some(Path::new("ani-cli")),
+                None
+            ),
+            Ok(ani_cli::ROOT.to_string())
+        );
+    }
+
+    #[test]
+    fn positional_resolves_an_ani_cli_title_as_a_series_and_the_word_ani_cli_as_a_root() {
+        let config = ani_config();
+        let state = ani_state(&["Blue Lock"]);
+
+        assert_eq!(
+            resolve_positional(&config, &state, "Blue Lock", None),
+            Ok(Resolved::Series(ani_cli::ROOT.to_string()))
+        );
+        assert_eq!(
+            resolve_positional(&config, &state, "ani-cli", None),
+            Ok(Resolved::Root(ani_cli::ROOT.to_string()))
+        );
+    }
+
+    #[test]
+    fn positional_ani_cli_word_that_is_also_a_folder_root_name_is_an_ambiguous_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("ani-cli");
+        fs::create_dir_all(&root).unwrap();
+        let mut config = tracked_config(&[&root]);
+        config.ani_cli.enabled = true;
+
+        assert_eq!(
+            resolve_positional(&config, &State::default(), "ani-cli", None),
+            Err(PositionalError::AmbiguousRoot {
+                name: "ani-cli".to_string(),
+                roots: vec![
+                    root.to_string_lossy().into_owned(),
+                    ani_cli::ROOT.to_string()
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn scope_root_maps_the_ani_cli_word_only_when_enabled() {
+        let state_root = Path::new("ani-cli");
+
+        assert_eq!(
+            resolve_scope_root(&ani_config(), state_root, None),
+            Some(ani_cli::ROOT.to_string())
+        );
+        assert_eq!(
+            resolve_scope_root(&Config::default(), state_root, None),
+            None
         );
     }
 }

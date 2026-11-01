@@ -125,10 +125,6 @@ fn dispatch(
     }
 }
 
-/// The `add` argument that enables the ani-cli source; a folder of that name
-/// is added as `./ani-cli`.
-const ANI_CLI_SOURCE: &str = "ani-cli";
-
 /// `tsuzuki add <path>...`: validates and persists new tracked roots. A
 /// failing path doesn't stop the rest; config is written once, and the
 /// per-path lines are printed only after that write succeeds.
@@ -137,13 +133,13 @@ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> Ex
     let mut changed = false;
     let mut failed = false;
     for path in paths {
-        if path == Path::new(ANI_CLI_SOURCE) {
+        if path == Path::new(ani_cli::SOURCE_ARG) {
             if config.ani_cli.enabled {
-                lines.push((ANI_CLI_SOURCE.to_string(), "already tracked"));
+                lines.push((ani_cli::SOURCE_ARG.to_string(), "already tracked"));
             } else {
                 config.ani_cli.enabled = true;
                 changed = true;
-                lines.push((ANI_CLI_SOURCE.to_string(), "added"));
+                lines.push((ani_cli::SOURCE_ARG.to_string(), "added"));
             }
             continue;
         }
@@ -289,10 +285,10 @@ fn sync_exclude_command(
     }
     for name in targets {
         let resolved = match root_arg {
-            Some(_) => target::resolve_series_root(config, name, root_arg, home)
+            Some(_) => target::resolve_series_root(config, &State::default(), name, root_arg, home)
                 .map(target::Resolved::Series)
                 .map_err(|e| print_target_error(&e, COMMAND)),
-            None => target::resolve_positional(config, name, home)
+            None => target::resolve_positional(config, &State::default(), name, home)
                 .map_err(|e| print_positional_error(&e, COMMAND)),
         };
         match resolved {
@@ -537,6 +533,9 @@ fn play_series(
     home: Option<&Path>,
     verb: &str,
 ) -> ExitCode {
+    if root == ani_cli::ROOT {
+        return fail("resuming ani-cli series isn't supported yet");
+    }
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
         Some(target) => match launch::resume_playback(mpv, &target.file, target.position_seconds) {
@@ -568,7 +567,7 @@ fn explicit_play(
     command_name: &str,
     verb: &str,
 ) -> ExitCode {
-    match target::resolve_series_root(config, series, root_arg, home) {
+    match target::resolve_series_root(config, state, series, root_arg, home) {
         Ok(root) => play_series(config, state, mpv, &root, series, home, verb),
         Err(e) => print_target_error(&e, command_name),
     }
@@ -600,14 +599,14 @@ fn resolve_scope(
             command_name,
             verb,
         )),
-        (Some(arg), None) => match target::resolve_positional(config, &arg, home) {
+        (Some(arg), None) => match target::resolve_positional(config, state, &arg, home) {
             Ok(target::Resolved::Series(root)) => {
                 ControlFlow::Break(play_series(config, state, mpv, &root, &arg, home, verb))
             }
             Ok(target::Resolved::Root(root)) => ControlFlow::Continue(Some(root)),
             Err(e) => ControlFlow::Break(print_positional_error(&e, command_name)),
         },
-        (None, Some(root_arg)) => match state::resolve_root_arg(config, root_arg, home) {
+        (None, Some(root_arg)) => match target::resolve_scope_root(config, root_arg, home) {
             Some(root) => ControlFlow::Continue(Some(root)),
             None => ControlFlow::Break(print_target_error(
                 &target::TargetError::RootNotFound(root_arg.to_string_lossy().into_owned()),
@@ -680,6 +679,11 @@ fn print_ambiguous(subject: &str, command_name: &str, roots: &[String]) -> ExitC
         roots.len()
     );
     for r in roots {
+        let r = if r == ani_cli::ROOT {
+            ani_cli::SOURCE_ARG
+        } else {
+            r
+        };
         eprintln!("  → tsuzuki {command_name} \"{subject}\" --root {r}");
     }
     ExitCode::FAILURE
@@ -856,7 +860,7 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
                     .filter(|_| o.status != Some(Status::Completed))
                     .map(|label| format!(" — {label}"))
                     .unwrap_or_default();
-                format!("  {}{ep} ({} files)", o.name, o.file_count)
+                format!("  {}{ep} ({})", o.name, o.size_label())
             })
             .collect();
         if multi_route {
@@ -1036,7 +1040,7 @@ fn transition_series(
     let mut changed = false;
     let mut failed = false;
     for name in series {
-        let root = match target::resolve_series_root(config, name, root_arg, home) {
+        let root = match target::resolve_series_root(config, &state, name, root_arg, home) {
             Ok(r) => r,
             Err(e) => {
                 print_target_error(&e, transition.command_name);
@@ -1357,7 +1361,7 @@ fn sync_link_command(
     };
 
     // Resolve locally first so a bad or ambiguous name fails with no network call.
-    let root = match target::resolve_series_root(config, series, root_arg, home) {
+    let root = match target::resolve_series_root(config, &state, series, root_arg, home) {
         Ok(r) => r,
         Err(e) => return print_target_error(&e, "sync link"),
     };

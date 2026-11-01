@@ -148,3 +148,85 @@ fn ani_cli_history_path_follows_ani_cli_hist_dir() {
         Some("\"Blue Lock\"")
     );
 }
+
+fn watched_blue_lock(home: &Path) {
+    assert!(run(home, &["add", "ani-cli"]).status.success());
+    write_history(home, "9\tblue-lock-964\tBlue Lock\n");
+    write_stream(home, "a1", "Blue Lock Episode 9", 300.0, "quit");
+}
+
+fn stdout_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn list_and_status_show_an_ani_cli_show_with_its_episode_and_position() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+
+    assert_eq!(
+        stdout_of(&run(home, &["status"])),
+        "Blue Lock — ep. 9 (05:00)\n"
+    );
+    assert_eq!(
+        stdout_of(&run(home, &["list"])),
+        "In progress:\n  Blue Lock — ep. 9 (ani-cli)\n"
+    );
+}
+
+#[test]
+fn start_never_offers_an_ani_cli_show_even_once_paused() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(run(home, &["pause", "Blue Lock"]).status.success());
+
+    let output = run(home, &["start"]);
+
+    assert!(!stdout_of(&output).contains("Blue Lock"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Blue Lock"));
+}
+
+#[test]
+fn pause_and_drop_an_ani_cli_show_keep_its_stored_position() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+
+    let paused = run(home, &["pause", "Blue Lock"]);
+    assert!(paused.status.success());
+    assert_eq!(stdout_of(&paused), "✓ \"Blue Lock\" — paused\n");
+    let state = state_text(home);
+    assert_eq!(state_field(&state, "status").as_deref(), Some("\"paused\""));
+    assert_eq!(
+        state_field(&state, "position_seconds").as_deref(),
+        Some("300.0")
+    );
+
+    let dropped = run(home, &["drop", "Blue Lock", "--root", "ani-cli"]);
+    assert!(dropped.status.success());
+    let state = state_text(home);
+    assert_eq!(
+        state_field(&state, "status").as_deref(),
+        Some("\"dropped\"")
+    );
+    assert_eq!(
+        state_field(&state, "position_seconds").as_deref(),
+        Some("300.0")
+    );
+}
+
+#[test]
+fn pausing_an_unknown_ani_cli_show_fails_without_writing_state() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(run(home, &["status"]).status.success());
+    let before = state_text(home);
+
+    let output = run(home, &["pause", "Nope", "--root", "ani-cli"]);
+
+    assert!(!output.status.success());
+    assert_eq!(state_text(home), before);
+}

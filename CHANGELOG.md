@@ -8,6 +8,7 @@ All notable changes to Tsuzuki are documented here.
 - The mpv script now logs the title of streams; update it with `tsuzuki doctor --fix`.
 - `tsuzuki add ani-cli` turns on the ani-cli source (new `[ani_cli]` config).
 - Streams watched through ani-cli in mpv are recorded as series once `ani-cli` is added.
+- `list`, `status`, `pause` and `drop` work on ani-cli series (`--root ani-cli` picks one when a folder series shares the title); `start` never offers them.
 
 ## [v0.1.6]
 

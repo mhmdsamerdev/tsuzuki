@@ -2,10 +2,12 @@
 //! picker.
 //!
 //! Built from a live directory walk of every tracked root cross-referenced
-//! with `state.toml`, so a deleted series never appears.
+//! with `state.toml`, so a deleted series never appears. ani-cli series have
+//! no folder and come from their records alone.
 
 use std::path::Path;
 
+use crate::ani_cli;
 use crate::anitomy;
 use crate::config::Config;
 use crate::exclude;
@@ -31,6 +33,16 @@ impl SeriesOverview {
     pub fn episode_label(&self) -> Option<String> {
         self.episode_number
             .map(|ep| anitomy::episode_label(self.season_number, ep))
+    }
+
+    /// What follows the name in a listing: the file count, or `ani-cli` for a
+    /// series that has no files.
+    pub fn size_label(&self) -> String {
+        if self.root == ani_cli::ROOT {
+            ani_cli::SOURCE_ARG.to_string()
+        } else {
+            format!("{} files", self.file_count)
+        }
     }
 }
 
@@ -64,6 +76,12 @@ pub fn all_series(config: &Config, state: &State, home: Option<&Path>) -> Vec<Se
 
             let record = state.find(root, &s.name);
             overviews.push(overview_for(root, &s.name, record, file_count));
+        }
+    }
+
+    if config.ani_cli.enabled {
+        for record in state.series.iter().filter(|r| r.root == ani_cli::ROOT) {
+            overviews.push(overview_for(ani_cli::ROOT, &record.name, Some(record), 0));
         }
     }
 
@@ -145,7 +163,12 @@ pub fn is_multi_route<'a>(routes: impl IntoIterator<Item = &'a str>) -> bool {
 /// own folder name. Distinct routes that share a folder name keep their
 /// full stored string instead, so two rows never look the same.
 pub fn route_display(routes: &[&str]) -> Vec<String> {
-    let short = |r: &str| crate::roots::root_folder_name(r).unwrap_or_else(|| r.to_string());
+    let short = |r: &str| {
+        if r == ani_cli::ROOT {
+            return ani_cli::SOURCE_ARG.to_string();
+        }
+        crate::roots::root_folder_name(r).unwrap_or_else(|| r.to_string())
+    };
     routes
         .iter()
         .map(|r| {
@@ -180,11 +203,12 @@ pub fn start_display_word(status: Option<Status>) -> &'static str {
     }
 }
 
-/// Series offered by `start`: everything not `in_progress`.
+/// Series offered by `start`: everything not `in_progress`. ani-cli shows are
+/// never started from here; they appear only once watched in ani-cli.
 pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
     overviews
         .iter()
-        .filter(|o| o.status != Some(Status::InProgress))
+        .filter(|o| o.status != Some(Status::InProgress) && o.root != ani_cli::ROOT)
         .cloned()
         .collect()
 }
@@ -572,5 +596,103 @@ mod tests {
     fn route_display_falls_back_to_the_stored_string_without_a_folder_name() {
         assert_eq!(route_display(&["/", "/mnt/Shows"]), vec!["/", "Shows"]);
         assert_eq!(route_display(&[]), Vec::<String>::new());
+    }
+
+    // --- ani-cli series ---
+
+    fn ani_record(name: &str, status: Status) -> SeriesRecord {
+        SeriesRecord {
+            root: ani_cli::ROOT.to_string(),
+            name: name.to_string(),
+            status,
+            current_relative_path: String::new(),
+            position_seconds: 300.0,
+            episode_number: Some(9),
+            updated_at: 1,
+            mal_episode_awareness: None,
+            season_number: None,
+        }
+    }
+
+    fn ani_overview(name: &str, status: Status) -> SeriesOverview {
+        SeriesOverview {
+            root: ani_cli::ROOT.to_string(),
+            name: name.to_string(),
+            status: Some(status),
+            episode_number: Some(9),
+            season_number: None,
+            position_seconds: Some(300.0),
+            file_count: 0,
+        }
+    }
+
+    #[test]
+    fn all_series_lists_ani_cli_records_only_when_the_source_is_enabled() {
+        let state = State {
+            series: vec![ani_record("Blue Lock", Status::Paused)],
+            mal_links: Vec::new(),
+        };
+        let mut config = Config::default();
+
+        assert_eq!(all_series(&config, &state, None), Vec::new());
+
+        config.ani_cli.enabled = true;
+        assert_eq!(
+            all_series(&config, &state, None),
+            vec![ani_overview("Blue Lock", Status::Paused)]
+        );
+    }
+
+    #[test]
+    fn all_series_never_invents_a_never_started_ani_cli_show() {
+        let mut config = Config::default();
+        config.ani_cli.enabled = true;
+
+        assert_eq!(all_series(&config, &State::default(), None), Vec::new());
+    }
+
+    #[test]
+    fn eligible_for_start_never_offers_an_ani_cli_show_at_any_status() {
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ] {
+            assert_eq!(
+                eligible_for_start(&[ani_overview("Blue Lock", status)]),
+                Vec::new(),
+                "{status:?}"
+            );
+        }
+        let folder = overview("Monster", Some(Status::Paused));
+        assert_eq!(
+            eligible_for_start(&[ani_overview("Blue Lock", Status::Paused), folder.clone()]),
+            vec![folder]
+        );
+    }
+
+    #[test]
+    fn size_label_is_the_file_count_for_folders_and_ani_cli_for_streams() {
+        let mut folder = overview("Monster", None);
+        folder.file_count = 74;
+
+        assert_eq!(folder.size_label(), "74 files");
+        assert_eq!(
+            ani_overview("Blue Lock", Status::Paused).size_label(),
+            "ani-cli"
+        );
+    }
+
+    #[test]
+    fn route_display_names_the_ani_cli_source_and_keeps_full_strings_on_a_folder_clash() {
+        assert_eq!(
+            route_display(&[ani_cli::ROOT, "~/Anime"]),
+            vec!["ani-cli".to_string(), "Anime".to_string()]
+        );
+        assert_eq!(
+            route_display(&[ani_cli::ROOT, "~/ani-cli"]),
+            vec!["ani-cli://".to_string(), "~/ani-cli".to_string()]
+        );
     }
 }
