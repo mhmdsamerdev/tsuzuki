@@ -109,9 +109,14 @@ fn dispatch(
                 mal_id,
                 root,
             }) => sync_link_command(&series, mal_id, root.as_deref(), config, state_path, home),
-            Some(SyncCommand::Exclude { targets, root }) => {
-                sync_exclude_command(&targets, root.as_deref(), config, config_path, home)
-            }
+            Some(SyncCommand::Exclude { targets, root }) => sync_exclude_command(
+                &targets,
+                root.as_deref(),
+                config,
+                config_path,
+                state_path,
+                home,
+            ),
         },
         Command::Config { action } => match action {
             None => config_show_command(config, config_path),
@@ -247,9 +252,24 @@ fn sync_exclude_command(
     root_arg: Option<&Path>,
     config: &mut Config,
     config_path: &Path,
+    state_path: &Path,
     home: Option<&Path>,
 ) -> ExitCode {
     const COMMAND: &str = "sync exclude";
+    // ani-cli shows exist only in state, so naming one needs it.
+    let state = if config.ani_cli.enabled {
+        match state::read(state_path) {
+            Ok(state) => state,
+            Err(e) => {
+                return fail(&format!(
+                    "could not read state at {}: {e}",
+                    state_path.display()
+                ));
+            }
+        }
+    } else {
+        State::default()
+    };
     let mut lines = Vec::new();
     let mut changed = false;
     let mut failed = false;
@@ -264,7 +284,7 @@ fn sync_exclude_command(
         lines.push((subject, result));
     };
     if targets.is_empty() {
-        match root_arg.map(|r| state::resolve_root_arg(config, r, home)) {
+        match root_arg.map(|r| target::resolve_scope_root(config, r, home)) {
             Some(Some(root)) => record(
                 config,
                 format!("{} (root)", scope_label(&root)),
@@ -285,10 +305,10 @@ fn sync_exclude_command(
     }
     for name in targets {
         let resolved = match root_arg {
-            Some(_) => target::resolve_series_root(config, &State::default(), name, root_arg, home)
+            Some(_) => target::resolve_series_root(config, &state, name, root_arg, home)
                 .map(target::Resolved::Series)
                 .map_err(|e| print_target_error(&e, COMMAND)),
-            None => target::resolve_positional(config, &State::default(), name, home)
+            None => target::resolve_positional(config, &state, name, home)
                 .map_err(|e| print_positional_error(&e, COMMAND)),
         };
         match resolved {

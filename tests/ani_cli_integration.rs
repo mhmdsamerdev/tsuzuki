@@ -492,3 +492,63 @@ fn a_saved_mal_total_completes_an_ani_cli_show_once_its_last_episode_is_finished
     );
     assert_eq!(state_field(&state, "episode_number").as_deref(), Some("12"));
 }
+
+fn config_text(home: &Path) -> String {
+    fs::read_to_string(home.join(".config/tsuzuki/config.toml")).unwrap()
+}
+
+#[test]
+fn sync_exclude_names_an_ani_cli_show_or_the_whole_source() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(run(home, &["status"]).status.success());
+
+    let show = run(home, &["sync", "exclude", "Blue Lock"]);
+    assert!(show.status.success());
+    assert_eq!(stdout_of(&show), "✓ \"Blue Lock\" — excluded from sync\n");
+    let source = run(home, &["sync", "exclude", "--root", "ani-cli"]);
+    assert!(source.status.success());
+    assert_eq!(
+        stdout_of(&source),
+        "✓ ani-cli (root) — excluded from sync\n"
+    );
+
+    let config = config_text(home);
+    assert!(
+        config.contains("root = \"ani-cli://\"\nseries = \"Blue Lock\""),
+        "{config}"
+    );
+    assert_eq!(config.matches("[[sync_exclusions]]").count(), 2, "{config}");
+}
+
+#[test]
+fn sync_exclude_of_an_unknown_ani_cli_show_fails_and_leaves_config_untouched() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(run(home, &["status"]).status.success());
+    let before = config_text(home);
+
+    let output = run(home, &["sync", "exclude", "Nope", "--root", "ani-cli"]);
+
+    assert!(!output.status.success());
+    assert_eq!(config_text(home), before);
+}
+
+#[test]
+fn sync_with_every_ani_cli_show_excluded_has_nothing_to_do_and_needs_no_network() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_blue_lock(home);
+    assert!(
+        run(home, &["sync", "exclude", "--root", "ani-cli"])
+            .status
+            .success()
+    );
+
+    let output = run(home, &["sync"]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout_of(&output), "Nothing eligible to sync.\n");
+}

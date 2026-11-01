@@ -11,6 +11,7 @@ All notable changes to Tsuzuki are documented here.
 - `list`, `status`, `pause` and `drop` work on ani-cli series (`--root ani-cli` picks one when a folder series shares the title); `start` never offers them.
 - `tsuzuki` resumes ani-cli series by running ani-cli on the saved episode and second, or the next episode once finished.
 - `sync` saves MAL's episode count; an ani-cli show becomes completed when its last episode is finished.
+- `sync`, `sync link` and `sync exclude` work on ani-cli series.
 
 ## [v0.1.6]
 

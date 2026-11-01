@@ -11,6 +11,7 @@ use std::time::Duration;
 use chrono::Local;
 use serde::Deserialize;
 
+use crate::ani_cli;
 use crate::anitomy;
 use crate::config::{Config, SyncExclusion};
 use crate::exclude;
@@ -529,6 +530,23 @@ pub fn local_effective_episode(record: &SeriesRecord) -> u32 {
     watched.max(record.mal_episode_awareness.unwrap_or(0))
 }
 
+/// An ani-cli show has no files to walk: when MAL has watched at least the
+/// cursor episode, the cursor moves to the episode after MAL's count, at 0.
+fn advance_ani_cli_cursor(record: &mut SeriesRecord, watched_episodes: u32) -> bool {
+    let Some(cursor) = record.episode_number else {
+        return false;
+    };
+    let next = watched_episodes.saturating_add(1);
+    if next <= cursor {
+        return false;
+    }
+    record.position_seconds = 0.0;
+    record.episode_number = Some(next);
+    record.season_number = None;
+    record.updated_at = now_unix();
+    true
+}
+
 /// Moves the local cursor to the first on-disk episode after
 /// `watched_episodes`, at position zero.
 ///
@@ -556,6 +574,10 @@ fn advance_local_cursor(
         Status::Dropped | Status::Completed
     ) {
         return false;
+    }
+
+    if root == ani_cli::ROOT {
+        return advance_ani_cli_cursor(&mut state.series[record_index], watched_episodes);
     }
 
     let expanded_root = expand_tilde(Path::new(root), home);
@@ -811,8 +833,9 @@ pub fn is_sync_excluded(config: &Config, root: &str, name: &str) -> bool {
 }
 
 /// Records eligible for a MAL merge: not paused or dropped, not sync-excluded,
-/// root still tracked, and series directory present. Completed records are
-/// included so they reach MAL.
+/// and either a folder series (root still tracked, directory present) or an
+/// ani-cli show while that source is on. Completed records are included so
+/// they reach MAL.
 pub fn eligible_targets(
     state: &State,
     config: &Config,
@@ -825,11 +848,15 @@ pub fn eligible_targets(
         .filter(|record| {
             !matches!(record.status, Status::Paused | Status::Dropped)
                 && !is_sync_excluded(config, &record.root, &record.name)
-                && config.roots.paths.contains(&record.root)
-                && is_series_dir(
-                    &expand_tilde(Path::new(&record.root), home).join(&record.name),
-                    &real_roots,
-                )
+                && if record.root == ani_cli::ROOT {
+                    config.ani_cli.enabled
+                } else {
+                    config.roots.paths.contains(&record.root)
+                        && is_series_dir(
+                            &expand_tilde(Path::new(&record.root), home).join(&record.name),
+                            &real_roots,
+                        )
+                }
         })
         .map(|record| (record.root.clone(), record.name.clone()))
         .collect()
@@ -3120,5 +3147,296 @@ mod tests {
 
             assert_eq!(state.series[0], expected, "{status:?}");
         }
+    }
+
+    // --- ani-cli series ---
+
+    fn ani_record(name: &str, status: Status, cursor: u32, position: f64) -> SeriesRecord {
+        SeriesRecord {
+            root: ani_cli::ROOT.to_string(),
+            name: name.to_string(),
+            current_relative_path: String::new(),
+            ..record_with(status, cursor, position)
+        }
+    }
+
+    fn ani_config(enabled: bool) -> Config {
+        let mut config = Config::default();
+        config.ani_cli.enabled = enabled;
+        config
+    }
+
+    #[test]
+    fn eligible_targets_for_ani_cli_follow_the_status_table_only_while_the_source_is_on() {
+        for status in all_statuses() {
+            for position in IRRELEVANT_POSITIONS {
+                let state = State {
+                    series: vec![ani_record("Blue Lock", status, 5, position)],
+                    mal_links: Vec::new(),
+                };
+                let on = match status {
+                    Status::InProgress | Status::Completed => {
+                        vec![(ani_cli::ROOT.to_string(), "Blue Lock".to_string())]
+                    }
+                    Status::Paused | Status::Dropped => Vec::new(),
+                };
+
+                assert_eq!(
+                    eligible_targets(&state, &ani_config(true), None),
+                    on,
+                    "{status:?} at {position}"
+                );
+                assert_eq!(
+                    eligible_targets(&state, &ani_config(false), None),
+                    Vec::<(String, String)>::new(),
+                    "{status:?} at {position} while off"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eligible_targets_for_ani_cli_honour_sync_exclusions_by_show_or_whole_source() {
+        let state = State {
+            series: vec![
+                ani_record("Blue Lock", Status::InProgress, 5, 0.0),
+                ani_record("Chained Soldier", Status::InProgress, 5, 0.0),
+            ],
+            mal_links: Vec::new(),
+        };
+
+        let mut by_show = ani_config(true);
+        add_sync_exclusion(&mut by_show, ani_cli::ROOT, Some("Blue Lock"));
+        assert_eq!(
+            eligible_targets(&state, &by_show, None),
+            vec![(ani_cli::ROOT.to_string(), "Chained Soldier".to_string())]
+        );
+
+        let mut whole = ani_config(true);
+        add_sync_exclusion(&mut whole, ani_cli::ROOT, None);
+        assert_eq!(
+            eligible_targets(&state, &whole, None),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn an_ani_cli_show_is_eligible_without_any_directory_beside_a_folder_series_of_the_same_name() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Anime");
+        fs::create_dir_all(root.join("Blue Lock")).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let mut config = ani_config(true);
+        config.roots.paths.push(root_s.clone());
+        let state = State {
+            series: vec![
+                SeriesRecord {
+                    root: root_s.clone(),
+                    name: "Blue Lock".to_string(),
+                    ..record_with(Status::InProgress, 3, 0.0)
+                },
+                ani_record("Blue Lock", Status::InProgress, 5, 0.0),
+            ],
+            mal_links: Vec::new(),
+        };
+
+        let mut got = eligible_targets(&state, &config, Some(dir.path()));
+        got.sort();
+
+        let mut want = vec![
+            (root_s, "Blue Lock".to_string()),
+            (ani_cli::ROOT.to_string(), "Blue Lock".to_string()),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn advance_local_cursor_for_ani_cli_moves_to_the_episode_after_mal_only_when_mal_is_ahead() {
+        // Cursor 5 means 4 watched. (MAL's count, moved?, resulting cursor)
+        for (watched, moved, cursor) in [(3, false, 5), (4, false, 5), (5, true, 6), (9, true, 10)]
+        {
+            let mut state = State {
+                series: vec![ani_record("Blue Lock", Status::InProgress, 5, 700.0)],
+                mal_links: Vec::new(),
+            };
+
+            let did = advance_local_cursor(
+                &ani_config(true),
+                &mut state,
+                ani_cli::ROOT,
+                "Blue Lock",
+                watched,
+                None,
+            );
+
+            assert_eq!(did, moved, "watched {watched}");
+            let record = &state.series[0];
+            assert_eq!(record.episode_number, Some(cursor), "watched {watched}");
+            assert_eq!(
+                record.position_seconds,
+                if moved { 0.0 } else { 700.0 },
+                "watched {watched}"
+            );
+            assert_eq!(record.updated_at > 1, moved, "watched {watched}");
+        }
+    }
+
+    #[test]
+    fn advance_local_cursor_for_ani_cli_leaves_dropped_completed_and_episodeless_records_alone() {
+        for status in [Status::Dropped, Status::Completed] {
+            let mut state = State {
+                series: vec![ani_record("Blue Lock", status, 5, 700.0)],
+                mal_links: Vec::new(),
+            };
+            let before = state.clone();
+
+            assert!(!advance_local_cursor(
+                &ani_config(true),
+                &mut state,
+                ani_cli::ROOT,
+                "Blue Lock",
+                20,
+                None
+            ));
+            assert_eq!(state, before, "{status:?}");
+        }
+        let mut record = ani_record("Blue Lock", Status::InProgress, 5, 0.0);
+        record.episode_number = None;
+        let mut state = State {
+            series: vec![record],
+            mal_links: Vec::new(),
+        };
+        let before = state.clone();
+
+        assert!(!advance_local_cursor(
+            &ani_config(true),
+            &mut state,
+            ani_cli::ROOT,
+            "Blue Lock",
+            20,
+            None
+        ));
+        assert_eq!(state, before);
+    }
+
+    fn list_with(title: &str, watched: u32) -> String {
+        format!(
+            r#"{{"data":[{{"node":{{"id":7,"title":"{title}","num_episodes":24,"alternative_titles":{{"en":"","ja":"","synonyms":[]}}}},"list_status":{{"status":"watching","num_episodes_watched":{watched}}}}}]}}"#
+        )
+    }
+
+    #[test]
+    fn run_sync_links_an_ani_cli_show_by_exact_title_and_pushes_the_watched_count() {
+        let client = FakeClient::new();
+        client.push_list_response(200, &list_with("Blue Lock", 3));
+        let mut state = State {
+            series: vec![ani_record("Blue Lock", Status::InProgress, 9, 100.0)],
+            mal_links: Vec::new(),
+        };
+
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &[(ani_cli::ROOT.to_string(), "Blue Lock".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 7,
+                action: MergeAction::Push(8)
+            }
+        );
+        assert_eq!(
+            state.mal_links,
+            vec![MalLink {
+                root: ani_cli::ROOT.to_string(),
+                name: "Blue Lock".to_string(),
+                mal_id: 7,
+                total_episodes: Some(24),
+            }]
+        );
+        let patches = client.patch_calls.borrow();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(pushed_count(&patches[0].1), Some(8));
+    }
+
+    #[test]
+    fn run_sync_never_writes_a_lower_episode_for_an_ani_cli_show_and_pulls_the_cursor() {
+        let client = FakeClient::new();
+        client.push_list_response(200, &list_with("Blue Lock", 18));
+        let mut state = State {
+            series: vec![ani_record("Blue Lock", Status::InProgress, 3, 100.0)],
+            mal_links: Vec::new(),
+        };
+        let targets = [(ani_cli::ROOT.to_string(), "Blue Lock".to_string())];
+
+        let outcomes = run_sync(
+            &client,
+            "token",
+            &mut state,
+            &targets,
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+        );
+        let advanced = apply_synced_progress(&ani_config(true), &mut state, &outcomes, None);
+
+        assert_eq!(
+            outcomes[0].kind,
+            OutcomeKind::Merged {
+                mal_id: 7,
+                action: MergeAction::Pull(18)
+            }
+        );
+        assert!(
+            client.patch_calls.borrow().is_empty(),
+            "nothing may be written"
+        );
+        assert_eq!(
+            advanced,
+            vec![(ani_cli::ROOT.to_string(), "Blue Lock".to_string(), 18)]
+        );
+        assert_eq!(state.series[0].episode_number, Some(19));
+        assert_eq!(state.series[0].position_seconds, 0.0);
+    }
+
+    #[test]
+    fn run_sync_pushes_the_full_count_and_completes_the_mal_entry_for_a_completed_ani_cli_show() {
+        let client = FakeClient::new();
+        client.push_status_response(
+            200,
+            r#"{"id":7,"title":"T","num_episodes":12,"my_list_status":{"status":"watching","num_episodes_watched":5}}"#,
+        );
+        let mut state = State {
+            series: vec![ani_record("Blue Lock", Status::Completed, 12, 0.0)],
+            mal_links: vec![MalLink {
+                root: ani_cli::ROOT.to_string(),
+                name: "Blue Lock".to_string(),
+                mal_id: 7,
+                total_episodes: None,
+            }],
+        };
+
+        run_sync_on_date(
+            &client,
+            "token",
+            &mut state,
+            &[(ani_cli::ROOT.to_string(), "Blue Lock".to_string())],
+            Duration::ZERO,
+            TEST_FUZZY_MATCH_THRESHOLD,
+            "2026-09-23",
+        );
+
+        assert_eq!(
+            *client.patch_calls.borrow(),
+            vec![(
+                "https://api.myanimelist.net/v2/anime/7/my_list_status".to_string(),
+                "num_watched_episodes=12&status=completed&finish_date=2026-09-23".to_string()
+            )]
+        );
     }
 }
