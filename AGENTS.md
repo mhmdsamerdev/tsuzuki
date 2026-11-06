@@ -22,6 +22,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - MAL sync only ever writes a higher episode number, never a lower one, even on retries or partial failures.
 - For local files, natural sort is the only authority for episode order. Anitomy only labels identity for MAL sync.
 - Absence of an mpv-script log entry proves nothing. Only a real position or a `Completed` reading moves state.
+- MAL sync is completely optional. No feature may rely on it alone.
 
 ## Engineering choices
 - Local-first. No network at startup; only `sync` and `update` touch it, through `crate::http`. No async runtime.
@@ -37,7 +38,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - A series is the depth-1 directory under a tracked root. Its name is the directory name verbatim. Odd layouts become their own root.
 - Thresholds are flat seconds (`resume_seconds`, `completion_remaining_seconds`), never percentages. Every tunable has a config field.
 - A moved or deleted series folder is a new series. The old record stays inert until `doctor --fix --forget-orphans`. No rename detection.
-- `Completed` is set only by reconcile when the final episode finishes; no command sets it, `pause`/`drop` reject it. Paused and dropped series are excluded from sync. `pause`/`drop` never zero the stored position.
+- `Completed` is set only by reconcile when the final episode finishes, or for ani-cli shows by `resume` when ani-cli reports `Invalid episode!` (see "ani-cli source"); `pause`/`drop` reject it. Paused and dropped series are excluded from sync. `pause`/`drop` never zero the stored position.
 - Every state-touching command reconciles with mpv through the one shared function, then acts.
 - Series-ness is decided only by `series::is_series_dir`. No ad-hoc `join(..).is_dir()` for series.
 - Symlinks are followed everywhere, with cycle protection. Roots are stored as the user typed them.
@@ -48,7 +49,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Tsuzuki never starts, lists or imports an ani-cli show. A record exists only because an mpv-script log entry (stream URL, title ending ` Episode <int>`) exactly matched a title in ani-cli's history. History is read-only and never evidence of watching.
 - Series = show title under the reserved root `ani-cli://`. The episode number comes from the logged title: no ordering, no Anitomy.
 - Resume runs ani-cli in the foreground via its search path (`-e`, never `-c`), with `ANI_CLI_PLAYER` from `mpv::resolve` and `--start` via `ANI_CLI_PLAYER_FLAGS`. Unfinished: same episode and position. Finished: the next episode. Tsuzuki never writes ani-cli's history and makes no network requests itself.
-- `Completed` only when the finished episode equals the MAL `total_episodes` saved by `sync`. Unknown or 0 never completes. A `Completed` show isn't offered for resume; new playback reactivates it, as for folders.
+- `Completed` when the finished episode equals the MAL `total_episodes` saved by `sync` (unknown or 0 never completes), or when ani-cli itself prints `Invalid episode!` for the stored episode at resume and the cursor sits right after a finished episode (position 0). The record then keeps the last finished episode. Never rely on sync alone. A `Completed` show isn't offered for resume; new playback reactivates it, as for folders.
 - A record whose title leaves ani-cli's history is inert until `doctor --fix --forget-orphans`.
 - Only mpv is tracked. Other players are out of scope.
 

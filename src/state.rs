@@ -23,8 +23,9 @@ use crate::roots::normalize;
 pub enum Status {
     InProgress,
     Paused,
-    /// Reached only by reconcile confirming the series' final episode
-    /// finished; no command sets it.
+    /// Reached by reconcile confirming the series' final episode finished,
+    /// or by resuming an ani-cli show whose next episode ani-cli reports
+    /// invalid; no other command sets it.
     Completed,
     Dropped,
 }

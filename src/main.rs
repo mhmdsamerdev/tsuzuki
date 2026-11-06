@@ -544,9 +544,11 @@ fn format_timestamp(seconds: f64) -> String {
 
 /// Launches `name` under `root` and prints a confirmation line. Every path
 /// that plays a series ends here.
+#[allow(clippy::too_many_arguments)]
 fn play_series(
     config: &Config,
     state: &State,
+    state_path: &Path,
     mpv: &launch::Launch,
     root: &str,
     name: &str,
@@ -554,7 +556,7 @@ fn play_series(
     verb: &str,
 ) -> ExitCode {
     if root == ani_cli::ROOT {
-        return play_ani_cli(config, state, mpv, name, home, verb);
+        return play_ani_cli(config, state, state_path, mpv, name, home, verb);
     }
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
@@ -577,10 +579,13 @@ fn play_series(
 /// Resumes an ani-cli show: the stored episode at the stored position, played
 /// by ani-cli itself in the foreground. Refuses before launching when the
 /// title can't be told in ani-cli's history, and warns afterwards if ani-cli
-/// played something else or failed.
+/// played something else or failed. When ani-cli says the episode isn't in
+/// its list, a cursor right after a finished episode completes the show.
+#[allow(clippy::too_many_arguments)]
 fn play_ani_cli(
     config: &Config,
     state: &State,
+    state_path: &Path,
     mpv: &launch::Launch,
     name: &str,
     home: Option<&Path>,
@@ -629,12 +634,27 @@ fn play_ani_cli(
         record.position_seconds,
         std::env::var("ANI_CLI_PLAYER_FLAGS").ok().as_deref(),
     );
-    match launch::run_foreground(command) {
-        Ok(status) if status.success() => {}
-        Ok(_) => {
-            eprintln!(
-                "⚠ ani-cli could not play episode {episode} — not released, the series ended, or the title didn't match"
-            );
+    match launch::run_ani_cli(command) {
+        Ok(run) if run.status.success() => {}
+        Ok(run) => {
+            if run.invalid_episode {
+                let mut updated = state.clone();
+                if reconcile::complete_ani_cli_show(&mut updated, name, episode) {
+                    return match state::write(state_path, &updated) {
+                        Ok(()) => {
+                            println!(
+                                "✓ \"{name}\" — ani-cli has no episode {episode}; marked completed"
+                            );
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => fail(&format!(
+                            "could not write state at {}: {e}",
+                            state_path.display()
+                        )),
+                    };
+                }
+            }
+            eprintln!("⚠ ani-cli failed to play episode {episode}");
             return ExitCode::FAILURE;
         }
         Err(e) => {
@@ -658,13 +678,14 @@ fn explicit_play(
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
+    state_path: &Path,
     mpv: &launch::Launch,
     home: Option<&Path>,
     command_name: &str,
     verb: &str,
 ) -> ExitCode {
     match target::resolve_series_root(config, state, series, root_arg, home) {
-        Ok(root) => play_series(config, state, mpv, &root, series, home, verb),
+        Ok(root) => play_series(config, state, state_path, mpv, &root, series, home, verb),
         Err(e) => print_target_error(&e, command_name),
     }
 }
@@ -679,6 +700,7 @@ fn resolve_scope(
     root_arg: Option<&Path>,
     config: &Config,
     state: &State,
+    state_path: &Path,
     mpv: &launch::Launch,
     home: Option<&Path>,
     command_name: &str,
@@ -690,15 +712,16 @@ fn resolve_scope(
             root_arg,
             config,
             state,
+            state_path,
             mpv,
             home,
             command_name,
             verb,
         )),
         (Some(arg), None) => match target::resolve_positional(config, state, &arg, home) {
-            Ok(target::Resolved::Series(root)) => {
-                ControlFlow::Break(play_series(config, state, mpv, &root, &arg, home, verb))
-            }
+            Ok(target::Resolved::Series(root)) => ControlFlow::Break(play_series(
+                config, state, state_path, mpv, &root, &arg, home, verb,
+            )),
             Ok(target::Resolved::Root(root)) => ControlFlow::Continue(Some(root)),
             Err(e) => ControlFlow::Break(print_positional_error(&e, command_name)),
         },
@@ -809,6 +832,7 @@ fn resume_command(
         root.as_deref(),
         config,
         &state,
+        state_path,
         &mpv,
         home,
         "resume",
@@ -836,7 +860,9 @@ fn resume_command(
         },
         1 => {
             let o = &in_progress[0];
-            play_series(config, &state, &mpv, &o.root, &o.name, home, "Resuming")
+            play_series(
+                config, &state, state_path, &mpv, &o.root, &o.name, home, "Resuming",
+            )
         }
         _ => {
             let outcome = picker::pick(
@@ -854,9 +880,9 @@ fn resume_command(
                 picker::dialoguer_select,
             );
             match outcome {
-                picker::PickerOutcome::Selected(o) => {
-                    play_series(config, &state, &mpv, &o.root, &o.name, home, "Resuming")
-                }
+                picker::PickerOutcome::Selected(o) => play_series(
+                    config, &state, state_path, &mpv, &o.root, &o.name, home, "Resuming",
+                ),
                 picker::PickerOutcome::Listed => {
                     println!();
                     println!("Run `tsuzuki resume <series>` to pick one.");
@@ -1003,6 +1029,7 @@ fn start_command(
         root.as_deref(),
         config,
         &state,
+        state_path,
         &mpv,
         home,
         "start",
@@ -1047,6 +1074,7 @@ fn start_command(
         picker::PickerOutcome::Selected(o) => play_series(
             config,
             &state,
+            state_path,
             &mpv,
             &o.root,
             &o.name,
@@ -2107,6 +2135,7 @@ mod tests {
             Some(&root_a),
             &config,
             &state,
+            &dir.path().join("state.toml"),
             &true_launch(dir.path()),
             None,
             "resume",
@@ -2123,6 +2152,7 @@ mod tests {
             Some(&root_b),
             &config,
             &state,
+            &dir.path().join("state.toml"),
             &true_launch(dir.path()),
             None,
             "resume",

@@ -5,7 +5,7 @@
 //! log file so a launch that dies at once can still be diagnosed.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -87,10 +87,47 @@ pub fn ani_cli_command(
     command
 }
 
+/// What ani-cli prints when the requested episode isn't in the episode list
+/// it just fetched.
+const INVALID_EPISODE: &str = "Invalid episode!";
+
+/// How a foreground ani-cli run ended.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AniCliRun {
+    pub status: ExitStatus,
+    /// ani-cli said the episode isn't in its list.
+    pub invalid_episode: bool,
+}
+
 /// Runs `command` with the terminal's stdio and waits: ani-cli talks to the
-/// user, and its exit status is the only signal Tsuzuki gets from it.
-pub fn run_foreground(mut command: Command) -> io::Result<ExitStatus> {
-    command.status()
+/// user. Its stderr is passed through live and scanned for its own
+/// "Invalid episode!" verdict; with the exit status, that is all Tsuzuki gets
+/// from it.
+pub fn run_ani_cli(mut command: Command) -> io::Result<AniCliRun> {
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut captured = Vec::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut out = io::stderr();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = out.write_all(&buf[..n]);
+                    let _ = out.flush();
+                    captured.extend_from_slice(&buf[..n]);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
+    let status = child.wait()?;
+    Ok(AniCliRun {
+        status,
+        invalid_episode: String::from_utf8_lossy(&captured).contains(INVALID_EPISODE),
+    })
 }
 
 /// Truncates the log and writes `command`'s line to it, then returns two
@@ -135,6 +172,64 @@ mod tests {
         let target = custom_target("/definitely/does/not/exist/tsuzuki-fake-mpv", &[]);
         let launch = launch_of(target, dir.path().join("mpv-launch.log"));
         let err = resume_playback(&launch, Path::new("/x.mkv"), 0.0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    fn shell_command(dir: &Path, body: &str) -> Command {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ani-cli");
+        fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        Command::new(script)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_ani_cli_flags_an_invalid_episode_message_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = shell_command(
+            dir.path(),
+            "printf '\\033[1;31mInvalid episode!\\033[0m\\n' >&2; exit 1",
+        );
+
+        let run = run_ani_cli(command).unwrap();
+
+        assert_eq!(run.status.code(), Some(1));
+        assert!(run.invalid_episode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_ani_cli_does_not_flag_other_failures_or_the_message_on_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = shell_command(dir.path(), "echo 'Episode not released!' >&2; exit 1");
+        let run = run_ani_cli(other).unwrap();
+        assert_eq!(run.status.code(), Some(1));
+        assert!(!run.invalid_episode);
+
+        let on_stdout = shell_command(dir.path(), "echo 'Invalid episode!'; exit 1");
+        let run = run_ani_cli(on_stdout).unwrap();
+        assert!(!run.invalid_episode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_ani_cli_of_a_clean_exit_reports_success_and_no_flag() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let run = run_ani_cli(shell_command(dir.path(), "exit 0")).unwrap();
+
+        assert!(run.status.success());
+        assert!(!run.invalid_episode);
+    }
+
+    #[test]
+    fn run_ani_cli_of_a_nonexistent_program_returns_an_error_not_a_panic() {
+        let err = run_ani_cli(Command::new(
+            "/definitely/does/not/exist/tsuzuki-fake-ani-cli",
+        ))
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 

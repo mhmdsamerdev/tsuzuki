@@ -433,9 +433,70 @@ mod resume {
         let output = resume(home);
 
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains(
-            "⚠ ani-cli could not play episode 10 — not released, the series ended, or the title didn't match"
-        ));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("⚠ ani-cli failed to play episode 10")
+        );
+        let state = state_text(home);
+        assert_eq!(
+            state_field(&state, "status").as_deref(),
+            Some("\"in_progress\"")
+        );
+        assert_eq!(state_field(&state, "episode_number").as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn ani_cli_reporting_an_invalid_episode_after_a_finished_one_completes_the_show() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 1, "echo 'Invalid episode!' >&2");
+        write_config(home, &fake, "", "");
+        watch(home, "eof", 1399.0);
+
+        let output = resume(home);
+
+        assert!(output.status.success());
+        assert_eq!(
+            stdout_of(&output),
+            "→ Resuming \"Blue Lock\" — episode 10 (00:00)\n✓ \"Blue Lock\" — ani-cli has no episode 10; marked completed\n"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid episode!"));
+        let state = state_text(home);
+        assert_eq!(
+            state_field(&state, "status").as_deref(),
+            Some("\"completed\"")
+        );
+        assert_eq!(state_field(&state, "episode_number").as_deref(), Some("9"));
+        assert_eq!(
+            stdout_of(&run(home, &["list"])),
+            "Completed:\n  Blue Lock (ani-cli)\n"
+        );
+        assert_eq!(stdout_of(&resume(home)), "Nothing to start.\n");
+    }
+
+    #[test]
+    fn ani_cli_reporting_an_invalid_episode_mid_episode_leaves_the_show_alone() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 1, "echo 'Invalid episode!' >&2");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        let output = resume(home);
+
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("⚠ ani-cli failed to play episode 9")
+        );
+        let state = state_text(home);
+        assert_eq!(
+            state_field(&state, "status").as_deref(),
+            Some("\"in_progress\"")
+        );
+        assert_eq!(state_field(&state, "episode_number").as_deref(), Some("9"));
+        assert_eq!(
+            state_field(&state, "position_seconds").as_deref(),
+            Some("300.0")
+        );
     }
 
     #[test]
