@@ -176,19 +176,6 @@ fn list_and_status_show_an_ani_cli_show_with_its_episode_and_position() {
 }
 
 #[test]
-fn start_never_offers_an_ani_cli_show_even_once_paused() {
-    let home_dir = tempfile::tempdir().unwrap();
-    let home = home_dir.path();
-    watched_blue_lock(home);
-    assert!(run(home, &["pause", "Blue Lock"]).status.success());
-
-    let output = run(home, &["start"]);
-
-    assert!(!stdout_of(&output).contains("Blue Lock"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("Blue Lock"));
-}
-
-#[test]
 fn pause_and_drop_an_ani_cli_show_keep_its_stored_position() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
@@ -294,6 +281,37 @@ mod resume {
             .arg("resume")
             .output()
             .unwrap()
+    }
+
+    #[test]
+    fn start_offers_a_paused_ani_cli_show_with_its_episode() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 312.5);
+        assert!(run(home, &["pause", "Blue Lock"]).status.success());
+
+        let output = run(home, &["start"]);
+
+        assert_eq!(
+            stdout_of(&output),
+            "Available to start:\n\n  1. Blue Lock — Resume (ep. 9, ani-cli)\n\nRun `tsuzuki start <series>` to pick one.\n"
+        );
+    }
+
+    #[test]
+    fn start_never_offers_a_dropped_ani_cli_show() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 312.5);
+        assert!(run(home, &["drop", "Blue Lock"]).status.success());
+
+        let output = run(home, &["start"]);
+
+        assert_eq!(stdout_of(&output), "Nothing to start.\n");
     }
 
     #[test]

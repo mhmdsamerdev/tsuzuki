@@ -203,12 +203,22 @@ pub fn start_display_word(status: Option<Status>) -> &'static str {
     }
 }
 
-/// Series offered by `start`: everything not `in_progress`. ani-cli shows are
-/// never started from here; they appear only once watched in ani-cli.
+/// Series offered by `start`: everything not `in_progress`. An ani-cli show
+/// has no never-started state and is offered only while paused; dropped and
+/// completed ones stay hidden.
 pub fn eligible_for_start(overviews: &[SeriesOverview]) -> Vec<SeriesOverview> {
     overviews
         .iter()
-        .filter(|o| o.status != Some(Status::InProgress) && o.root != ani_cli::ROOT)
+        .filter(|o| {
+            if o.root == ani_cli::ROOT {
+                match o.status {
+                    Some(Status::Paused) => true,
+                    Some(Status::InProgress | Status::Dropped | Status::Completed) | None => false,
+                }
+            } else {
+                o.status != Some(Status::InProgress)
+            }
+        })
         .cloned()
         .collect()
 }
@@ -219,13 +229,12 @@ pub fn start_line(overview: &SeriesOverview) -> String {
     let word = start_display_word(overview.status);
     match (overview.status, overview.episode_label()) {
         (Some(Status::Paused), Some(ep)) => format!(
-            "{} — {} ({ep}, {} files)",
-            overview.name, word, overview.file_count
+            "{} — {} ({ep}, {})",
+            overview.name,
+            word,
+            overview.size_label()
         ),
-        _ => format!(
-            "{} — {} ({} files)",
-            overview.name, word, overview.file_count
-        ),
+        _ => format!("{} — {} ({})", overview.name, word, overview.size_label()),
     }
 }
 
@@ -652,24 +661,34 @@ mod tests {
     }
 
     #[test]
-    fn eligible_for_start_never_offers_an_ani_cli_show_at_any_status() {
+    fn eligible_for_start_offers_an_ani_cli_show_only_when_paused() {
         for status in [
             Status::InProgress,
             Status::Paused,
             Status::Dropped,
             Status::Completed,
         ] {
-            assert_eq!(
-                eligible_for_start(&[ani_overview("Blue Lock", status)]),
-                Vec::new(),
-                "{status:?}"
-            );
+            let mut show = ani_overview("Blue Lock", status);
+            show.episode_number = Some(9);
+            show.position_seconds = Some(312.5);
+            let expected = match status {
+                Status::Paused => vec![show.clone()],
+                Status::InProgress | Status::Dropped | Status::Completed => Vec::new(),
+            };
+            assert_eq!(eligible_for_start(&[show]), expected, "{status:?}");
         }
         let folder = overview("Monster", Some(Status::Paused));
         assert_eq!(
-            eligible_for_start(&[ani_overview("Blue Lock", Status::Paused), folder.clone()]),
+            eligible_for_start(&[ani_overview("Blue Lock", Status::Dropped), folder.clone()]),
             vec![folder]
         );
+    }
+
+    #[test]
+    fn start_line_for_a_paused_ani_cli_show_ends_with_ani_cli_not_a_file_count() {
+        let mut show = ani_overview("Blue Lock", Status::Paused);
+        show.episode_number = Some(9);
+        assert_eq!(start_line(&show), "Blue Lock — Resume (ep. 9, ani-cli)");
     }
 
     #[test]

@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- `start` now offers paused ani-cli shows.
+
 ## [v0.1.8]
 
 - Fix progress not updating when a series contains symlinked season folders or episode files.
