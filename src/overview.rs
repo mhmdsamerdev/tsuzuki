@@ -179,43 +179,13 @@ pub fn route_display(routes: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Shortens `label` to at most `max` chars, ending in `…` when cut.
-pub fn truncate_label(label: &str, max: usize) -> String {
-    if label.chars().count() <= max {
-        return label.to_string();
-    }
-    let keep = max.saturating_sub(1);
-    let mut out: String = label.chars().take(keep).collect();
-    if max > 0 {
-        out.push('…');
-    }
-    out
-}
-
 /// Appends an aligned `[route]` tag to each label; `labels` and `routes` are
-/// parallel. With `max_width`, labels are truncated so every row fits it.
-pub fn tag_with_routes(
-    labels: &[String],
-    routes: &[&str],
-    max_width: Option<usize>,
-) -> Vec<String> {
-    let shown = route_display(routes);
-    let tag_width = shown
+/// parallel.
+pub fn tag_with_routes(labels: &[String], routes: &[&str]) -> Vec<String> {
+    let width = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    labels
         .iter()
-        .map(|r| r.chars().count() + 4)
-        .max()
-        .unwrap_or(0);
-    let fitted: Vec<String> = labels
-        .iter()
-        .map(|l| match max_width {
-            Some(w) => truncate_label(l, w.saturating_sub(tag_width)),
-            None => l.clone(),
-        })
-        .collect();
-    let width = fitted.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    fitted
-        .iter()
-        .zip(shown)
+        .zip(route_display(routes))
         .map(|(l, r)| format!("{l:<width$}  [{r}]"))
         .collect()
 }
@@ -609,41 +579,10 @@ mod tests {
     fn tag_with_routes_pads_to_the_longest_label_plus_two_spaces() {
         let labels = vec!["ab".to_string(), "abcd".to_string()];
         assert_eq!(
-            tag_with_routes(&labels, &["~/A", "/b"], None),
+            tag_with_routes(&labels, &["~/A", "/b"]),
             vec!["ab    [A]".to_string(), "abcd  [b]".to_string()]
         );
-        assert_eq!(tag_with_routes(&[], &[], None), Vec::<String>::new());
-    }
-
-    #[test]
-    fn truncate_label_cuts_with_ellipsis_only_when_over_the_limit() {
-        assert_eq!(truncate_label("abcde", 5), "abcde");
-        assert_eq!(truncate_label("abcdef", 5), "abcd…");
-        assert_eq!(truncate_label("abcd", 5), "abcd");
-        assert_eq!(truncate_label("abc", 0), "");
-        assert_eq!(truncate_label("a—b—c", 3), "a—…");
-    }
-
-    #[test]
-    fn tag_with_routes_truncates_long_labels_so_every_row_fits_the_width() {
-        let labels = vec!["short".to_string(), "a very long title indeed".to_string()];
-        // Tag "  [A]" is 5 wide, so labels get 15 of the 20 columns.
-        assert_eq!(
-            tag_with_routes(&labels, &["~/A", "/b"], Some(20)),
-            vec![
-                "short            [A]".to_string(),
-                "a very long ti…  [b]".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn tag_with_routes_leaves_rows_that_already_fit_unchanged() {
-        let labels = vec!["ab".to_string(), "abcd".to_string()];
-        assert_eq!(
-            tag_with_routes(&labels, &["~/A", "/b"], Some(9)),
-            vec!["ab    [A]".to_string(), "abcd  [b]".to_string()]
-        );
+        assert_eq!(tag_with_routes(&[], &[]), Vec::<String>::new());
     }
 
     #[test]

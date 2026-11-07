@@ -882,10 +882,9 @@ fn resume_command(
                 status_line,
                 |o| o.root.as_str(),
                 is_tty,
-                picker::row_width(),
                 "Resume which series?",
                 |line| println!("{line}"),
-                picker::dialoguer_select,
+                picker::interactive_select,
             );
             match outcome {
                 picker::PickerOutcome::Selected(o) => play_series(
@@ -1000,7 +999,7 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
             .collect();
         if multi_route {
             let routes: Vec<&str> = items.iter().map(|o| o.root.as_str()).collect();
-            rows = overview::tag_with_routes(&rows, &routes, None);
+            rows = overview::tag_with_routes(&rows, &routes);
         }
         for row in rows {
             println!("{row}");
@@ -1079,10 +1078,9 @@ fn start_command(
         overview::start_line,
         |o| o.root.as_str(),
         is_tty,
-        picker::row_width(),
         "Start which one?",
         |line| println!("{line}"),
-        picker::dialoguer_select,
+        picker::interactive_select,
     );
     match outcome {
         picker::PickerOutcome::Selected(o) => play_series(
