@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.9]
 
 - The `resume` picker shows the episode and saved position like `status`: `Name — ep. 9 (12:34)`.
 - `list` shows the saved position for in-progress and paused series.
