@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- Fix pickers garbling the screen in narrow terminals by fitting rows to the terminal width.
 - Fix progress not updating when a later episode is finished after an earlier one was stopped mid-way.
 
 ## [v0.1.9]

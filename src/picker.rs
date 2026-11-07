@@ -31,11 +31,13 @@ pub fn stdin_is_tty() -> bool {
 /// When `items` span more than one `route` (callers pass them route-contiguous),
 /// the non-TTY listing gets a route header per group and the TTY labels get an
 /// aligned `[route]` tag; with one route the output is untouched.
+#[allow(clippy::too_many_arguments)]
 pub fn pick<T: Clone>(
     items: &[T],
     label: impl Fn(&T) -> String,
     route: impl Fn(&T) -> &str,
     is_tty: bool,
+    width: Option<usize>,
     prompt: &str,
     mut print_line: impl FnMut(&str),
     select: impl FnOnce(&str, &[String]) -> Option<usize>,
@@ -62,12 +64,24 @@ pub fn pick<T: Clone>(
     let mut labels: Vec<String> = items.iter().map(&label).collect();
     if multi_route {
         let routes: Vec<&str> = items.iter().map(&route).collect();
-        labels = overview::tag_with_routes(&labels, &routes);
+        labels = overview::tag_with_routes(&labels, &routes, width);
+    } else if let Some(w) = width {
+        labels = labels
+            .iter()
+            .map(|l| overview::truncate_label(l, w))
+            .collect();
     }
     match select(prompt, &labels) {
         Some(index) => PickerOutcome::Selected(items[index].clone()),
         None => PickerOutcome::Cancelled,
     }
+}
+
+/// Width available to a picker label: the terminal width minus dialoguer's
+/// 2-char row prefix and a 1-char margin. `None` if unknown.
+pub fn row_width() -> Option<usize> {
+    let (_, cols) = console::Term::stdout().size_checked()?;
+    Some((cols as usize).saturating_sub(3))
 }
 
 /// The production `select`: a `dialoguer` arrow-key selector.
@@ -94,6 +108,7 @@ mod tests {
             |s| s.clone(),
             |_| "~/Anime",
             false,
+            None,
             "Pick one",
             |line| printed.push(line.to_string()),
             |_, _| panic!("select must never be called in the non-TTY branch"),
@@ -113,6 +128,7 @@ mod tests {
             |s| s.clone(),
             |_| "~/Anime",
             false,
+            None,
             "Pick one",
             |line| printed.push(line.to_string()),
             |_, _| panic!("select must never be called in the non-TTY branch"),
@@ -132,6 +148,7 @@ mod tests {
             |s| s.clone(),
             |_| "~/Anime",
             true,
+            None,
             "Resume which series?",
             |_| panic!("print_line must never be called in the TTY branch"),
             |prompt, labels| {
@@ -152,6 +169,7 @@ mod tests {
             |n| format!("item #{n}"),
             |_| "~/Anime",
             true,
+            None,
             "Pick",
             |_| {},
             |_, labels| {
@@ -170,6 +188,25 @@ mod tests {
     }
 
     #[test]
+    fn tty_single_route_labels_are_truncated_to_the_width() {
+        let items = vec!["abcdefghij".to_string(), "abc".to_string()];
+        let outcome = pick(
+            &items,
+            |s| s.clone(),
+            |_| "~/Anime",
+            true,
+            Some(6),
+            "Pick",
+            |_| {},
+            |_, labels| {
+                assert_eq!(labels, &["abcde…".to_string(), "abc".to_string()]);
+                Some(0)
+            },
+        );
+        assert_eq!(outcome, PickerOutcome::Selected("abcdefghij".to_string()));
+    }
+
+    #[test]
     fn tty_selection_cancelled_reports_cancelled_not_a_default_selection() {
         let items = vec!["Monster".to_string()];
         let outcome = pick(
@@ -177,6 +214,7 @@ mod tests {
             |s| s.clone(),
             |_| "~/Anime",
             true,
+            None,
             "Pick one",
             |_| {},
             |_, _| None,
@@ -218,6 +256,7 @@ mod tests {
             name_of,
             route_of,
             false,
+            None,
             "Pick",
             |line| printed.push(line.to_string()),
             |_, _| panic!("select must never be called in the non-TTY branch"),
@@ -247,6 +286,7 @@ mod tests {
             name_of,
             route_of,
             false,
+            None,
             "Pick",
             |line| printed.push(line.to_string()),
             |_, _| None,
@@ -268,6 +308,7 @@ mod tests {
             name_of,
             route_of,
             true,
+            None,
             "Pick",
             |_| panic!("print_line must never be called in the TTY branch"),
             |_, labels| {
@@ -298,6 +339,7 @@ mod tests {
             name_of,
             route_of,
             true,
+            None,
             "Pick",
             |_| {},
             |_, labels| {
@@ -316,6 +358,7 @@ mod tests {
             name_of,
             route_of,
             true,
+            None,
             "Pick",
             |_| {},
             |_, _| Some(1),
@@ -337,6 +380,7 @@ mod tests {
             name_of,
             route_of,
             false,
+            None,
             "Pick",
             |line| printed.push(line.to_string()),
             |_, _| None,
