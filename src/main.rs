@@ -879,12 +879,7 @@ fn resume_command(
         _ => {
             let outcome = picker::pick(
                 &in_progress,
-                |o| {
-                    let ep = o
-                        .episode_label()
-                        .unwrap_or_else(|| "unknown episode".to_string());
-                    format!("{} ({ep})", o.name)
-                },
+                status_line,
                 |o| o.root.as_str(),
                 is_tty,
                 "Resume which series?",

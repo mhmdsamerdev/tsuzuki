@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- The `resume` picker shows the episode and saved position like `status`: `Name — ep. 9 (12:34)`.
 - Resuming an ani-cli show returns to the shell once playback starts, and its next episode no longer starts at the resumed position.
 - `start` now offers paused ani-cli shows.
 - An ani-cli show completes when ani-cli has no next episode, instead of failing on resume.

@@ -1459,7 +1459,34 @@ fn non_tty_resume_with_two_routes_groups_in_progress_series_under_route_headers(
     assert!(!resume.status.success());
     assert_eq!(
         stdout_of(&resume),
-        "Anime\n  1. Monster (ep. 1)\n\nShows\n  2. Frieren (ep. 1)\n\nRun `tsuzuki resume <series>` to pick one.\n"
+        "Anime\n  1. Monster — ep. 1 (05:00)\n\nShows\n  2. Frieren — ep. 1 (06:40)\n\nRun `tsuzuki resume <series>` to pick one.\n"
+    );
+}
+
+#[test]
+fn non_tty_resume_labels_later_seasons_and_saved_positions_like_status() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = home.join("Anime");
+    let jjk = root
+        .join("Jujutsu Kaisen")
+        .join("Jujutsu Kaisen S02E05.mkv");
+    let frieren = root.join("Frieren").join("Frieren - 01.mkv");
+    touch(&jjk);
+    touch(&frieren);
+    add_root(home, &root);
+    write_quit_entry(home, "entry-a", &jjk, 190.0);
+    write_quit_entry(home, "entry-b", &frieren, 754.0);
+    run_ok(home, &["list"]);
+
+    let resume = run(home, &["resume"]);
+
+    assert!(!resume.status.success());
+    assert_eq!(
+        stdout_of(&resume),
+        format!(
+            "  1. Frieren — ep. 1 (12:34)\n  2. Jujutsu Kaisen — S02E05 (03:10)\n{RESUME_TAIL}"
+        )
     );
 }
 
@@ -1819,7 +1846,7 @@ fn resume_with_root_folder_name_lists_only_that_roots_in_progress_series() {
     assert!(!out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!("  1. Monster (ep. 1)\n  2. Naruto (ep. 1)\n{RESUME_TAIL}")
+        format!("  1. Monster — ep. 1 (05:00)\n  2. Naruto — ep. 1 (05:10)\n{RESUME_TAIL}")
     );
 }
 
