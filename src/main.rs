@@ -901,19 +901,20 @@ fn resume_command(
     }
 }
 
+/// ` (mm:ss)` when the saved position is past 0:00, else empty.
+fn position_suffix(o: &overview::SeriesOverview) -> String {
+    match o.position_seconds.map(format_timestamp) {
+        Some(ts) if ts != "00:00" => format!(" ({ts})"),
+        _ => String::new(),
+    }
+}
+
 /// `Name — ep. 9`, plus ` (mm:ss)` when the saved position is past 0:00.
 fn status_line(o: &overview::SeriesOverview) -> String {
     let ep = o
         .episode_label()
         .unwrap_or_else(|| "unknown episode".to_string());
-    let mut line = format!("{} — {ep}", o.name);
-    if let Some(position) = o.position_seconds {
-        let ts = format_timestamp(position);
-        if ts != "00:00" {
-            line.push_str(&format!(" ({ts})"));
-        }
-    }
-    line
+    format!("{} — {ep}{}", o.name, position_suffix(o))
 }
 
 /// `tsuzuki status`: every `in_progress` series.
@@ -989,7 +990,11 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
                     .filter(|_| o.status != Some(Status::Completed))
                     .map(|label| format!(" — {label}"))
                     .unwrap_or_default();
-                format!("  {}{ep} ({})", o.name, o.size_label())
+                let pos = match o.status {
+                    Some(Status::InProgress | Status::Paused) => position_suffix(o),
+                    Some(Status::Dropped | Status::Completed) | None => String::new(),
+                };
+                format!("  {}{ep}{pos} ({})", o.name, o.size_label())
             })
             .collect();
         if multi_route {
@@ -1829,6 +1834,15 @@ mod tests {
                 "Monster — ep. 9",
             ]
         );
+    }
+
+    #[test]
+    fn position_suffix_is_empty_until_the_position_rounds_past_zero() {
+        let suffixes: Vec<String> = [None, Some(0.0), Some(0.4), Some(0.5), Some(3725.0)]
+            .into_iter()
+            .map(|p| position_suffix(&status_overview(Some(9), p)))
+            .collect();
+        assert_eq!(suffixes, ["", "", "", " (00:01)", " (1:02:05)"]);
     }
 
     #[test]

@@ -1490,6 +1490,36 @@ fn non_tty_resume_labels_later_seasons_and_saved_positions_like_status() {
     );
 }
 
+#[test]
+fn list_shows_position_for_in_progress_and_paused_only() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    let root = home.join("Anime");
+    let files = [
+        root.join("Bleach").join("Bleach S02E05.mkv"),
+        root.join("Dark").join("Dark - 01.mkv"),
+        root.join("Frieren").join("Frieren - 01.mkv"),
+        root.join("Monster").join("Monster - 01.mkv"),
+        root.join("Naruto").join("Naruto - 01.mkv"),
+    ];
+    for f in &files {
+        touch(f);
+    }
+    add_root(home, &root);
+    write_quit_entry(home, "e1", &files[0], 190.0); // in progress, S02
+    write_quit_entry(home, "e2", &files[1], 754.0); // paused
+    write_quit_entry(home, "e3", &files[2], 400.0); // dropped
+    write_quit_entry(home, "e4", &files[3], 3725.0); // in progress, over an hour
+    run_ok(home, &["list"]);
+    run_ok(home, &["pause", "Dark"]);
+    run_ok(home, &["drop", "Frieren"]);
+
+    assert_eq!(
+        run_ok(home, &["list"]),
+        "In progress:\n  Bleach — S02E05 (03:10) (1 files)\n  Monster — ep. 1 (1:02:05) (1 files)\n\nPaused:\n  Dark — ep. 1 (12:34) (1 files)\n\nDropped:\n  Frieren — ep. 1 (1 files)\n\nNever started:\n  Naruto (1 files)\n"
+    );
+}
+
 // `start`/`resume` scoped to one root by folder name or `--root`.
 
 /// Adds one root per `(folder, series)` pair under `home`, each series holding one episode; returns the stored roots in order.
@@ -1947,7 +1977,7 @@ fn season_two_episode_shows_season_in_status_list_and_resume() {
     assert_eq!(run_ok(home, &["status"]), "Bakuman — S02E01 (03:44)\n");
     assert_eq!(
         run_ok(home, &["list"]),
-        "In progress:\n  Bakuman — S02E01 (1 files)\n"
+        "In progress:\n  Bakuman — S02E01 (03:44) (1 files)\n"
     );
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
@@ -2107,7 +2137,7 @@ fn a_root_added_child_first_before_its_parent_lists_the_same_series_per_root() {
 
     assert_eq!(
         list_after_watching(home, &rewatch.join("Bleach/ep01.mkv")),
-        "In progress:\n  Bleach — ep. 1 (1 files)  [rewatch]\n\nNever started:\n  Monster (1 files)  [anime]\n"
+        "In progress:\n  Bleach — ep. 1 (05:00) (1 files)  [rewatch]\n\nNever started:\n  Monster (1 files)  [anime]\n"
     );
 }
 
@@ -2119,7 +2149,7 @@ fn a_root_reached_through_a_symlink_or_trailing_slash_matches_mpv_paths_of_any_s
     let link = home.join("link");
     touch(&real.join("Monster/ep01.mkv"));
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let expected = "In progress:\n  Monster — ep. 1 (1 files)\n";
+    let expected = "In progress:\n  Monster — ep. 1 (05:00) (1 files)\n";
 
     add_root(home, &link);
     assert_eq!(

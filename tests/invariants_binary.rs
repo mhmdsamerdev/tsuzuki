@@ -90,7 +90,7 @@ fn list_skips_redirect_and_malformed_script_log_entries_and_still_reads_the_vali
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
     assert_eq!(
         stdout_of(&out),
-        "In progress:\n  Monster — ep. 2 (2 files)\n"
+        "In progress:\n  Monster — ep. 2 (05:00) (2 files)\n"
     );
 }
 
@@ -146,7 +146,7 @@ fn list_loads_a_config_that_still_has_the_removed_watch_later_dir_key() {
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
     assert_eq!(
         stdout_of(&out),
-        "In progress:\n  Monster — ep. 2 (2 files)\n"
+        "In progress:\n  Monster — ep. 2 (05:00) (2 files)\n"
     );
     assert_eq!(stderr_of(&out), "");
 }

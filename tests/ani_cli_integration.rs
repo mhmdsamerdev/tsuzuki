@@ -171,7 +171,7 @@ fn list_and_status_show_an_ani_cli_show_with_its_episode_and_position() {
     );
     assert_eq!(
         stdout_of(&run(home, &["list"])),
-        "In progress:\n  Blue Lock — ep. 9 (ani-cli)\n"
+        "In progress:\n  Blue Lock — ep. 9 (05:00) (ani-cli)\n"
     );
 }
 
