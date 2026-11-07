@@ -248,7 +248,7 @@ mod resume {
         fs::write(
             &fake,
             format!(
-                "#!/bin/sh\n{{\nprintf 'ARG %s\\n' \"$@\"\nprintf 'EXACT=%s\\n' \"$ANI_CLI_EXACT\"\nprintf 'PLAYER=%s\\n' \"$ANI_CLI_PLAYER\"\nprintf 'FLAGS=%s\\n' \"$ANI_CLI_PLAYER_FLAGS\"\n}} > {}\n{after}\nexit {code}\n",
+                "#!/bin/sh\n{{\nprintf 'ARG %s\\n' \"$@\"\nprintf 'EXACT=%s\\n' \"$ANI_CLI_EXACT\"\nprintf 'MENU=%s\\n' \"$ANI_CLI_MENU\"\nprintf 'PLAYER=%s\\n' \"$ANI_CLI_PLAYER\"\nprintf 'FLAGS=%s\\n' \"$ANI_CLI_PLAYER_FLAGS\"\n}} > {}\n{after}\nexit {code}\n",
                 ran.display()
             ),
         )
@@ -335,7 +335,105 @@ mod resume {
         );
         assert_eq!(
             ran(home).unwrap(),
-            "ARG --dub\nARG -S\nARG 1\nARG -e\nARG 9\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nPLAYER=fake-mpv --profile=anime\nFLAGS=--start=312.5\n"
+            "ARG --dub\nARG -S\nARG 1\nARG -e\nARG 9\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nMENU=true\nPLAYER=fake-mpv --profile=anime\nFLAGS=--start=312.5\n"
+        );
+    }
+
+    #[test]
+    fn resume_returns_once_ani_cli_is_past_its_early_failures_and_leaves_it_playing() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let release = home.join("release");
+        let done = home.join("done");
+        let fake = fake_ani_cli(
+            home,
+            0,
+            &format!(
+                "printf 'hianime.at links fetched\\n'\ni=0\nwhile [ ! -e {} ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\ntouch {}",
+                release.display(),
+                done.display()
+            ),
+        );
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        let output = resume(home);
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!done.exists(), "tsuzuki waited for ani-cli to finish");
+        assert_eq!(
+            stdout_of(&output),
+            format!(
+                "→ Resuming \"Blue Lock\" — episode 9 (05:00)\n  → ani-cli keeps playing; output: {}\n",
+                home.join(".local/share/tsuzuki/ani-cli-launch.log")
+                    .display()
+            )
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("hianime.at links fetched"));
+        let state = state_text(home);
+        assert_eq!(
+            state_field(&state, "status").as_deref(),
+            Some("\"in_progress\"")
+        );
+        assert_eq!(
+            state_field(&state, "position_seconds").as_deref(),
+            Some("300.0")
+        );
+
+        fs::write(&release, "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(done.exists(), "ani-cli never finished after release");
+    }
+
+    #[test]
+    fn resume_gives_ani_clis_menu_an_empty_answer_so_no_second_episode_plays() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let plays = home.join("plays.txt");
+        let fake = fake_ani_cli(
+            home,
+            0,
+            &format!(
+                "echo play >> {p}\nanswer=$(${{ANI_CLI_MENU:-echo}} 'Playing episode 9...')\n[ -n \"$answer\" ] && echo play >> {p}",
+                p = plays.display()
+            ),
+        );
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        let output = resume(home);
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(&plays).unwrap(), "play\n");
+    }
+
+    #[test]
+    fn resume_writes_ani_clis_output_to_a_launch_log_next_to_the_state() {
+        let home_dir = tempfile::tempdir().unwrap();
+        let home = home_dir.path();
+        let fake = fake_ani_cli(home, 0, "echo hello-from-ani-cli");
+        write_config(home, &fake, "", "");
+        watch(home, "quit", 300.0);
+
+        assert!(resume(home).status.success());
+
+        assert_eq!(
+            fs::read_to_string(home.join(".local/share/tsuzuki/ani-cli-launch.log")).unwrap(),
+            format!(
+                "# {} -S 1 -e 9 --exit-after-play Blue Lock\nhello-from-ani-cli\n",
+                fake.display()
+            )
         );
     }
 
@@ -352,7 +450,7 @@ mod resume {
         assert!(output.status.success());
         assert_eq!(
             ran(home).unwrap(),
-            "ARG -S\nARG 1\nARG -e\nARG 10\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nPLAYER=fake-mpv --profile=anime\nFLAGS=\n"
+            "ARG -S\nARG 1\nARG -e\nARG 10\nARG --exit-after-play\nARG Blue Lock\nEXACT=1\nMENU=true\nPLAYER=fake-mpv --profile=anime\nFLAGS=\n"
         );
     }
 

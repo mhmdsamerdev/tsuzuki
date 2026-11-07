@@ -5,9 +5,10 @@
 //! log file so a launch that dies at once can still be diagnosed.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::AniCli;
 use crate::mpv::Target;
@@ -54,7 +55,8 @@ pub fn resume_playback(launch: &Launch, file: &Path, start_seconds: f64) -> io::
 /// A `start_seconds` above 0 reaches mpv as `--start` through
 /// `ANI_CLI_PLAYER_FLAGS`, after any flags already in `existing_flags`.
 /// `--exit-after-play` makes ani-cli run the player in the foreground and
-/// exit with it.
+/// exit with it. `ANI_CLI_MENU=true` gives its "next/replay/…" menu an empty
+/// answer, so no episode after this one is ever played.
 pub fn ani_cli_command(
     launch: &Launch,
     config: &AniCli,
@@ -75,6 +77,7 @@ pub fn ani_cli_command(
         .arg("--exit-after-play")
         .arg(title)
         .env("ANI_CLI_EXACT", "1")
+        .env("ANI_CLI_MENU", "true")
         .env("ANI_CLI_PLAYER", player);
     if start_seconds > 0.0 {
         let start = format!("--start={start_seconds}");
@@ -91,43 +94,95 @@ pub fn ani_cli_command(
 /// it just fetched.
 const INVALID_EPISODE: &str = "Invalid episode!";
 
-/// How a foreground ani-cli run ended.
-#[derive(Debug, PartialEq, Eq)]
-pub struct AniCliRun {
-    pub status: ExitStatus,
-    /// ani-cli said the episode isn't in its list.
-    pub invalid_episode: bool,
+/// What ani-cli prints once it has the links, after the episode check: past
+/// this point `Invalid episode!` can no longer come.
+const LINKS_FETCHED: &str = "links fetched";
+
+/// How long `start_ani_cli` follows ani-cli's start before leaving it.
+pub const ANI_CLI_START_WAIT: Duration = Duration::from_secs(30);
+
+const LOG_POLL: Duration = Duration::from_millis(50);
+
+/// The ani-cli launch log, next to the mpv launch log.
+pub fn ani_cli_log_path(launch: &Launch) -> PathBuf {
+    launch.log_path.with_file_name("ani-cli-launch.log")
 }
 
-/// Runs `command` with the terminal's stdio and waits: ani-cli talks to the
-/// user. Its stderr is passed through live and scanned for its own
-/// "Invalid episode!" verdict; with the exit status, that is all Tsuzuki gets
-/// from it.
-pub fn run_ani_cli(mut command: Command) -> io::Result<AniCliRun> {
-    command.stderr(Stdio::piped());
+/// How following ani-cli's start ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AniCliRun {
+    /// ani-cli said the episode isn't in its list.
+    InvalidEpisode,
+    /// ani-cli exited unsuccessfully before playing.
+    Failed(ExitStatus),
+    /// ani-cli exited successfully inside the wait.
+    Finished,
+    /// ani-cli got its links and is still running; nothing more to learn.
+    Playing,
+    /// The wait ran out with ani-cli still starting.
+    TimedOut,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Marker {
+    InvalidEpisode,
+    LinksFetched,
+}
+
+/// The decisive marker in ani-cli's output so far. `Invalid episode!` wins:
+/// ani-cli can't print both.
+fn classify_log(text: &str) -> Option<Marker> {
+    if text.contains(INVALID_EPISODE) {
+        Some(Marker::InvalidEpisode)
+    } else if text.contains(LINKS_FETCHED) {
+        Some(Marker::LinksFetched)
+    } else {
+        None
+    }
+}
+
+/// Starts `command` (ani-cli) with stdin nulled and stdout and stderr in the
+/// log at `log_path`, then follows the log, echoing it to stderr, until
+/// ani-cli exits, reports `Invalid episode!`, prints `links fetched`, or
+/// `wait` runs out. ani-cli is never waited on past that: it keeps playing
+/// after this returns.
+pub fn start_ani_cli(
+    mut command: Command,
+    log_path: &Path,
+    wait: Duration,
+) -> io::Result<AniCliRun> {
+    command.stdin(Stdio::null());
+    let (stdout, stderr) = open_log(log_path, &command)
+        .ok_or_else(|| io::Error::other(format!("could not open {}", log_path.display())))?;
+    command.stdout(stdout).stderr(stderr);
+    let mut reader = File::open(log_path)?;
+    reader.seek(SeekFrom::End(0))?;
     let mut child = command.spawn()?;
-    let mut captured = Vec::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut out = io::stderr();
-        let mut buf = [0u8; 4096];
-        loop {
-            match stderr.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = out.write_all(&buf[..n]);
-                    let _ = out.flush();
-                    captured.extend_from_slice(&buf[..n]);
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
+    let deadline = Instant::now() + wait;
+    let mut seen = Vec::new();
+    loop {
+        let exited = child.try_wait()?;
+        follow(&mut reader, &mut seen)?;
+        match (classify_log(&String::from_utf8_lossy(&seen)), exited) {
+            (Some(Marker::InvalidEpisode), _) => return Ok(AniCliRun::InvalidEpisode),
+            (Some(Marker::LinksFetched), None) => return Ok(AniCliRun::Playing),
+            (_, Some(status)) if status.success() => return Ok(AniCliRun::Finished),
+            (_, Some(status)) => return Ok(AniCliRun::Failed(status)),
+            (_, None) if Instant::now() >= deadline => return Ok(AniCliRun::TimedOut),
+            (_, None) => std::thread::sleep(LOG_POLL),
         }
     }
-    let status = child.wait()?;
-    Ok(AniCliRun {
-        status,
-        invalid_episode: String::from_utf8_lossy(&captured).contains(INVALID_EPISODE),
-    })
+}
+
+/// Reads what ani-cli has logged since the last call into `seen` and echoes
+/// it to stderr.
+fn follow(reader: &mut File, seen: &mut Vec<u8>) -> io::Result<()> {
+    let from = seen.len();
+    reader.read_to_end(seen)?;
+    let mut out = io::stderr();
+    let _ = out.write_all(&seen[from..]);
+    let _ = out.flush();
+    Ok(())
 }
 
 /// Truncates the log and writes `command`'s line to it, then returns two
@@ -184,53 +239,181 @@ mod tests {
         Command::new(script)
     }
 
+    fn run_fake(dir: &Path, body: &str, wait: Duration) -> (io::Result<AniCliRun>, String) {
+        let log = dir.join("ani-cli-launch.log");
+        let run = start_ani_cli(shell_command(dir, body), &log, wait);
+        (run, fs::read_to_string(&log).unwrap_or_default())
+    }
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn classify_log_finds_the_decisive_marker_and_ignores_other_output() {
+        assert_eq!(
+            classify_log("\u{1b}[1;31mInvalid episode!\u{1b}[0m\n"),
+            Some(Marker::InvalidEpisode)
+        );
+        assert_eq!(
+            classify_log("\u{1b}[2K\r\u{1b}[1;34mhianime.at links fetched\u{1b}[0m\n"),
+            Some(Marker::LinksFetched)
+        );
+        assert_eq!(classify_log("Episode not released!\n"), None);
+        assert_eq!(classify_log(""), None);
+    }
+
+    #[test]
+    fn classify_log_prefers_invalid_episode_when_both_appear() {
+        assert_eq!(
+            classify_log("hianime.at links fetched\nInvalid episode!\n"),
+            Some(Marker::InvalidEpisode)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn run_ani_cli_flags_an_invalid_episode_message_on_stderr() {
+    fn start_ani_cli_reports_an_invalid_episode_message() {
         let dir = tempfile::tempdir().unwrap();
-        let command = shell_command(
+
+        let (run, log) = run_fake(
             dir.path(),
             "printf '\\033[1;31mInvalid episode!\\033[0m\\n' >&2; exit 1",
+            WAIT,
         );
 
-        let run = run_ani_cli(command).unwrap();
-
-        assert_eq!(run.status.code(), Some(1));
-        assert!(run.invalid_episode);
+        assert_eq!(run.unwrap(), AniCliRun::InvalidEpisode);
+        assert!(
+            log.ends_with("\u{1b}[1;31mInvalid episode!\u{1b}[0m\n"),
+            "{log:?}"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn run_ani_cli_does_not_flag_other_failures_or_the_message_on_stdout() {
+    fn start_ani_cli_reports_a_failed_exit_without_a_marker() {
         let dir = tempfile::tempdir().unwrap();
-        let other = shell_command(dir.path(), "echo 'Episode not released!' >&2; exit 1");
-        let run = run_ani_cli(other).unwrap();
-        assert_eq!(run.status.code(), Some(1));
-        assert!(!run.invalid_episode);
 
-        let on_stdout = shell_command(dir.path(), "echo 'Invalid episode!'; exit 1");
-        let run = run_ani_cli(on_stdout).unwrap();
-        assert!(!run.invalid_episode);
+        let (run, _) = run_fake(dir.path(), "echo 'Episode not released!' >&2; exit 1", WAIT);
+
+        match run.unwrap() {
+            AniCliRun::Failed(status) => assert_eq!(status.code(), Some(1)),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn run_ani_cli_of_a_clean_exit_reports_success_and_no_flag() {
+    fn start_ani_cli_reports_a_clean_exit_as_finished() {
         let dir = tempfile::tempdir().unwrap();
 
-        let run = run_ani_cli(shell_command(dir.path(), "exit 0")).unwrap();
+        let (run, _) = run_fake(dir.path(), "exit 0", WAIT);
 
-        assert!(run.status.success());
-        assert!(!run.invalid_episode);
+        assert_eq!(run.unwrap(), AniCliRun::Finished);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_ani_cli_returns_playing_while_ani_cli_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("release");
+        let done = dir.path().join("done");
+        let body = format!(
+            "echo 'hianime.at links fetched'\ni=0\nwhile [ ! -e {} ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\ntouch {}",
+            release.display(),
+            done.display()
+        );
+
+        let (run, log) = run_fake(dir.path(), &body, WAIT);
+
+        assert_eq!(run.unwrap(), AniCliRun::Playing);
+        assert!(!done.exists());
+        assert!(log.ends_with("hianime.at links fetched\n"), "{log:?}");
+        fs::write(&release, "").unwrap();
+        let deadline = Instant::now() + WAIT;
+        while !done.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(done.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_ani_cli_times_out_on_a_silent_ani_cli_that_keeps_running() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (run, _) = run_fake(dir.path(), "sleep 2", Duration::from_millis(100));
+
+        assert_eq!(run.unwrap(), AniCliRun::TimedOut);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_ani_cli_logs_the_command_line_then_ani_clis_output() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (_, log) = run_fake(dir.path(), "echo out; echo err >&2", WAIT);
+
+        assert_eq!(
+            log,
+            format!("# {}/fake-ani-cli\nout\nerr\n", dir.path().display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_ani_cli_gives_ani_cli_no_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (run, log) = run_fake(
+            dir.path(),
+            "if read line; then echo got-input; else echo no-input; fi",
+            WAIT,
+        );
+
+        assert_eq!(run.unwrap(), AniCliRun::Finished);
+        assert!(log.ends_with("no-input\n"), "{log:?}");
     }
 
     #[test]
-    fn run_ani_cli_of_a_nonexistent_program_returns_an_error_not_a_panic() {
-        let err = run_ani_cli(Command::new(
-            "/definitely/does/not/exist/tsuzuki-fake-ani-cli",
-        ))
+    fn start_ani_cli_of_a_nonexistent_program_returns_an_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = start_ani_cli(
+            Command::new("/definitely/does/not/exist/tsuzuki-fake-ani-cli"),
+            &dir.path().join("ani-cli-launch.log"),
+            WAIT,
+        )
         .unwrap_err();
+
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn start_ani_cli_with_an_unopenable_log_returns_an_error_before_running_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("file");
+        fs::write(&blocking_file, b"x").unwrap();
+
+        let err = start_ani_cli(
+            Command::new("/definitely/does/not/exist/tsuzuki-fake-ani-cli"),
+            &blocking_file.join("ani-cli-launch.log"),
+            WAIT,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn ani_cli_log_path_sits_next_to_the_mpv_launch_log() {
+        let launch = launch_of(
+            custom_target("mpv", &[]),
+            PathBuf::from("/data/tsuzuki/mpv-launch.log"),
+        );
+
+        assert_eq!(
+            ani_cli_log_path(&launch),
+            PathBuf::from("/data/tsuzuki/ani-cli-launch.log")
+        );
     }
 
     #[test]
@@ -343,6 +526,7 @@ mod tests {
                     .to_vec(),
                 vec![
                     env("ANI_CLI_EXACT", "1"),
+                    env("ANI_CLI_MENU", "true"),
                     env("ANI_CLI_PLAYER", "mpv"),
                     env("ANI_CLI_PLAYER_FLAGS", "--start=312.5"),
                 ],
@@ -366,7 +550,11 @@ mod tests {
         let (_, _, envs) = command_parts(&command);
         assert_eq!(
             envs,
-            vec![env("ANI_CLI_EXACT", "1"), env("ANI_CLI_PLAYER", "mpv")]
+            vec![
+                env("ANI_CLI_EXACT", "1"),
+                env("ANI_CLI_MENU", "true"),
+                env("ANI_CLI_PLAYER", "mpv")
+            ]
         );
     }
 
@@ -411,6 +599,7 @@ mod tests {
             command_parts(&command).2,
             vec![
                 env("ANI_CLI_EXACT", "1"),
+                env("ANI_CLI_MENU", "true"),
                 env("ANI_CLI_PLAYER", "flatpak run io.mpv.Mpv"),
             ]
         );

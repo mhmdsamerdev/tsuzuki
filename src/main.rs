@@ -634,10 +634,19 @@ fn play_ani_cli(
         record.position_seconds,
         std::env::var("ANI_CLI_PLAYER_FLAGS").ok().as_deref(),
     );
-    match launch::run_ani_cli(command) {
-        Ok(run) if run.status.success() => {}
+    let log = launch::ani_cli_log_path(mpv);
+    match launch::start_ani_cli(command, &log, launch::ANI_CLI_START_WAIT) {
+        Ok(launch::AniCliRun::Finished) => {}
+        Ok(launch::AniCliRun::Playing) => {
+            println!("  → ani-cli keeps playing; output: {}", log.display());
+            return ExitCode::SUCCESS;
+        }
+        Ok(launch::AniCliRun::TimedOut) => {
+            eprintln!("⚠ ani-cli is still starting; output: {}", log.display());
+            return ExitCode::SUCCESS;
+        }
         Ok(run) => {
-            if run.invalid_episode {
+            if run == launch::AniCliRun::InvalidEpisode {
                 let mut updated = state.clone();
                 if reconcile::complete_ani_cli_show(&mut updated, name, episode) {
                     return match state::write(state_path, &updated) {
@@ -654,7 +663,10 @@ fn play_ani_cli(
                     };
                 }
             }
-            eprintln!("⚠ ani-cli failed to play episode {episode}");
+            eprintln!(
+                "⚠ ani-cli failed to play episode {episode}; output: {}",
+                log.display()
+            );
             return ExitCode::FAILURE;
         }
         Err(e) => {

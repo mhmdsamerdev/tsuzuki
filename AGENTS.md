@@ -48,7 +48,7 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - Opt-in: `tsuzuki add ani-cli` enables `[ani_cli]`. Before that nothing is tracked, read or checked.
 - Tsuzuki never starts, lists or imports an ani-cli show. A record exists only because an mpv-script log entry exactly matched a title in ani-cli's history. History is read-only and never evidence of watching.
 - Series = show title under the reserved root `ani-cli://`. The episode number comes from the logged title: no ordering, no Anitomy.
-- Resume runs ani-cli itself in the foreground via its search path, never `-c`. Tsuzuki never writes ani-cli's history and makes no network requests itself.
+- Resume runs ani-cli itself via its search path, never `-c`. It waits only until ani-cli is past its early failures (`Invalid episode!`, exit, or `links fetched`), then leaves it playing; its output goes to `ani-cli-launch.log`. Tsuzuki never writes ani-cli's history and makes no network requests itself.
 - `Completed` never relies on sync alone: the MAL `total_episodes` saved by `sync` (unknown or 0 never completes), or ani-cli's own `Invalid episode!` for the episode just after a finished one.
 - A record whose title leaves ani-cli's history is inert until `doctor --fix --forget-orphans`. Only mpv is tracked.
 
