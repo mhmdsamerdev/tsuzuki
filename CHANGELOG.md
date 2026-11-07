@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- Fix progress not updating when a later episode is finished after an earlier one was stopped mid-way.
+
 ## [v0.1.9]
 
 - The `resume` picker shows the episode and saved position like `status`: `Name — ep. 9 (12:34)`.

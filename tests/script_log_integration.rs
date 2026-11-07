@@ -241,3 +241,88 @@ fn quit_entry_through_a_symlinked_episode_file_is_recorded() {
         "the reading through the symlinked episode file must be recorded:\n{state}"
     );
 }
+
+#[test]
+fn quit_near_the_end_of_the_final_episode_after_an_earlier_mid_episode_stop_completes_the_series() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let series_dir = home.join("Anime").join("Lupin");
+    fs::create_dir_all(&series_dir).unwrap();
+    fs::File::create(series_dir.join("Lupin.S04E07.mkv")).unwrap();
+    fs::File::create(series_dir.join("Lupin.S04E08.mkv")).unwrap();
+
+    let add = run(home, &["add", "~/Anime"]);
+    assert!(add.status.success());
+
+    let state_path = home.join(".local/share/tsuzuki/state.toml");
+    fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    fs::write(
+        &state_path,
+        r#"[[series]]
+root = "~/Anime"
+name = "Lupin"
+status = "in_progress"
+current_relative_path = "Lupin/Lupin.S04E07.mkv"
+position_seconds = 2473.2
+episode_number = 7
+updated_at = 1700000000
+"#,
+    )
+    .unwrap();
+
+    // E07: stopped 287s from the end (Resume), written first.
+    // E08: quit 8s from the end (Completed), written later.
+    let script_log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&script_log_dir).unwrap();
+    for (name, file, duration, position, reason, mtime) in [
+        (
+            "aaaa0007",
+            "Lupin.S04E07.mkv",
+            2760.896,
+            2473.2,
+            "stop",
+            1_800_000_000,
+        ),
+        (
+            "bbbb0008",
+            "Lupin.S04E08.mkv",
+            2922.944,
+            2914.6,
+            "quit",
+            1_800_000_700,
+        ),
+    ] {
+        let path = script_log_dir.join(name);
+        fs::write(
+            &path,
+            format!(
+                "# {}\nduration={duration}\nposition={position}\nreason={reason}\n",
+                series_dir.join(file).display()
+            ),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime))
+            .unwrap();
+    }
+
+    let list = run(home, &["list"]);
+    assert!(list.status.success());
+    let list_stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_stdout.starts_with("Completed:\n"),
+        "finishing the last episode after an earlier mid-episode stop must complete it, \
+         got: {list_stdout}"
+    );
+
+    let state_contents = fs::read_to_string(&state_path).unwrap();
+    assert!(
+        state_contents.contains("status = \"completed\"")
+            && state_contents.contains("episode_number = 8"),
+        "persisted state.toml contents:\n{state_contents}"
+    );
+}

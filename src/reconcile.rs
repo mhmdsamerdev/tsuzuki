@@ -447,15 +447,17 @@ fn reconcile_one_series(
     };
 
     // Forward scan from `start_index`. Only `Resume` is a landing candidate,
-    // and a later one overwrites an earlier one. `Completed` is handled below
-    // when no `Resume` exists.
+    // and a later one overwrites an earlier one. A `Completed` reading
+    // supersedes the landing `Resume` only when it is on a later episode and
+    // its entry is strictly newer; otherwise it counts only when no `Resume`
+    // exists at all.
     //
     // `any_completed_found` covers the whole range, not just `start_index`.
     // A missing entry proves nothing: an episode may simply not have been
     // opened since the script was installed. A `Completed` reading comes from
     // a real entry, so it is enough on its own.
-    let mut best: Option<(usize, f64)> = None;
-    let mut any_completed_found = false;
+    let mut best: Option<(usize, f64, SystemTime)> = None;
+    let mut completed: Vec<(usize, SystemTime)> = Vec::new();
     for (idx, file) in ordered.iter().enumerate().skip(start_index) {
         let real_file = normalize(file, home);
         let Some(candidate) = fresh_candidate(candidates, &real_file, cutoff) else {
@@ -465,33 +467,36 @@ fn reconcile_one_series(
         else {
             continue;
         };
-        if matches!(action, PlaybackAction::Completed) {
-            any_completed_found = true;
-        }
-        if let PlaybackAction::Resume(pos) = action {
-            best = Some((idx, pos));
+        match action {
+            PlaybackAction::Completed => completed.push((idx, candidate.mtime)),
+            PlaybackAction::Resume(pos) => best = Some((idx, pos, candidate.mtime)),
         }
     }
 
-    let Some((found_index, position)) = best else {
-        // No `Resume` from `start_index` on. A `Completed` reading anywhere in
-        // that range advances the cursor; without one, nothing changes.
-        //
-        // A never-tracked series gets a placeholder record at the first
-        // episode for `apply_completion_advance` to overwrite.
-        if !any_completed_found {
-            return;
-        }
+    // Where the completion walk starts, if a `Completed` reading decides the
+    // outcome: the start of the range when no `Resume` exists, else the
+    // landing `Resume` when a later episode was finished after it.
+    let completion_start = match best {
+        None => (!completed.is_empty()).then_some(start_index),
+        Some((found_index, _, resume_mtime)) => completed
+            .iter()
+            .any(|&(idx, mtime)| idx > found_index && mtime > resume_mtime)
+            .then_some(found_index),
+    };
+
+    if let Some(walk_start) = completion_start {
+        // A never-tracked series gets a placeholder record at the walk's
+        // first episode for `apply_completion_advance` to overwrite.
         let index = match existing_index {
             Some(i) => i,
             None => {
                 let identities = anitomy::episode_identity(&ordered);
-                let start_identity = identities.get(start_index);
+                let start_identity = identities.get(walk_start);
                 state.series.push(SeriesRecord {
                     root: root.to_string(),
                     name: name.to_string(),
                     status: Status::InProgress,
-                    current_relative_path: ordered[start_index]
+                    current_relative_path: ordered[walk_start]
                         .strip_prefix(&expanded_root)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_else(|_| name.to_string()),
@@ -511,12 +516,16 @@ fn reconcile_one_series(
             &expanded_root,
             &ordered,
             candidates,
-            start_index,
+            walk_start,
             cutoff,
             resume_seconds,
             completion_remaining_seconds,
             home,
         );
+        return;
+    }
+
+    let Some((found_index, position, _)) = best else {
         return;
     };
 
@@ -572,8 +581,8 @@ fn reconcile_one_series(
 }
 
 /// Advances the cursor of `state.series[i]` once its tracked episode is
-/// confirmed complete and no `Resume` exists ahead. Skips every consecutive
-/// episode that also reads `Completed` and lands at position 0 of the first
+/// confirmed complete, with no `Resume` ahead or none newer than the finish.
+/// Skips every consecutive episode that also reads `Completed` and lands at position 0 of the first
 /// one that doesn't. If the walk runs out of episodes, the record becomes
 /// `Completed`: the path and position stay as they were, but `episode_number`
 /// is set to the final episode's.
@@ -1228,6 +1237,144 @@ mod tests {
         let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
         assert_eq!(record.status, Status::Completed);
         assert_eq!(record.position_seconds, 1.5);
+    }
+
+    /// Two-episode (or three-episode) series `Monster` with `resume_seconds=1`
+    /// and `completion_remaining_seconds=2`. Returns the config, log dir,
+    /// series path and root.
+    fn monster_fixture(dir: &Path, episodes: &[&str]) -> (Config, PathBuf, PathBuf, PathBuf) {
+        let root = dir.join("Anime");
+        let series_path = root.join("Monster");
+        for ep in episodes {
+            touch(&series_path.join(ep));
+        }
+        let mut config = default_config(&root);
+        config.thresholds.resume_seconds = 1;
+        config.thresholds.completion_remaining_seconds = 2;
+        (config, dir.join("mpv-log"), series_path, root)
+    }
+
+    #[test]
+    fn a_completed_reading_on_the_last_episode_newer_than_an_earlier_resume_marks_series_completed()
+    {
+        let dir = tempdir().unwrap();
+        let (config, log_dir, series_path, root) =
+            monster_fixture(dir.path(), &["ep01.mkv", "ep02.mkv"]);
+        let mut state = State::default();
+
+        // ep01: 1.5s of 5.0s -> Resume, written first.
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(1.5),
+            "stop",
+        );
+        set_mtime(&log_dir.join("entry1"), at(0));
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+
+        // ep02 (final): 4.0s of 5.0s -> Completed, written later.
+        write_script_entry(
+            &log_dir,
+            "entry2",
+            &series_path.join("ep02.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
+        set_mtime(&log_dir.join("entry2"), at(60));
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.status, Status::Completed);
+        assert_eq!(record.episode_number, Some(2));
+        assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+        assert_eq!(record.position_seconds, 1.5);
+    }
+
+    #[test]
+    fn a_completed_reading_newer_than_an_earlier_resume_advances_past_it_to_the_next_episode() {
+        let dir = tempdir().unwrap();
+        let (config, log_dir, series_path, root) =
+            monster_fixture(dir.path(), &["ep01.mkv", "ep02.mkv", "ep03.mkv"]);
+        let mut state = State::default();
+
+        write_script_entry(
+            &log_dir,
+            "entry1",
+            &series_path.join("ep01.mkv"),
+            Some(5.0),
+            Some(1.5),
+            "stop",
+        );
+        set_mtime(&log_dir.join("entry1"), at(0));
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
+
+        write_script_entry(
+            &log_dir,
+            "entry2",
+            &series_path.join("ep02.mkv"),
+            Some(5.0),
+            Some(4.0),
+            "quit",
+        );
+        set_mtime(&log_dir.join("entry2"), at(60));
+        reconcile_with_script_log_dirs(&config, &mut state, None, std::slice::from_ref(&log_dir));
+
+        let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+        assert_eq!(record.status, Status::InProgress);
+        assert_eq!(record.current_relative_path, "Monster/ep03.mkv");
+        assert_eq!(record.position_seconds, 0.0);
+        assert_eq!(record.episode_number, Some(3));
+    }
+
+    #[test]
+    fn a_completed_reading_not_newer_than_the_resume_ahead_of_it_keeps_the_resume() {
+        // Older, and equal-mtime, completed readings on a later episode lose.
+        for completed_at in [5, 10] {
+            let dir = tempdir().unwrap();
+            let (config, log_dir, series_path, root) =
+                monster_fixture(dir.path(), &["ep01.mkv", "ep02.mkv"]);
+            let mut state = State::default();
+
+            write_script_entry(
+                &log_dir,
+                "entry1",
+                &series_path.join("ep01.mkv"),
+                Some(5.0),
+                Some(1.5),
+                "stop",
+            );
+            set_mtime(&log_dir.join("entry1"), at(10));
+            write_script_entry(
+                &log_dir,
+                "entry2",
+                &series_path.join("ep02.mkv"),
+                Some(5.0),
+                Some(4.0),
+                "quit",
+            );
+            set_mtime(&log_dir.join("entry2"), at(completed_at));
+            reconcile_with_script_log_dirs(
+                &config,
+                &mut state,
+                None,
+                std::slice::from_ref(&log_dir),
+            );
+
+            let record = state.find(&root.to_string_lossy(), "Monster").unwrap();
+            assert_eq!(
+                record.status,
+                Status::InProgress,
+                "completed_at={completed_at}"
+            );
+            assert_eq!(record.current_relative_path, "Monster/ep01.mkv");
+            assert_eq!(record.position_seconds, 1.5);
+        }
     }
 
     #[test]
