@@ -45,13 +45,12 @@ Not a player, library manager, or MAL replacement. Maintenance mode: fixes, smal
 - `mal::DEFAULT_CLIENT_ID` is public on purpose (PKCE, no secret). Never redact or remove it.
 
 ## ani-cli source
-- Opt-in: `tsuzuki add ani-cli` enables `[ani_cli]` in config. Before that nothing is tracked, read or checked.
-- Tsuzuki never starts, lists or imports an ani-cli show. A record exists only because an mpv-script log entry (stream URL, title ending ` Episode <int>`) exactly matched a title in ani-cli's history. History is read-only and never evidence of watching.
+- Opt-in: `tsuzuki add ani-cli` enables `[ani_cli]`. Before that nothing is tracked, read or checked.
+- Tsuzuki never starts, lists or imports an ani-cli show. A record exists only because an mpv-script log entry exactly matched a title in ani-cli's history. History is read-only and never evidence of watching.
 - Series = show title under the reserved root `ani-cli://`. The episode number comes from the logged title: no ordering, no Anitomy.
-- Resume runs ani-cli in the foreground via its search path (`-e`, never `-c`), with `ANI_CLI_PLAYER` from `mpv::resolve` and `--start` via `ANI_CLI_PLAYER_FLAGS`. Unfinished: same episode and position. Finished: the next episode. Tsuzuki never writes ani-cli's history and makes no network requests itself.
-- `Completed` when the finished episode equals the MAL `total_episodes` saved by `sync` (unknown or 0 never completes), or when ani-cli itself prints `Invalid episode!` for the stored episode at resume and the cursor sits right after a finished episode (position 0). The record then keeps the last finished episode. Never rely on sync alone. A `Completed` show isn't offered for resume; new playback reactivates it, as for folders.
-- A record whose title leaves ani-cli's history is inert until `doctor --fix --forget-orphans`.
-- Only mpv is tracked. Other players are out of scope.
+- Resume runs ani-cli itself in the foreground via its search path, never `-c`. Tsuzuki never writes ani-cli's history and makes no network requests itself.
+- `Completed` never relies on sync alone: the MAL `total_episodes` saved by `sync` (unknown or 0 never completes), or ani-cli's own `Invalid episode!` for the episode just after a finished one.
+- A record whose title leaves ani-cli's history is inert until `doctor --fix --forget-orphans`. Only mpv is tracked.
 
 ## Code style
 - Match the surrounding code: naming, idiom, comment density.
