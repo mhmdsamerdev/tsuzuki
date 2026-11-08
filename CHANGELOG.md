@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.1.10]
 
 - Fix the `resume`/`start` pickers garbling the screen when the terminal is small or resized.
 - Fix progress not updating when a later episode is finished after an earlier one was stopped mid-way.
