@@ -26,7 +26,8 @@ Clippy and fmt skip `vendor/anitomy` on purpose.
 cargo nextest run <name>           # one test, by name substring
 cargo nextest run --test cli       # end-to-end CLI suite
 cargo nextest run --run-ignored ignored-only -E 'not binary(perf)'   # live-network tests
-cargo test --release --test perf -- --ignored --nocapture   # speed benchmark; run after touching reconcile, overview or script_log
+cargo test --release --test perf perf_warm -- --ignored --nocapture   # warm speed benchmark; run after touching reconcile, overview or script_log
+sudo -v && cargo test --release --test perf perf_cold -- --ignored --nocapture   # cold-cache benchmark (drops OS caches via sudo)
 ./target/debug/tsuzuki status   # run the dev build
 ```
 

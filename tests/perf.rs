@@ -1,18 +1,25 @@
 //! Opt-in speed benchmark: everyday commands against a large library and a
-//! large mpv-log, timed on the real release binary.
+//! large mpv-log, timed on the real release binary. Warm and cold-cache runs
+//! are separate tests with separate budgets, so a regression names which grew.
 //!
-//! Run: `cargo test --release --test perf -- --ignored --nocapture`
+//! Warm: `cargo test --release --test perf perf_warm -- --ignored --nocapture`
+//! Cold: `sudo -v && cargo test --release --test perf perf_cold -- --ignored --nocapture`
+//! (the cold test drops the OS caches through `sudo -n`).
 
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-/// Upper bound for every command's median: about 2.5× the slowest measured
-/// (~80 ms on an NVMe laptop).
-const BUDGET: Duration = Duration::from_millis(200);
+/// Upper bound for every warm command's median: about 2.5× the slowest
+/// measured (~80 ms on an NVMe laptop).
+const WARM_BUDGET: Duration = Duration::from_millis(200);
 
-const TIMED_RUNS: usize = 9;
+/// Upper bound for every cold-cache command's median, on the project's disk.
+const COLD_BUDGET: Duration = Duration::from_millis(1000);
+
+const WARM_RUNS: usize = 9;
+const COLD_RUNS: usize = 3;
 
 fn run(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tsuzuki"))
@@ -87,7 +94,7 @@ fn quit_entry(home: &Path, entry_name: &str, source_file: &Path, position_second
 /// Two tracked roots (`Anime` and the nested `Anime/[RE]`), 173 series of 24
 /// files (one symlinked in from outside, one with symlinked season folders, one
 /// with symlinked episode files), and 5 000 mpv-log entries, 3 500 of them for
-/// files outside every root. 68 series end up in progress.
+/// files outside every root (the files exist, as in a real library). 68 series end up in progress.
 fn large_library(home: &Path) {
     let anime = home.join("Anime");
     let rewatches = anime.join("[RE]");
@@ -153,31 +160,85 @@ fn large_library(home: &Path) {
     }
     for n in 0..3_494 {
         let file = home.join(format!("Downloads/clip{n:04}.mkv"));
+        touch(&file);
         quit_entry(home, &format!("u{n:04}"), &file, 300.0);
     }
 }
 
-/// Median wall time of `TIMED_RUNS` runs after one warm-up.
-fn median_time(home: &Path, args: &[&str], code: i32) -> Duration {
-    run_expecting(home, args, code);
-    let mut times: Vec<Duration> = (0..TIMED_RUNS)
-        .map(|_| {
-            let start = Instant::now();
-            run_expecting(home, args, code);
-            start.elapsed()
-        })
-        .collect();
-    times.sort();
-    times[TIMED_RUNS / 2]
+/// The measured commands and their exit codes.
+const COMMANDS: [(&[&str], i32); 7] = [
+    (&["list"], 0),
+    (&["status"], 0),
+    // Several in progress and no TTY: lists them and exits non-zero.
+    (&[], 1),
+    (&["resume", "Series 003"], 0),
+    (&["start", "Series 100"], 0),
+    (&["pause", "Series 001"], 0),
+    (&["drop", "Series 002"], 0),
+];
+
+fn label(args: &[&str]) -> String {
+    if args.is_empty() {
+        "tsuzuki".to_string()
+    } else {
+        args.join(" ")
+    }
 }
 
-#[test]
-#[ignore = "timing; run in release: cargo test --release --test perf -- --ignored --nocapture"]
-fn perf_large_library_every_command_stays_under_budget() {
+fn median(mut times: Vec<Duration>) -> Duration {
+    times.sort();
+    times[times.len() / 2]
+}
+
+/// Median wall time of `WARM_RUNS` runs after one warm-up.
+fn warm_median_time(home: &Path, args: &[&str], code: i32) -> Duration {
+    run_expecting(home, args, code);
+    median(
+        (0..WARM_RUNS)
+            .map(|_| {
+                let start = Instant::now();
+                run_expecting(home, args, code);
+                start.elapsed()
+            })
+            .collect(),
+    )
+}
+
+/// Drops the page, dentry and inode caches, so the next run starts cold.
+fn drop_caches() {
+    let status = Command::new("sudo")
+        .args(["-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"])
+        .status()
+        .expect("failed to spawn sudo");
+    assert!(
+        status.success(),
+        "dropping caches needs passwordless sudo; run `sudo -v` first"
+    );
+}
+
+/// Median wall time of `COLD_RUNS` runs, each right after a cache drop.
+fn cold_median_time(home: &Path, args: &[&str], code: i32) -> Duration {
+    median(
+        (0..COLD_RUNS)
+            .map(|_| {
+                drop_caches();
+                let start = Instant::now();
+                run_expecting(home, args, code);
+                start.elapsed()
+            })
+            .collect(),
+    )
+}
+
+/// The large library under the project's target dir: a real disk, unlike
+/// `/tmp` (tmpfs), so dropped caches make the next run truly cold.
+fn large_library_fixture() -> tempfile::TempDir {
     if cfg!(debug_assertions) {
         panic!("debug timings are meaningless; run with --release");
     }
-    let home_dir = tempfile::tempdir().unwrap();
+    let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(base).unwrap();
+    let home_dir = tempfile::tempdir_in(base).unwrap();
     let home = home_dir.path();
     large_library(home);
 
@@ -192,34 +253,45 @@ fn perf_large_library_every_command_stays_under_budget() {
     }
     expected.push_str("\nRunning `tsuzuki` bare will prompt among these.\n");
     assert_eq!(stdout_of(&run_expecting(home, &["status"], 0)), expected);
+    home_dir
+}
 
-    let commands: [(&[&str], i32); 7] = [
-        (&["list"], 0),
-        (&["status"], 0),
-        // Several in progress and no TTY: lists them and exits non-zero.
-        (&[], 1),
-        (&["resume", "Series 003"], 0),
-        (&["start", "Series 100"], 0),
-        (&["pause", "Series 001"], 0),
-        (&["drop", "Series 002"], 0),
-    ];
-
+/// Prints one `kind` table and asserts every median is within `budget`.
+fn assert_within_budget(
+    kind: &str,
+    home: &Path,
+    budget: Duration,
+    time: fn(&Path, &[&str], i32) -> Duration,
+) {
     let mut over = Vec::new();
-    for (args, code) in commands {
-        let median = median_time(home, args, code);
-        let label = if args.is_empty() {
-            "tsuzuki".to_string()
-        } else {
-            args.join(" ")
-        };
+    for (args, code) in COMMANDS {
+        let median = time(home, args, code);
+        let label = label(args);
         println!(
-            "{label:<20} {:>7.1} ms  (budget {} ms)",
+            "{kind:<5} {label:<20} {:>8.1} ms  (budget {} ms)",
             median.as_secs_f64() * 1000.0,
-            BUDGET.as_millis()
+            budget.as_millis()
         );
-        if median > BUDGET {
+        if median > budget {
             over.push(format!("{label}: {median:?}"));
         }
     }
-    assert!(over.is_empty(), "over the {BUDGET:?} budget: {over:?}");
+    assert!(
+        over.is_empty(),
+        "{kind} over the {budget:?} budget: {over:?}"
+    );
+}
+
+#[test]
+#[ignore = "timing; run in release: cargo test --release --test perf perf_warm -- --ignored --nocapture"]
+fn perf_warm_large_library_every_command_stays_under_budget() {
+    let home_dir = large_library_fixture();
+    assert_within_budget("warm", home_dir.path(), WARM_BUDGET, warm_median_time);
+}
+
+#[test]
+#[ignore = "timing, drops OS caches via sudo; run in release: sudo -v && cargo test --release --test perf perf_cold -- --ignored --nocapture"]
+fn perf_cold_large_library_every_command_stays_under_budget() {
+    let home_dir = large_library_fixture();
+    assert_within_budget("cold", home_dir.path(), COLD_BUDGET, cold_median_time);
 }
