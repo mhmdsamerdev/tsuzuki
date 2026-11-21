@@ -200,7 +200,7 @@ fn pause_and_drop_without_a_record_exit_nonzero_with_a_plain_message() {
         assert_eq!(out.status.code(), Some(1), "{cmd}");
         assert_eq!(
             stderr_of(&out),
-            "error: no progress to act on for this series — it was never started\n",
+            "error: \"Monster\": no progress to act on — it was never started\n",
             "{cmd}"
         );
     }

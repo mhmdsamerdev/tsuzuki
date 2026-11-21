@@ -84,7 +84,7 @@ fn dispatch(
         }
         Command::Status => status_command(config, state_path, home),
         Command::List => list_command(config, state_path, home),
-        Command::Add { paths } => add_command(&paths, config, config_path),
+        Command::Add { paths } => add_command(&paths, config, config_path, home),
         Command::Start { series, root } => {
             start_command(series, root, config, state_path, home, is_tty)
         }
@@ -133,28 +133,37 @@ fn dispatch(
 /// `tsuzuki add <path>...`: validates and persists new tracked roots. A
 /// failing path doesn't stop the rest; config is written once, and the
 /// per-path lines are printed only after that write succeeds.
-fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> ExitCode {
-    let mut lines = Vec::new();
+fn add_command(
+    paths: &[PathBuf],
+    config: &mut Config,
+    config_path: &Path,
+    home: Option<&Path>,
+) -> ExitCode {
+    let mut lines: Vec<(String, String)> = Vec::new();
     let mut changed = false;
     let mut failed = false;
+    let mut added_ani_cli = false;
+    let mut added_roots: Vec<PathBuf> = Vec::new();
     for path in paths {
         if path == Path::new(ani_cli::SOURCE_ARG) {
             if config.ani_cli.enabled {
-                lines.push((ani_cli::SOURCE_ARG.to_string(), "already tracked"));
+                lines.push((ani_cli::SOURCE_ARG.to_string(), "already tracked".into()));
             } else {
                 config.ani_cli.enabled = true;
                 changed = true;
-                lines.push((ani_cli::SOURCE_ARG.to_string(), "added"));
+                added_ani_cli = true;
+                lines.push((ani_cli::SOURCE_ARG.to_string(), "added".into()));
             }
             continue;
         }
         match roots::add_root(config, path) {
             Ok(roots::AddOutcome::AlreadyTracked(as_typed)) => {
-                lines.push((as_typed.display().to_string(), "already tracked"));
+                lines.push((as_typed.display().to_string(), "already tracked".into()));
             }
             Ok(roots::AddOutcome::Added(as_typed)) => {
                 changed = true;
-                lines.push((as_typed.display().to_string(), "added"));
+                added_roots.push(as_typed.clone());
+                lines.push((as_typed.display().to_string(), "added".into()));
             }
             Err(e) => {
                 let _ = fail(&e.to_string());
@@ -168,10 +177,37 @@ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> Ex
             config_path.display()
         ));
     }
+    // Counted after the write, so a root that is also a child of another root
+    // is treated as the root it now is. Depth-1 only: cost scales with series.
+    let tracked = roots::tracked_real_paths(config, home);
+    for (subject, result) in &mut lines {
+        if let Some(root) = added_roots
+            .iter()
+            .find(|r| r.display().to_string() == *subject)
+        {
+            let expanded = roots::expand_tilde(root, home);
+            let count = series::series_in_root(&expanded, &tracked).map_or(0, |s| s.len());
+            *result = match count {
+                0 => "added (no series found)".to_string(),
+                1 => "added (1 series)".to_string(),
+                n => format!("added ({n} series)"),
+            };
+        }
+    }
     for (subject, result) in &lines {
         confirm(subject, result);
     }
+    if !added_roots.is_empty() {
+        println!("→ tsuzuki");
+    } else if added_ani_cli {
+        println!("→ tsuzuki doctor");
+    }
     exit_code(failed)
+}
+
+/// True before anything is tracked: no root and ani-cli not enabled.
+fn has_no_sources(config: &Config) -> bool {
+    config.roots.paths.is_empty() && !config.ani_cli.enabled
 }
 
 fn exit_code(failed: bool) -> ExitCode {
@@ -338,18 +374,21 @@ fn sync_exclude_command(
     exit_code(failed)
 }
 
-/// Bare `tsuzuki exclude`: lists Anitomy-suggested OVA/Special/Movie
+/// Bare `tsuzuki exclude`: lists suggested OVA/Special/Movie
 /// candidates with the `exclude` command for each. Never excludes anything
 /// itself.
 fn suggest_candidates_command(config: &Config) {
     let candidates = exclude::suggest_candidates(config, dirs::home_dir().as_deref());
 
     if candidates.is_empty() {
-        println!("No Anitomy-suggested candidates found under any tracked root.");
+        println!("No likely specials, OVAs or movies found under any tracked root.");
+        if has_no_sources(config) {
+            println!("→ tsuzuki add <path>");
+        }
         return;
     }
 
-    println!("Anitomy-suggested candidates (not yet excluded):");
+    println!("Likely specials, OVAs or movies (not yet excluded):");
     println!();
     for candidate in &candidates {
         println!("⚠ {}", candidate.relative_path);
@@ -759,9 +798,9 @@ fn scope_label(root: &str) -> String {
 
 fn print_positional_error(err: &target::PositionalError, command_name: &str) -> ExitCode {
     match err {
-        target::PositionalError::NotFound(arg) => {
-            fail(&format!("no tracked series or root named \"{arg}\""))
-        }
+        target::PositionalError::NotFound(arg) => fail(&format!(
+            "no tracked series or root named \"{arg}\" — run `tsuzuki list` to see tracked series"
+        )),
         target::PositionalError::AmbiguousSeries { series, roots } => {
             print_ambiguous(series, command_name, roots)
         }
@@ -794,7 +833,9 @@ fn print_positional_error(err: &target::PositionalError, command_name: &str) -> 
 
 fn print_target_error(err: &target::TargetError, command_name: &str) -> ExitCode {
     match err {
-        target::TargetError::NotFound(name) => fail(&format!("no tracked series named \"{name}\"")),
+        target::TargetError::NotFound(name) => fail(&format!(
+            "no tracked series named \"{name}\" — run `tsuzuki list` to see tracked series"
+        )),
         target::TargetError::RootNotFound(r) => fail(&format!("not a tracked root: {r}")),
         target::TargetError::Ambiguous { series, roots } => {
             print_ambiguous(series, command_name, roots)
@@ -932,7 +973,11 @@ fn status_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Ex
 
     if in_progress.is_empty() {
         println!("Nothing in progress.");
-        println!("→ tsuzuki start");
+        if has_no_sources(config) {
+            println!("→ tsuzuki add <path>");
+        } else {
+            println!("→ tsuzuki start");
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -955,8 +1000,12 @@ fn list_command(config: &Config, state_path: &Path, home: Option<&Path>) -> Exit
 
     let overviews = overview::sorted_for_list(overview::all_series(config, &state, home));
     if overviews.is_empty() {
-        println!("No tracked series.");
-        println!("→ tsuzuki add <path>");
+        if has_no_sources(config) {
+            println!("No tracked folders.");
+            println!("→ tsuzuki add <path>");
+        } else {
+            println!("No series found under your tracked folders.");
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -1065,6 +1114,9 @@ fn start_command(
             Some(root) => fail(&format!("nothing to start in {}", scope_label(root))),
             None => {
                 println!("Nothing to start.");
+                if has_no_sources(config) {
+                    println!("→ tsuzuki add <path>");
+                }
                 ExitCode::SUCCESS
             }
         };
@@ -1191,7 +1243,7 @@ fn transition_series(
             }
             Ok(pause_drop::Outcome::NoOp) => lines.push((name, transition.already)),
             Err(e) => {
-                let _ = fail(&e.to_string());
+                let _ = fail(&format!("\"{name}\": {e}"));
                 failed = true;
             }
         }
@@ -1272,7 +1324,7 @@ fn sync_login_command(config: &Config) -> ExitCode {
         ));
     }
 
-    println!("Logged in to MyAnimeList.");
+    println!("✓ logged in to MyAnimeList");
     ExitCode::SUCCESS
 }
 
@@ -1625,7 +1677,7 @@ fn doctor_command(
                     outcome = doctor::check_tsuzuki_lua(target);
                 }
                 Err(e) => {
-                    eprintln!("warning: failed to install mpv script for {label} mpv: {e}");
+                    eprintln!("⚠ could not install the mpv script for {label} mpv: {e}");
                 }
             }
         }
@@ -1633,6 +1685,8 @@ fn doctor_command(
         let mut script_checks = vec![outcome.result];
         script_checks.extend(doctor::check_mpv_log_dirs(&script_log::mpv_log_dirs(home)));
         results.push(doctor::combine("mpv script", &ok_message, &script_checks));
+    } else if fix {
+        println!("⚠ nothing to fix — mpv not found");
     }
 
     let root_checks = doctor::check_tracked_roots(config, home);

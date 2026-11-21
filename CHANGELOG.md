@@ -2,6 +2,14 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- `start`, `status` and `list` point to `tsuzuki add <path>` when nothing is tracked, and `list` tells an empty root from no roots.
+- `add` shows how many series it found and the next step.
+- `pause`/`drop` errors name the series; unknown names point to `tsuzuki list`.
+- `doctor` no longer counts a missing MyAnimeList login as an issue, and `doctor --fix` says when mpv isn't found.
+- `--help` shows the first-run order; clearer `exclude` messages and consistent `✓`/`⚠` wording.
+
 ## [v0.1.10]
 
 - Fix the `resume`/`start` pickers garbling the screen when the terminal is small or resized.

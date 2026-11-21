@@ -74,11 +74,11 @@ impl fmt::Display for ExcludeError {
             ExcludeError::WholeSeries { relative_path } => write!(
                 f,
                 "cannot exclude \"{relative_path}\" — it's an entire series (a depth-1 \
-                 directory). Don't track it, or use a future `drop`, instead of excluding it."
+                 directory). To set it aside, use `tsuzuki drop`; to skip files inside it, exclude those paths instead."
             ),
             ExcludeError::TrackedRoot { relative_path } => write!(
                 f,
-                "cannot exclude \"{relative_path}\" — it's a tracked root. Untrack it instead."
+                "cannot exclude \"{relative_path}\" — it's a tracked root. To untrack it, remove it from [roots] paths in config.toml."
             ),
             ExcludeError::InsideNestedRoot {
                 relative_path,
@@ -491,7 +491,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "cannot exclude \"Rewatch\" — it's a tracked root. Untrack it instead."
+            "cannot exclude \"Rewatch\" — it's a tracked root. To untrack it, remove it from [roots] paths in config.toml."
         );
         assert!(config.exclusions.is_empty());
 

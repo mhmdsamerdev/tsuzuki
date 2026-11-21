@@ -6,7 +6,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "tsuzuki", version, about = "Continue where you left off.")]
+#[command(
+    name = "tsuzuki",
+    version,
+    about = "Continue where you left off.",
+    after_help = "First run:\n  tsuzuki doctor --fix     install the mpv script\n  tsuzuki add ~/Anime      track the folder that holds your series\n  tsuzuki                  resume where you left off"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -32,7 +37,7 @@ pub enum Command {
     /// List all tracked series and their progress/status
     List,
 
-    /// Register one or more tracked roots
+    /// Track a folder whose subfolders are your series
     Add {
         /// Directories to track; their immediate children become series.
         /// `ani-cli` tracks ani-cli streams instead (a folder of that name

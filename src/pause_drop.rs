@@ -24,10 +24,7 @@ pub enum ActionError {
 impl fmt::Display for ActionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ActionError::NoRecord => write!(
-                f,
-                "no progress to act on for this series — it was never started"
-            ),
+            ActionError::NoRecord => write!(f, "no progress to act on — it was never started"),
             ActionError::InvalidTransition { from, action } => {
                 let from = match from {
                     Status::InProgress => "in progress",

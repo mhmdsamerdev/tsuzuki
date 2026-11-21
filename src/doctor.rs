@@ -641,7 +641,7 @@ pub fn check_ani_cli(facts: &AniCliFacts) -> Vec<CheckResult> {
 /// Maps a resolved [`crate::mal::TokenStatus`] to a `CheckResult`. No
 /// `--fix`: `sync login` opens a browser, so the user runs it.
 ///
-/// - Not configured or not logged in warns: MAL sync is optional.
+/// - Not configured warns; not logged in is fine, since MAL sync is optional.
 /// - A rejected refresh fails: the stored token is dead.
 /// - A network error warns: offline says nothing about the token.
 pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
@@ -649,9 +649,8 @@ pub fn check_mal_auth(status: &crate::mal::TokenStatus) -> CheckResult {
     match status {
         TokenStatus::NotConfigured => CheckResult::warn("MyAnimeList", "not configured")
             .with_action("set [mal] client_id in config.toml, then run `tsuzuki sync login`"),
-        TokenStatus::NotLoggedIn => {
-            CheckResult::warn("MyAnimeList", "not logged in").with_action("tsuzuki sync login")
-        }
+        TokenStatus::NotLoggedIn => CheckResult::ok("MyAnimeList", "not set up (optional)")
+            .with_action("tsuzuki sync login"),
         TokenStatus::Valid { .. } => CheckResult::ok("MyAnimeList", "signed in"),
         TokenStatus::Refreshed { .. } => CheckResult::ok("MyAnimeList", "signed in"),
         TokenStatus::RefreshRejected(_) => {
@@ -1420,9 +1419,13 @@ mod tests {
     }
 
     #[test]
-    fn mal_auth_not_logged_in_is_warn() {
+    fn mal_auth_not_logged_in_is_an_ok_optional_row_with_the_login_action() {
         let r = check_mal_auth(&TokenStatus::NotLoggedIn);
-        assert_eq!(r.level, Level::Warn);
+        assert_eq!(
+            r,
+            CheckResult::ok("MyAnimeList", "not set up (optional)")
+                .with_action("tsuzuki sync login")
+        );
     }
 
     #[test]

@@ -150,7 +150,7 @@ fn add_ani_cli_enables_the_source_without_tracking_a_root() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "✓ ani-cli — added\n"
+        "✓ ani-cli — added\n→ tsuzuki doctor\n"
     );
     let config = config_text(home);
     assert!(config.contains("[ani_cli]\nenabled = true\n"), "{config}");

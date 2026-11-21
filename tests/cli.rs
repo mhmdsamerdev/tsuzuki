@@ -351,7 +351,7 @@ fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
 
     let suggested = run_ok(home, &["exclude"]);
     assert!(
-        suggested.contains("Anitomy-suggested candidates (not yet excluded):"),
+        suggested.contains("Likely specials, OVAs or movies (not yet excluded):"),
         "got: {suggested}"
     );
     assert!(
@@ -369,9 +369,9 @@ fn exclusion_workflow_suggest_confirm_removes_from_order_and_is_idempotent() {
 
     // Bare `exclude` no longer suggests it.
     let suggested_after = run_ok(home, &["exclude"]);
-    assert!(
-        !suggested_after.contains("OVA"),
-        "an already-excluded candidate must not be suggested again, got: {suggested_after}"
+    assert_eq!(
+        suggested_after, "No likely specials, OVAs or movies found under any tracked root.\n",
+        "an already-excluded candidate must not be suggested again"
     );
 
     // Exclusion applies before ordering, so the file count drops to 2.
@@ -1172,7 +1172,10 @@ fn pause_multiple_series_with_unknown_name_pauses_the_rest_and_exits_nonzero() {
         stdout_of(&out),
         "✓ \"Alpha\" — paused\n✓ \"Beta\" — paused\n"
     );
-    assert_eq!(stderr_of(&out), "error: no tracked series named \"Nope\"\n");
+    assert_eq!(
+        stderr_of(&out),
+        "error: no tracked series named \"Nope\" — run `tsuzuki list` to see tracked series\n"
+    );
     assert_eq!(count_status(home, "paused"), 2);
 }
 
@@ -1191,7 +1194,7 @@ fn drop_multiple_series_with_never_started_one_drops_the_rest_and_exits_nonzero(
     );
     assert_eq!(
         stderr_of(&out),
-        "error: no progress to act on for this series — it was never started\n"
+        "error: \"Fresh\": no progress to act on — it was never started\n"
     );
     assert_eq!(count_status(home, "dropped"), 2);
 }
@@ -1212,7 +1215,7 @@ fn pause_multiple_series_with_dropped_one_rejects_only_that_one_and_keeps_its_po
     assert_eq!(stdout_of(&out), "✓ \"Beta\" — paused\n");
     assert_eq!(
         stderr_of(&out),
-        "error: cannot pause a series that's currently dropped\n"
+        "error: \"Alpha\": cannot pause a series that's currently dropped\n"
     );
     assert_eq!(count_status(home, "dropped"), 1);
     assert_eq!(count_status(home, "paused"), 1);
@@ -1272,7 +1275,12 @@ fn add_multiple_paths_tracks_each_as_typed_and_repeat_is_already_tracked() {
     let (a_s, b_s) = (a.to_str().unwrap(), b.to_str().unwrap());
 
     let out = run_ok(home, &["add", a_s, b_s]);
-    assert_eq!(out, format!("✓ {a_s} — added\n✓ {b_s} — added\n"));
+    assert_eq!(
+        out,
+        format!(
+            "✓ {a_s} — added (no series found)\n✓ {b_s} — added (no series found)\n→ tsuzuki\n"
+        )
+    );
     let config = fs::read_to_string(config_path(home)).unwrap();
     assert!(
         config.contains(a_s) && config.contains(b_s),
@@ -1301,7 +1309,9 @@ fn add_multiple_paths_with_missing_one_adds_the_rest_and_exits_nonzero() {
     assert!(!out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!("✓ {a_s} — added\n✓ {b_s} — added\n")
+        format!(
+            "✓ {a_s} — added (no series found)\n✓ {b_s} — added (no series found)\n→ tsuzuki\n"
+        )
     );
     assert!(
         stderr_of(&out).starts_with("error: "),
@@ -1368,7 +1378,7 @@ fn exclude_without_paths_still_lists_candidates_and_never_mutates_config() {
     let out = run_ok(home, &["exclude"]);
     assert_eq!(
         out,
-        "No Anitomy-suggested candidates found under any tracked root.\n"
+        "No likely specials, OVAs or movies found under any tracked root.\n"
     );
     assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
 }
@@ -1664,7 +1674,7 @@ fn start_with_root_folder_name_is_case_sensitive() {
     assert_eq!(stdout_of(&out), "");
     assert_eq!(
         stderr_of(&out),
-        "error: no tracked series or root named \"RE\"\n"
+        "error: no tracked series or root named \"RE\" — run `tsuzuki list` to see tracked series\n"
     );
 }
 
@@ -1683,7 +1693,7 @@ fn start_with_unknown_name_errors_without_listing_or_writing() {
         assert_eq!(stdout_of(out), "");
         assert_eq!(
             stderr_of(out),
-            "error: no tracked series or root named \"nope\"\n"
+            "error: no tracked series or root named \"nope\" — run `tsuzuki list` to see tracked series\n"
         );
     }
     assert_eq!(snapshot(home), before);
@@ -2067,7 +2077,7 @@ fn pause_drop_and_exclude_with_a_root_nested_in_another_root_never_see_it_as_a_s
         assert_eq!(stdout_of(&out), "", "{cmd}");
         assert_eq!(
             stderr_of(&out),
-            "error: no tracked series named \"rewatch\"\n",
+            "error: no tracked series named \"rewatch\" — run `tsuzuki list` to see tracked series\n",
             "{cmd}"
         );
         let scoped = run(home, &[cmd, "rewatch", "--root", &roots[0]]);
@@ -2078,7 +2088,7 @@ fn pause_drop_and_exclude_with_a_root_nested_in_another_root_never_see_it_as_a_s
     assert!(!exclude.status.success());
     assert_eq!(
         stderr_of(&exclude),
-        "error: cannot exclude \"rewatch\" — it's a tracked root. Untrack it instead.\n"
+        "error: cannot exclude \"rewatch\" — it's a tracked root. To untrack it, remove it from [roots] paths in config.toml.\n"
     );
     assert_eq!(snapshot(home), before);
 }
@@ -2250,7 +2260,7 @@ fn sync_link_with_a_root_nested_in_another_root_is_rejected_before_any_network_c
         assert_eq!(stdout_of(&out), "", "{args:?}");
         assert_eq!(
             stderr_of(&out),
-            "error: no tracked series named \"rewatch\"\n",
+            "error: no tracked series named \"rewatch\" — run `tsuzuki list` to see tracked series\n",
             "{args:?}"
         );
     }
@@ -2368,7 +2378,7 @@ fn sync_exclude_errors_leave_config_untouched_and_do_not_block_other_targets() {
     assert!(!unknown.status.success());
     assert_eq!(
         stderr_of(&unknown),
-        "error: no tracked series or root named \"Nope\"\n"
+        "error: no tracked series or root named \"Nope\" — run `tsuzuki list` to see tracked series\n"
     );
 
     let bad_root = run(home, &["sync", "exclude", "--root", "/nowhere"]);
@@ -2558,7 +2568,7 @@ fn sync_exclude_naming_a_nested_root_with_root_flag_is_not_a_series() {
     assert!(!out.status.success());
     assert_eq!(
         stderr_of(&out),
-        "error: no tracked series named \"Specials\"\n"
+        "error: no tracked series named \"Specials\" — run `tsuzuki list` to see tracked series\n"
     );
     assert_eq!(fs::read_to_string(config_path(home)).unwrap(), before);
 }

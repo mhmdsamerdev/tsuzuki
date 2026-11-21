@@ -78,10 +78,10 @@ updated_at = 1
         "a series whose folder still exists must never be reported as orphaned, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("MyAnimeList") && stdout.contains("not logged in"),
+        stdout.contains("✓ MyAnimeList — not set up (optional)"),
         "Phase 8a-correction: an unset [mal] client_id now resolves to the built-in default \
          client_id (no per-user registration required), so a fresh $HOME with no mal_token.toml \
-         must report the real mal-auth check as not-logged-in (WARN) — not \"not configured\" \
+         must report the real mal-auth check as optional and not set up (OK) — not \"not configured\" \
          (that state is no longer reachable from an empty config), and not the old Phase-7 \
          placeholder line either, got:\n{stdout}"
     );
