@@ -1,9 +1,9 @@
-**Editing this file: KEEP IT SHORT. No logs, no diff notes, no change history. It only tells a new AI session how I work and what this project is and its key architecture. Don't update it unless I ask.**
+**Editing this file: KEEP IT SHORT. No logs, no diff notes, no change history. It only tells a new AI session how the maintainer works and what this project is and its key architecture. Don't update it unless the maintainer asks.**
 
 # Tsuzuki
 
 Local-first Rust CLI (続き). It remembers what you were watching in mpv (local files, and ani-cli streams) and resumes it with `tsuzuki`.
-Not a player, library manager, or MAL replacement. Maintenance mode: fixes, small enhancements, dependency upkeep. Product pitch: `README.md`. Commands and dev setup: `docs/development.md`.
+Not a player, library manager, or MAL replacement. Maintenance mode: fixes, small enhancements, dependency upkeep. Product pitch: `README.md`. Commands and dev setup: `CONTRIBUTING.md`.
 `README.md` is for general users: don't document niche setups there (custom mpv, Snap).
 
 ## How to work
@@ -100,12 +100,11 @@ Every test guards a named invariant. Rules are checkable, not taste.
 
 ## Code comments
 - Short, clear, focused; explain only the code they sit on. No diff/change notes ("added", "now", "was").
-- If you meet an existing comment that breaks this, fix it without asking.
 
 ## Git
 - After any change, suggest a commit message.
 - Only commit when asked. Messages short, focused, conventional-style (`feat:`, `fix:`, `docs:`), never mention AI or add co-author lines.
-- NEVER `git tag`. Tags trigger GitHub/PyPI releases; the user does that manually.
+- NEVER `git tag`. Tags trigger GitHub/PyPI releases; the maintainer does that manually.
 
 ## CHANGELOG.md
 Every user-visible change gets one very short bullet under `## [Unreleased]`.
