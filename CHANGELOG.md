@@ -2,7 +2,7 @@
 
 All notable changes to Tsuzuki are documented here.
 
-## [Unreleased]
+## [v0.2.0]
 
 - `start`, `status` and `list` point to `tsuzuki add <path>` when nothing is tracked, and `list` tells an empty root from no roots.
 - `add` shows how many series it found and the next step.
