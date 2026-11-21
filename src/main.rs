@@ -157,7 +157,7 @@ fn add_command(paths: &[PathBuf], config: &mut Config, config_path: &Path) -> Ex
                 lines.push((as_typed.display().to_string(), "added"));
             }
             Err(e) => {
-                fail(&e.to_string());
+                let _ = fail(&e.to_string());
                 failed = true;
             }
         }
@@ -221,11 +221,11 @@ fn exclude_command(
                 matches,
             }) => {
                 let roots: Vec<String> = matches.into_iter().map(|m| m.root).collect();
-                print_ambiguous(&relative_path, "exclude", &roots);
+                let _ = print_ambiguous(&relative_path, "exclude", &roots);
                 failed = true;
             }
             Err(e) => {
-                fail(&e.to_string());
+                let _ = fail(&e.to_string());
                 failed = true;
             }
         }
@@ -292,7 +292,7 @@ fn sync_exclude_command(
                 None,
             ),
             Some(None) => {
-                print_target_error(
+                let _ = print_target_error(
                     &target::TargetError::RootNotFound(
                         root_arg.unwrap().to_string_lossy().into_owned(),
                     ),
@@ -1179,7 +1179,7 @@ fn transition_series(
         let root = match target::resolve_series_root(config, &state, name, root_arg, home) {
             Ok(r) => r,
             Err(e) => {
-                print_target_error(&e, transition.command_name);
+                let _ = print_target_error(&e, transition.command_name);
                 failed = true;
                 continue;
             }
@@ -1191,7 +1191,7 @@ fn transition_series(
             }
             Ok(pause_drop::Outcome::NoOp) => lines.push((name, transition.already)),
             Err(e) => {
-                fail(&e.to_string());
+                let _ = fail(&e.to_string());
                 failed = true;
             }
         }
@@ -2350,7 +2350,7 @@ mod tests {
         state::write(&state_path, &before).unwrap();
 
         // The exit code is not asserted: unrelated mpv checks may FAIL on this home.
-        doctor_command(false, false, &config, &state_path, Some(&home));
+        let _ = doctor_command(false, false, &config, &state_path, Some(&home));
 
         let after = state::read(&state_path).unwrap();
         assert_eq!(after, before);
