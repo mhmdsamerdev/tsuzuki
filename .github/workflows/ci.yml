@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Called by release.yml so a tag can't publish unless CI passes.
+  workflow_call:
+    inputs:
+      plan:
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always

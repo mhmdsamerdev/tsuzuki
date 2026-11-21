@@ -16,3 +16,5 @@ targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 install-path = "~/.local/bin"
 # No bundled updater
 install-updater = false
+# Run CI on the tagged commit, in parallel with the builds; the release waits for it.
+local-artifacts-jobs = ["./ci"]
