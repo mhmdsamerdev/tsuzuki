@@ -220,15 +220,9 @@ fn first_time_onboarding_add_list_and_start_a_series() {
         started.contains("Starting \"Monster\" — episode 1 (00:00)"),
         "got: {started}"
     );
-    assert!(
-        started.contains(
-            &anime_root
-                .join("Monster")
-                .join("ep01.mkv")
-                .display()
-                .to_string()
-        ),
-        "must print exactly which file it opened, got: {started}"
+    assert_eq!(
+        started,
+        "→ Starting \"Monster\" — episode 1 (00:00)\n  → ep01.mkv\n"
     );
 }
 
@@ -1744,7 +1738,7 @@ fn start_without_argument_and_nothing_to_start_still_exits_zero() {
 fn start_with_series_name_and_no_root_of_that_name_still_plays_the_series() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
-    let roots = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
+    let _ = library(home, &[("anime", &["Monster"]), ("re", &["Bleach"])]);
     bypass_real_mpv(home);
 
     let out = run(home, &["start", "Bleach"]);
@@ -1752,10 +1746,7 @@ fn start_with_series_name_and_no_root_of_that_name_still_plays_the_series() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!(
-            "→ Starting \"Bleach\" — episode 1 (00:00)\n  → {}/Bleach/ep01.mkv\n",
-            roots[1]
-        )
+        "→ Starting \"Bleach\" — episode 1 (00:00)\n  → ep01.mkv\n"
     );
 }
 
@@ -1771,10 +1762,7 @@ fn start_with_series_and_root_flag_behaves_as_before() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!(
-            "→ Starting \"Monster\" — episode 1 (00:00)\n  → {}/Monster/ep01.mkv\n",
-            roots[1]
-        )
+        "→ Starting \"Monster\" — episode 1 (00:00)\n  → ep01.mkv\n"
     );
 }
 
@@ -1809,10 +1797,7 @@ fn start_with_name_that_is_both_a_series_and_a_root_errors_and_runs_nothing() {
     assert!(series.status.success());
     assert_eq!(
         stdout_of(&series),
-        format!(
-            "→ Starting \"re\" — episode 1 (00:00)\n  → {}/re/ep01.mkv\n",
-            roots[0]
-        )
+        "→ Starting \"re\" — episode 1 (00:00)\n  → ep01.mkv\n"
     );
 }
 
@@ -1908,10 +1893,7 @@ fn resume_with_root_having_exactly_one_in_progress_series_plays_it_without_a_pro
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!(
-            "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
-            roots[1]
-        )
+        "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → ep01.mkv\n"
     );
 }
 
@@ -1929,10 +1911,7 @@ fn resume_root_flag_without_series_scopes_to_that_root() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out),
-        format!(
-            "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → {}/Bleach/ep01.mkv\n",
-            roots[1]
-        )
+        "→ Resuming \"Bleach\" — episode 1 (05:20)\n  → ep01.mkv\n"
     );
 }
 
@@ -1982,7 +1961,7 @@ fn watched_single_file(home: &Path, name: &str, file: &str, position: f64) -> Pa
 fn season_two_episode_shows_season_in_status_list_and_resume() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
-    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S02E01.mkv", 224.0);
+    watched_single_file(home, "Bakuman", "[Judas] Bakuman - S02E01.mkv", 224.0);
 
     assert_eq!(run_ok(home, &["status"]), "Bakuman — S02E01 (03:44)\n");
     assert_eq!(
@@ -1991,10 +1970,7 @@ fn season_two_episode_shows_season_in_status_list_and_resume() {
     );
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
-        format!(
-            "→ Resuming \"Bakuman\" — Season 2, Episode 1 (03:44)\n  → {}\n",
-            path.display()
-        )
+        "→ Resuming \"Bakuman\" — Season 2, Episode 1 (03:44)\n  → [Judas] Bakuman - S02E01.mkv\n"
     );
 }
 
@@ -2002,15 +1978,24 @@ fn season_two_episode_shows_season_in_status_list_and_resume() {
 fn season_one_episode_output_is_unchanged() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
-    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - S01E01.mkv", 224.0);
+    watched_single_file(home, "Bakuman", "[Judas] Bakuman - S01E01.mkv", 224.0);
 
     assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1 (03:44)\n");
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
-        format!(
-            "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
-            path.display()
-        )
+        "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → [Judas] Bakuman - S01E01.mkv\n"
+    );
+}
+
+#[test]
+fn resume_shows_episode_path_relative_to_series_folder_for_nested_season_dir() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+    watched_single_file(home, "Frieren", "Season 1/Frieren - 05.mkv", 750.0);
+
+    assert_eq!(
+        run_ok(home, &["resume", "Frieren"]),
+        "→ Resuming \"Frieren\" — episode 5 (12:30)\n  → Season 1/Frieren - 05.mkv\n"
     );
 }
 
@@ -2018,15 +2003,12 @@ fn season_one_episode_output_is_unchanged() {
 fn episode_without_a_detected_season_output_is_unchanged() {
     let home_dir = tempfile::tempdir().unwrap();
     let home = home_dir.path();
-    let path = watched_single_file(home, "Bakuman", "[Judas] Bakuman - 01.mkv", 224.0);
+    watched_single_file(home, "Bakuman", "[Judas] Bakuman - 01.mkv", 224.0);
 
     assert_eq!(run_ok(home, &["status"]), "Bakuman — ep. 1 (03:44)\n");
     assert_eq!(
         run_ok(home, &["resume", "Bakuman"]),
-        format!(
-            "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → {}\n",
-            path.display()
-        )
+        "→ Resuming \"Bakuman\" — episode 1 (03:44)\n  → [Judas] Bakuman - 01.mkv\n"
     );
 }
 

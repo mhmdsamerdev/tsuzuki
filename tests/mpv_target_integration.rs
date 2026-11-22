@@ -451,10 +451,7 @@ fn launch_prints_a_neutral_line_because_tsuzuki_cannot_know_mpv_succeeded() {
 
     assert_eq!(
         stdout(&out),
-        format!(
-            "→ Starting \"Monster\" — episode 1 (00:00)\n  → {}\n",
-            env.episode().display()
-        )
+        "→ Starting \"Monster\" — episode 1 (00:00)\n  → ep01.mkv\n"
     );
     assert_eq!(stderr(&out), "");
 }

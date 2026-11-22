@@ -624,7 +624,8 @@ fn play_series(
                         anitomy::episode_phrase(target.season, target.episode_number),
                         format_timestamp(target.position_seconds),
                     );
-                    println!("  → {}", target.file.display());
+                    let series_dir = roots::expand_tilde(Path::new(root), home).join(name);
+                    println!("  → {}", relative_to_series(&target.file, &series_dir));
                     match lost {
                         Some(_) => reset_lost_record(state, state_path, root, name, &target, home),
                         None => ExitCode::SUCCESS,
@@ -635,6 +636,16 @@ fn play_series(
         }
         None => fail(&format!("no episodes found for \"{name}\"")),
     }
+}
+
+/// `file` relative to its series folder, or the bare file name if it isn't under it.
+fn relative_to_series(file: &Path, series_dir: &Path) -> String {
+    file.strip_prefix(series_dir)
+        .ok()
+        .or_else(|| file.file_name().map(Path::new))
+        .unwrap_or(file)
+        .display()
+        .to_string()
 }
 
 /// Moves a lost record to the episode just launched, so `status` and later reconciles match what is on disk.

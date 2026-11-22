@@ -4,6 +4,7 @@ All notable changes to Tsuzuki are documented here.
 
 ## [Unreleased]
 
+- `start`/`resume` show the episode file relative to its series folder instead of the full path.
 - Resuming a series whose saved episode file is gone warns and resets its record to the first episode.
 
 ## [v0.2.0]
