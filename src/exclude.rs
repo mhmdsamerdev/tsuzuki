@@ -105,7 +105,7 @@ impl fmt::Display for ExcludeError {
                 )?;
                 writeln!(f)?;
                 for (i, m) in matches.iter().enumerate() {
-                    writeln!(f, "  {}. {} — {relative_path}", i + 1, m.root)?;
+                    writeln!(f, "  {}. {}", i + 1, m.resolved.display())?;
                 }
                 writeln!(f)?;
                 writeln!(f, "Re-run with --root to specify which one:")?;
@@ -627,8 +627,8 @@ mod tests {
 
         let expected = "Ambiguous: \"One Piece/Specials\" exists under more than one tracked root:\n\
              \n\
-             \x20\x201. ~/Anime — One Piece/Specials\n\
-             \x20\x202. ~/AltAnime — One Piece/Specials\n\
+             \x20\x201. /home/user/Anime/One Piece/Specials\n\
+             \x20\x202. /home/user/AltAnime/One Piece/Specials\n\
              \n\
              Re-run with --root to specify which one:\n\
              \x20\x20tsuzuki exclude \"One Piece/Specials\" --root ~/Anime\n\

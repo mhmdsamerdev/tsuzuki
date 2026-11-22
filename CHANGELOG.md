@@ -6,6 +6,7 @@ All notable changes to Tsuzuki are documented here.
 
 - `start`/`resume` show the episode file relative to its series folder instead of the full path.
 - Resuming a series whose saved episode file is gone warns and resets its record to the first episode.
+- `doctor` runs its Flatpak access checks in parallel, so it finishes much faster with Flatpak mpv.
 
 ## [v0.2.0]
 

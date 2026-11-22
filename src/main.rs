@@ -1712,20 +1712,30 @@ fn doctor_command(
                     symlink_targets.extend(series::outside_targets(&expanded, real_root, &tracked));
                     roots_real.push(real_root.clone());
                 }
-                doctor::flatpak_probe_paths(&roots_real, &symlink_targets)
-                    .into_iter()
-                    .map(|probed| {
-                        let answer = std::process::Command::new("flatpak")
-                            .arg("info")
-                            .arg(format!("--file-access={}", probed.display()))
-                            .arg("io.mpv.Mpv")
-                            .output()
-                            .ok()
-                            .filter(|o| o.status.success())
-                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                        (probed.display().to_string(), answer)
-                    })
-                    .collect()
+                let probed = doctor::flatpak_probe_paths(&roots_real, &symlink_targets);
+                // Each `flatpak info` is a slow fork; run them side by side.
+                std::thread::scope(|s| {
+                    let handles: Vec<_> = probed
+                        .iter()
+                        .map(|probed| {
+                            s.spawn(move || {
+                                std::process::Command::new("flatpak")
+                                    .arg("info")
+                                    .arg(format!("--file-access={}", probed.display()))
+                                    .arg("io.mpv.Mpv")
+                                    .output()
+                                    .ok()
+                                    .filter(|o| o.status.success())
+                                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                            })
+                        })
+                        .collect();
+                    probed
+                        .iter()
+                        .zip(handles)
+                        .map(|(probed, h)| (probed.display().to_string(), h.join().unwrap_or(None)))
+                        .collect()
+                })
             } else {
                 Vec::new()
             };
