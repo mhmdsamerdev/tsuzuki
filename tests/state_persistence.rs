@@ -161,3 +161,84 @@ fn list_and_status_read_back_the_same_real_persisted_state() {
     let list_stdout = String::from_utf8_lossy(&list.stdout);
     assert!(list_stdout.contains("In progress"), "got: {list_stdout}");
 }
+
+#[test]
+fn resume_after_the_saved_episode_moved_warns_and_resets_the_record_to_the_first_episode() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = home_dir.path();
+
+    let series_dir = home.join("Anime").join("Ajin");
+    fs::create_dir_all(&series_dir).unwrap();
+    fs::File::create(series_dir.join("ep01.mkv")).unwrap();
+    fs::File::create(series_dir.join("ep02.mkv")).unwrap();
+    assert!(run(home, &["add", "~/Anime"]).status.success());
+
+    let config_path = home.join(".config/tsuzuki/config.toml");
+    let patched = fs::read_to_string(&config_path).unwrap().replace(
+        "install = \"auto\"\ncommand = \"\"",
+        "install = \"custom\"\ncommand = \"true\"",
+    );
+    fs::write(&config_path, patched).unwrap();
+
+    // Build the record through the real command: ep02 at 09:20.
+    let log_dir = home.join(".local/share/tsuzuki/mpv-log");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::write(
+        log_dir.join("fake-entry"),
+        format!(
+            "# {}\nduration=\nposition=560.250000\nreason=quit\n",
+            series_dir.join("ep02.mkv").display()
+        ),
+    )
+    .unwrap();
+    assert!(run(home, &["resume", "Ajin"]).status.success());
+
+    // The user reorganises the folder into a season subfolder.
+    let season_dir = series_dir.join("S01");
+    fs::create_dir_all(&season_dir).unwrap();
+    fs::rename(series_dir.join("ep01.mkv"), season_dir.join("ep01.mkv")).unwrap();
+    fs::rename(series_dir.join("ep02.mkv"), season_dir.join("ep02.mkv")).unwrap();
+
+    let resume = run(home, &["resume", "Ajin"]);
+    assert!(resume.status.success());
+    let stdout = String::from_utf8_lossy(&resume.stdout);
+    let stderr = String::from_utf8_lossy(&resume.stderr);
+    assert!(
+        stdout.contains("→ Starting \"Ajin\" from the first episode — episode 1 (00:00)"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("⚠ \"Ajin\": saved episode Ajin/ep02.mkv is gone (moved or renamed?)"),
+        "stderr: {stderr}"
+    );
+
+    let state_text = fs::read_to_string(home.join(".local/share/tsuzuki/state.toml")).unwrap();
+    let mut state: toml::Table = toml::from_str(&state_text).unwrap();
+    state["series"].as_array_mut().unwrap()[0]
+        .as_table_mut()
+        .unwrap()
+        .remove("updated_at");
+    let expected: toml::Table = toml::from_str(
+        r#"
+        [[series]]
+        root = "~/Anime"
+        name = "Ajin"
+        status = "in_progress"
+        current_relative_path = "Ajin/S01/ep01.mkv"
+        position_seconds = 0.0
+        episode_number = 1
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        state["series"], expected["series"],
+        "state.toml:\n{state_text}"
+    );
+
+    let status = run(home, &["status"]);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("Ajin — ep. 1"),
+        "status: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+}

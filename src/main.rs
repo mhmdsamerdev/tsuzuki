@@ -513,6 +513,8 @@ struct PlaybackTarget {
     position_seconds: f64,
     episode_number: u32,
     season: Option<u32>,
+    /// A live record's saved file is gone, so playback restarts at the first episode.
+    record_lost: bool,
 }
 
 /// Resolves the file and position to play for a series. An `in_progress` or
@@ -551,6 +553,8 @@ fn playback_target(
                 .position(|p| roots::normalize(p, home) == real_target)
                 .map(|idx| (idx, r.position_seconds))
         });
+    let record_lost = resolved.is_none()
+        && record.is_some_and(|r| !matches!(r.status, Status::Dropped | Status::Completed));
     let (index, position_seconds) = resolved.unwrap_or((0, 0.0));
 
     let identities = anitomy::episode_identity(&ordered);
@@ -565,6 +569,7 @@ fn playback_target(
         position_seconds,
         episode_number,
         season,
+        record_lost,
     })
 }
 
@@ -599,19 +604,67 @@ fn play_series(
     }
     let record = state.find(root, name);
     match playback_target(config, home, root, name, record) {
-        Some(target) => match launch::resume_playback(mpv, &target.file, target.position_seconds) {
-            Ok(()) => {
-                println!(
-                    "→ {verb} \"{name}\" — {} ({})",
-                    anitomy::episode_phrase(target.season, target.episode_number),
-                    format_timestamp(target.position_seconds),
+        Some(target) => {
+            let lost = record.filter(|_| target.record_lost);
+            if let Some(lost) = lost {
+                eprintln!(
+                    "⚠ \"{name}\": saved episode {} is gone (moved or renamed?)",
+                    lost.current_relative_path
                 );
-                println!("  → {}", target.file.display());
-                ExitCode::SUCCESS
             }
-            Err(e) => fail(&format!("failed to launch mpv: {e}")),
-        },
+            match launch::resume_playback(mpv, &target.file, target.position_seconds) {
+                Ok(()) => {
+                    let line = if lost.is_some() {
+                        format!("→ Starting \"{name}\" from the first episode")
+                    } else {
+                        format!("→ {verb} \"{name}\"")
+                    };
+                    println!(
+                        "{line} — {} ({})",
+                        anitomy::episode_phrase(target.season, target.episode_number),
+                        format_timestamp(target.position_seconds),
+                    );
+                    println!("  → {}", target.file.display());
+                    match lost {
+                        Some(_) => reset_lost_record(state, state_path, root, name, &target, home),
+                        None => ExitCode::SUCCESS,
+                    }
+                }
+                Err(e) => fail(&format!("failed to launch mpv: {e}")),
+            }
+        }
         None => fail(&format!("no episodes found for \"{name}\"")),
+    }
+}
+
+/// Moves a lost record to the episode just launched, so `status` and later reconciles match what is on disk.
+fn reset_lost_record(
+    state: &State,
+    state_path: &Path,
+    root: &str,
+    name: &str,
+    target: &PlaybackTarget,
+    home: Option<&Path>,
+) -> ExitCode {
+    let expanded_root = roots::expand_tilde(Path::new(root), home);
+    let mut updated = state.clone();
+    if let Some(record) = updated.find_mut(root, name) {
+        record.current_relative_path = target
+            .file
+            .strip_prefix(&expanded_root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| name.to_string());
+        record.position_seconds = 0.0;
+        record.episode_number = Some(target.episode_number);
+        record.season_number = target.season;
+        record.updated_at = state::now_unix();
+    }
+    match state::write(state_path, &updated) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(&format!(
+            "could not write state at {}: {e}",
+            state_path.display()
+        )),
     }
 }
 
@@ -2408,5 +2461,39 @@ mod tests {
 
         let after = state::read(&state_path).unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn playback_target_flags_a_lost_record_only_for_live_statuses_with_a_missing_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("Ajin/S01")).unwrap();
+        fs::File::create(root.join("Ajin/S01/ep01.mkv")).unwrap();
+        let mut config = Config::default();
+        config.roots.paths.push(root.to_string_lossy().into_owned());
+        let root_str = root.to_string_lossy().into_owned();
+
+        let flagged = |status: Status, path: &str| {
+            let mut r = record(root, "Ajin", status);
+            r.current_relative_path = path.to_string();
+            playback_target(&config, None, &root_str, "Ajin", Some(&r))
+                .unwrap()
+                .record_lost
+        };
+        for status in [
+            Status::InProgress,
+            Status::Paused,
+            Status::Dropped,
+            Status::Completed,
+        ] {
+            let expected = match status {
+                Status::InProgress | Status::Paused => true,
+                Status::Dropped | Status::Completed => false,
+            };
+            assert_eq!(flagged(status, "Ajin/ep12.mkv"), expected, "{status:?}");
+            assert!(!flagged(status, "Ajin/S01/ep01.mkv"), "{status:?} present");
+        }
+        let none = playback_target(&config, None, &root_str, "Ajin", None).unwrap();
+        assert!(!none.record_lost);
     }
 }

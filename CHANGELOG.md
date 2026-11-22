@@ -2,6 +2,10 @@
 
 All notable changes to Tsuzuki are documented here.
 
+## [Unreleased]
+
+- Resuming a series whose saved episode file is gone warns and resets its record to the first episode.
+
 ## [v0.2.0]
 
 - `start`, `status` and `list` point to `tsuzuki add <path>` when nothing is tracked, and `list` tells an empty root from no roots.
